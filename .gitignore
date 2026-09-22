@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+coverage/
+.DS_Store
+*.log
+.turbo/
+.pnpm-store/
+tmp/
+.idea/
+.vscode/
+*.pem
+docker-data/
