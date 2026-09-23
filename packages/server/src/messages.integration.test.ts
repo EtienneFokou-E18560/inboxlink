@@ -287,6 +287,84 @@ describe("Gmail message list", () => {
     assert.equal(badLimit.status, 400);
   });
 
+  it("forwards Gmail q, label, and structured filters to users.messages.list", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_filters");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const listed = await app.request(
+      `/v1/grants/${grant.id}/messages?limit=3&q=${encodeURIComponent("is:unread")}&from=${encodeURIComponent("ada@example.com")}&label=INBOX&label=UNREAD&includeSpamTrash=true`,
+    );
+    assert.equal(listed.status, 200);
+    const body = (await listed.json()) as { messages: Message[] };
+    assert.equal(body.messages.length, 1);
+
+    const list = hits.find((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?"));
+    assert.ok(list);
+    const listUrl = new URL(list.url, "http://gmail.local");
+    assert.equal(listUrl.searchParams.get("maxResults"), "3");
+    assert.equal(listUrl.searchParams.get("q"), "is:unread from:ada@example.com");
+    assert.deepEqual(listUrl.searchParams.getAll("labelIds"), ["INBOX", "UNREAD"]);
+    assert.equal(listUrl.searchParams.get("includeSpamTrash"), "true");
+    assert.equal(JSON.stringify(body).includes(REFRESH), false);
+  });
+
+  it("rejects invalid filter query params without calling Gmail", async () => {
+    hits = [];
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_bad_filters");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const badLabel = await app.request(`/v1/grants/${grant.id}/messages?label=bad%20label`);
+    assert.equal(badLabel.status, 400);
+    assert.equal(((await badLabel.json()) as { error: string }).error, "invalid_label");
+
+    const badSpam = await app.request(`/v1/grants/${grant.id}/messages?includeSpamTrash=maybe`);
+    assert.equal(badSpam.status, 400);
+    assert.equal(((await badSpam.json()) as { error: string }).error, "invalid_include_spam_trash");
+
+    assert.equal(hits.length, 0);
+  });
+
+  it("applies message filters in multi mode with a Bearer secret", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_multi_filters");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault, "multi");
+
+    const denied = await app.request(
+      `/v1/grants/${grant.id}/messages?subject=${encodeURIComponent("Normalized hello")}`,
+    );
+    assert.equal(denied.status, 401);
+
+    const listed = await app.request(
+      `/v1/grants/${grant.id}/messages?subject=${encodeURIComponent("Normalized hello")}&label=INBOX`,
+      { headers: { authorization: "Bearer tenant-api-key-test" } },
+    );
+    assert.equal(listed.status, 200);
+    const list = hits.find((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?"));
+    assert.ok(list);
+    const listUrl = new URL(list.url, "http://gmail.local");
+    assert.equal(listUrl.searchParams.get("q"), 'subject:"Normalized hello"');
+    assert.deepEqual(listUrl.searchParams.getAll("labelIds"), ["INBOX"]);
+  });
+
   it("reads the refresh token sealed on another Postgres instance", async () => {
     hits = [];
     refreshStatus = 200;

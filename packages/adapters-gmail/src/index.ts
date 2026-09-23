@@ -179,17 +179,30 @@ export class GmailAdapter implements MailboxAdapter {
   /**
    * List mailbox messages and normalize each `format=full` resource.
    * Callers pass a short-lived access token. This method does not see the refresh token.
+   * Optional filters map to Gmail `users.messages.list` (`q`, `labelIds`, `includeSpamTrash`).
    */
   async listMessages(input: {
     accessToken: string;
     grantId: string;
     maxResults?: number;
     pageToken?: string;
+    /** Gmail search query (`q`). */
+    q?: string;
+    /** Gmail label ids (`labelIds`). */
+    labelIds?: string[];
+    includeSpamTrash?: boolean;
   }): Promise<{ messages: Message[]; nextCursor?: string }> {
     const base = gmailBase(this.config.gmailApiBaseUrl);
     const listUrl = new URL(`${base}/users/me/messages`);
     listUrl.searchParams.set("maxResults", String(input.maxResults ?? 20));
     if (input.pageToken) listUrl.searchParams.set("pageToken", input.pageToken);
+    if (input.q) listUrl.searchParams.set("q", input.q);
+    for (const labelId of input.labelIds ?? []) {
+      listUrl.searchParams.append("labelIds", labelId);
+    }
+    if (input.includeSpamTrash === true) {
+      listUrl.searchParams.set("includeSpamTrash", "true");
+    }
     const listed = await gmailJson<{ messages?: { id: string }[]; nextPageToken?: string }>(
       listUrl,
       input.accessToken,

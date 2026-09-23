@@ -18,6 +18,7 @@ import {
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
+import { parseMessageListFilters } from "../message-filters.js";
 import { syncGmailGrant } from "../sync/gmail-sync.js";
 import {
   DATABASE_UNAVAILABLE_GUIDANCE,
@@ -415,6 +416,16 @@ export function createApp(opts: CreateAppOptions) {
     const cursor = c.req.query("cursor")?.trim() || undefined;
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
 
+    const parsedFilters = parseMessageListFilters({
+      q: c.req.query("q") ?? undefined,
+      from: c.req.query("from") ?? undefined,
+      to: c.req.query("to") ?? undefined,
+      subject: c.req.query("subject") ?? undefined,
+      labels: c.req.queries("label") ?? [],
+      includeSpamTrash: c.req.query("includeSpamTrash") ?? undefined,
+    });
+    if (!parsedFilters.ok) return c.json({ error: parsedFilters.error }, 400);
+
     const access = await openGmailAccess(opts, ready.grant);
     if (!access.ok) return c.json(accessBody(access), access.status);
 
@@ -424,6 +435,9 @@ export function createApp(opts: CreateAppOptions) {
         grantId,
         maxResults: limit,
         pageToken: cursor,
+        q: parsedFilters.filters.q,
+        labelIds: parsedFilters.filters.labelIds,
+        includeSpamTrash: parsedFilters.filters.includeSpamTrash,
       });
       return c.json({ messages: page.messages, nextCursor: page.nextCursor });
     } catch (err) {
