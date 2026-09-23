@@ -62,6 +62,7 @@ export function createAppFromEnv(
             maxRequests: config.rateLimitMaxRequests,
           })
         : null,
+    allowedRedirectOrigins: config.allowedRedirectOrigins,
   });
   return { app, config, store, vault, storeKind };
 }

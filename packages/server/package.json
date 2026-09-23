@@ -25,7 +25,7 @@
     "lint": "tsc -b tsconfig.json",
     "dev": "tsx watch src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "node --import tsx --test src/grants.integration.test.ts src/config.test.ts src/durable-store.integration.test.ts src/messages.integration.test.ts src/log.test.ts src/sync.integration.test.ts src/multi.integration.test.ts"
+    "test": "node --import tsx --test src/grants.integration.test.ts src/grants-public.test.ts src/config.test.ts src/durable-store.integration.test.ts src/messages.integration.test.ts src/log.test.ts src/sync.integration.test.ts src/multi.integration.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
