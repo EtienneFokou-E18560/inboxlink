@@ -10,6 +10,7 @@ import {
   renderConnectPage,
   renderLandingPage,
 } from "@inboxlink/connect-ui";
+import { mountDocsHub } from "../docs-hub/mount.js";
 import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
 import { toPublicGrant, validateExternalUserId, validateRedirectUri } from "../grants-public.js";
 import {
@@ -131,6 +132,9 @@ export function createApp(opts: CreateAppOptions) {
   /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
   app.get("/home", (c) => c.html(renderLandingPage()));
   app.get("/home/", (c) => c.html(renderLandingPage()));
+
+  // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
+  mountDocsHub(app);
 
   app.get("/v1/schema.sql", (c) =>
     c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
