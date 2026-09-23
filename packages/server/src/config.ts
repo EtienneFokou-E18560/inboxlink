@@ -3,6 +3,7 @@ import {
   DEV_API_SECRET_PLACEHOLDER,
   parseTenantSecrets,
 } from "./auth.js";
+import { parseAllowedRedirectOrigins } from "./grants-public.js";
 
 export type ServerConfig = {
   port: number;
@@ -21,6 +22,11 @@ export type ServerConfig = {
   googleClientSecret: string;
   googleRedirectUri: string;
   gmailScopes: string[];
+  /**
+   * Host Connect `redirectUri` origins allowlist.
+   * `null` = permissive (any http(s) URL) — default for single-tenant demo.
+   */
+  allowedRedirectOrigins: string[] | null;
   /** Soft abuse guard for host APIs (multi mode). */
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
@@ -65,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     googleRedirectUri:
       env.GOOGLE_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/gmail/callback`,
     gmailScopes: scopes,
+    allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
     rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
   };

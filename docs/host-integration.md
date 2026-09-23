@@ -91,6 +91,7 @@ Response (shape):
 
 - `externalUserId` — opaque id in **your** user namespace. InboxLink stores it on the grant; use it later for `GET /v1/grants?externalUserId=…`.
 - `redirectUri` — must be a URL **your host** can handle. Do not point it at InboxLink, and do not confuse it with Google’s OAuth redirect (that stays on InboxLink).
+  - Shared Production is permissive by default. Self-hosts / tightened Production may set `ALLOWED_REDIRECT_ORIGINS` (comma-separated origins like `https://your-app.example.com`); then your `redirectUri` origin must match or session create returns `redirectUri_not_allowed`.
 - `products` — optional; defaults to `["messages"]`.
 
 ### 2. Redirect the user to Connect

@@ -55,6 +55,11 @@ export type CreateAppOptions = {
   queue: QueueHandle | null;
   /** Soft abuse guard. Pass `null` to disable (tests). Multi mode enables a default limiter. */
   rateLimiter?: RateLimiter | null;
+  /**
+   * Host Connect `redirectUri` origins allowlist (`null` / omit = permissive).
+   * When set, session create rejects redirect URIs whose origin is not listed.
+   */
+  allowedRedirectOrigins?: string[] | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -174,8 +179,24 @@ export function createApp(opts: CreateAppOptions) {
       products?: string[];
     };
     const externalUserId = validateExternalUserId(body.externalUserId);
-    const redirectUri = validateRedirectUri(body.redirectUri);
+    const redirectUri = validateRedirectUri(
+      body.redirectUri,
+      opts.allowedRedirectOrigins ?? null,
+    );
     if (!externalUserId || !redirectUri) {
+      const basicOk = Boolean(
+        body.redirectUri && validateRedirectUri(body.redirectUri, null),
+      );
+      if (externalUserId && basicOk && opts.allowedRedirectOrigins?.length) {
+        return c.json(
+          {
+            error: "redirectUri_not_allowed",
+            detail:
+              "redirectUri origin is not in ALLOWED_REDIRECT_ORIGINS. Use an allowlisted http(s) origin, or leave ALLOWED_REDIRECT_ORIGINS unset for permissive single-tenant demos.",
+          },
+          400,
+        );
+      }
       return c.json({ error: "externalUserId and redirectUri are required" }, 400);
     }
     const tenantId = c.get("tenantId");

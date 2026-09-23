@@ -26,6 +26,7 @@ describe("public URL and OAuth redirect", () => {
   it("defaults to single mode and maps tenant secrets", () => {
     const single = loadConfig({});
     assert.equal(single.mode, "single");
+    assert.equal(single.allowedRedirectOrigins, null);
     const multi = loadConfig({
       INBOXLINK_MODE: "multi",
       INBOXLINK_API_SECRET: "primary-secret",
@@ -37,5 +38,15 @@ describe("public URL and OAuth redirect", () => {
       default: "primary-secret",
       acme: "acme-secret",
     });
+  });
+
+  it("loads ALLOWED_REDIRECT_ORIGINS when set", () => {
+    const config = loadConfig({
+      ALLOWED_REDIRECT_ORIGINS: "https://app.example.com,http://127.0.0.1:9999",
+    });
+    assert.deepEqual(config.allowedRedirectOrigins, [
+      "https://app.example.com",
+      "http://127.0.0.1:9999",
+    ]);
   });
 });
