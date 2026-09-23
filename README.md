@@ -177,25 +177,25 @@ curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE
 
 ### Host SDK (`@inboxlink/sdk`)
 
+Hosts talk to InboxLink over HTTP. **Do not set `GOOGLE_*` in the host** — Google OAuth stays on the InboxLink server. See [docs/host-integration.md](docs/host-integration.md) and [`examples/host-integration/host.env.example`](examples/host-integration/host.env.example).
+
 ```ts
 import { InboxLink } from "@inboxlink/sdk";
 
-const il = new InboxLink({
-  baseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:8787",
-  apiSecret: process.env.INBOXLINK_API_SECRET ?? "dev-api-secret-change-me",
-});
+// Production + single mode: baseUrl defaults; apiSecret omitted
+const il = new InboxLink();
 
-const session = await il.link.createSession({
+const session = await il.createConnectSession({
   externalUserId: "user-1",
-  redirectUri: "https://your-app.example/done",
+  redirectUri: "http://127.0.0.1:9999/done", // your host callback
 });
-const { grantId } = await il.grants.exchange({ publicToken });
+const { grantId } = await il.completeConnect({ publicToken });
 const { messages } = await il.messages.list(grantId, { limit: 20 });
 const { message } = await il.messages.get(grantId, messages[0]!.id);
 await il.grants.sync(grantId); // history watermark sync
 ```
 
-Until the first npm release, use the workspace package. Publishing is **manual / opt-in** only ([docs/publishing.md](docs/publishing.md)) — no token, no publish.
+Until the first npm release, use the workspace package (or a git/`file:` dependency). Publishing is **manual / opt-in** only ([docs/publishing.md](docs/publishing.md)) — no token, no publish.
 
 Demo host client:
 
