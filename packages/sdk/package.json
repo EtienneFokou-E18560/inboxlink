@@ -32,8 +32,7 @@
     "tsx": "^4.19.3"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "repository": {
     "type": "git",

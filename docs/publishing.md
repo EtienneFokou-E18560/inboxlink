@@ -36,6 +36,23 @@ Workflow: [`.github/workflows/publish-npm.yml`](../.github/workflows/publish-npm
 - Default `dry_run=true` packs and runs `publish --dry-run` (no registry write).
 - Set `dry_run=false` only when intentionally releasing.
 
+### Provenance (private vs public source repo)
+
+npm **provenance** attestations are only supported when the GitHub **source** repository is **public**. Publishing from a private (or internal) repo with provenance enabled fails with:
+
+> Unsupported GitHub Actions source repository visibility: "private"
+
+InboxLink handles this as follows:
+
+- `@inboxlink/core` and `@inboxlink/sdk` do **not** set `publishConfig.provenance: true` in `package.json` (that flag overrides env and forces provenance even when `NPM_CONFIG_PROVENANCE=false`).
+- `publish-npm.yml` reads `github.repository_visibility`:
+  - **private / internal** → publishes **without** provenance (`NPM_CONFIG_PROVENANCE=false`).
+  - **public** → publishes **with** provenance (`--provenance` / `NPM_CONFIG_PROVENANCE=true`).
+
+**Making the GitHub repository public automatically re-enables provenance** on the next workflow run — no package.json change required.
+
+**Long-term recommendation for MIT OSS:** make [`EtienneFokou-E18560/inboxlink`](https://github.com/EtienneFokou-E18560/inboxlink) **public** so releases carry provenance trust signals consumers expect.
+
 ### Auth (do not publish without credentials)
 
 **Preferred — npm Trusted Publishing (OIDC)**
