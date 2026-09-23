@@ -30,7 +30,7 @@ describe("renderLandingPage", () => {
       hostDocsUrl: "https://docs.example/<script>",
       healthPath: '/health?"x',
     });
-    assert.doesNotMatch(html, /<script>/);
+    assert.doesNotMatch(html, /<script>/i);
     assert.match(
       html,
       /href="https:\/\/example\.com\/&quot;onclick=alert\(1\)"/,
