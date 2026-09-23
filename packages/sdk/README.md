@@ -4,44 +4,56 @@ Host-app HTTP client for [InboxLink](https://github.com/EtienneFokou-E18560/inbo
 
 Gmail-first surface: Connect sessions, grant exchange, **list / get messages**, and **history sync**. Do **not** ship `INBOXLINK_API_SECRET` to browsers. This package does **not** add Microsoft Graph or IMAP client APIs.
 
+**Hosts never set `GOOGLE_*`.** Google OAuth lives on the InboxLink server (Production or your self-host). Your app only needs a redirect URI you control plus (optionally) an API secret when the server is in `multi` mode.
+
 ## Install
 
 ```bash
-# From the monorepo (workspace):
-pnpm add @inboxlink/sdk --filter your-app
-
-# After a public npm release (not done until a maintainer runs the publish workflow):
+# After a public npm release (maintainer runs the publish workflow):
 npm install @inboxlink/sdk
+
+# Until then — monorepo / git dependency:
+pnpm add @inboxlink/sdk --filter your-app
+# or: "file:../inboxlink/packages/sdk" / git+https://github.com/EtienneFokou-E18560/inboxlink.git
 ```
 
-Until the first npm publish, consume the package from this repository via the pnpm workspace or a git dependency.
+Until the first npm publish, consume the package from this repository via the pnpm workspace or a git dependency. See [docs/publishing.md](../../docs/publishing.md).
 
-## Quick start
+## Quick start (Production, single mode)
 
 ```ts
 import { InboxLink, InboxLinkApiError } from "@inboxlink/sdk";
 
-const il = new InboxLink({
-  baseUrl: process.env.INBOXLINK_BASE_URL ?? "http://localhost:8787",
-  apiSecret: process.env.INBOXLINK_API_SECRET!,
-});
+// baseUrl defaults to https://inboxlink-two.vercel.app
+// apiSecret omitted — Production currently runs INBOXLINK_MODE=single
+const il = new InboxLink();
 
-const session = await il.link.createSession({
+const session = await il.createConnectSession({
   externalUserId: "user-1",
-  redirectUri: "https://your-app.example/oauth-done",
+  redirectUri: "http://127.0.0.1:9999/done", // your host callback, not Google
 });
 // Redirect the end user to session.connectUrl
 
-const { grantId } = await il.grants.exchange({ publicToken });
+// On your redirect handler:
+const { grantId } = await il.completeConnect({ redirectUrl: request.url });
 const page = await il.messages.list(grantId, { limit: 20 });
-const { message } = await il.messages.get(grantId, page.messages[0]!.id);
-await il.grants.sync(grantId); // Gmail history watermark sync
+```
+
+### Local / multi-mode overrides
+
+```ts
+const il = new InboxLink({
+  baseUrl: process.env.INBOXLINK_BASE_URL ?? "http://localhost:8787",
+  apiSecret: process.env.INBOXLINK_API_SECRET, // required when server is multi
+});
 ```
 
 ## Client surface (v0.1, Gmail)
 
 | Area | Methods | HTTP |
 |------|---------|------|
+| Connect | `createConnectSession`, `completeConnect` | sessions + exchange |
+| Helpers | `parseConnectRedirect`, `connectUrlForToken`, `INBOXLINK_PRODUCTION_URL` | local |
 | Link | `link.createSession` | `POST /v1/link/sessions` |
 | Grants | `grants.exchange`, `grants.list`, `grants.revoke`, `grants.sync` | `/v1/grants…` |
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
@@ -50,6 +62,10 @@ await il.grants.sync(grantId); // Gmail history watermark sync
 - `messages.list` → live Gmail list
 - `messages.get` → `{ message }` including optional attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
 - `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`)
+
+## Host env (few knobs)
+
+See [`examples/host-integration/host.env.example`](../../examples/host-integration/host.env.example). Do **not** copy server `.env.example` into a host app — that file includes Postgres, vault, and Google OAuth for **InboxLink operators**, not hosts.
 
 ## Versioning
 

@@ -1,6 +1,6 @@
 /**
  * SDK client unit tests (mock fetch; no live server).
- * Covers Gmail-first host surface: list / get / sync.
+ * Covers Gmail-first host surface: list / get / sync + Connect helpers.
  *
  * SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Etienne Fokou
@@ -9,10 +9,44 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
-import { InboxLink, InboxLinkApiError } from "./index.js";
+import {
+  InboxLink,
+  InboxLinkApiError,
+  INBOXLINK_PRODUCTION_URL,
+  connectUrlForToken,
+  parseConnectRedirect,
+} from "./index.js";
 
 describe("InboxLink SDK", () => {
-  it("creates a link session with bearer auth", async () => {
+  it("defaults baseUrl to Production and omits Bearer without apiSecret", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          linkToken: "lt_1",
+          connectUrl: `${INBOXLINK_PRODUCTION_URL}/v1/connect/lt_1`,
+          sessionId: "sess_1",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const il = new InboxLink({ fetch: fetchMock });
+    assert.equal(il.baseUrl, INBOXLINK_PRODUCTION_URL);
+
+    const session = await il.createConnectSession({
+      externalUserId: "user-1",
+      redirectUri: "http://127.0.0.1:9999/done",
+    });
+
+    assert.equal(session.linkToken, "lt_1");
+    assert.match(calls[0]!.url, new RegExp(`^${INBOXLINK_PRODUCTION_URL}/v1/link/sessions$`));
+    const headers = new Headers(calls[0]!.init?.headers);
+    assert.equal(headers.get("authorization"), null);
+  });
+
+  it("creates a link session with bearer auth when apiSecret is set", async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     const fetchMock: typeof fetch = async (input, init) => {
       calls.push({ url: String(input), init });
@@ -33,7 +67,7 @@ describe("InboxLink SDK", () => {
     });
     const session = await il.link.createSession({
       externalUserId: "user-1",
-      redirectUri: "http://localhost:9999/done",
+      redirectUri: "http://127.0.0.1:9999/done",
     });
 
     assert.equal(session.linkToken, "lt_1");
@@ -41,6 +75,52 @@ describe("InboxLink SDK", () => {
     assert.match(calls[0]!.url, /\/v1\/link\/sessions$/);
     const headers = new Headers(calls[0]!.init?.headers);
     assert.equal(headers.get("authorization"), "Bearer secret");
+  });
+
+  it("completeConnect exchanges publicToken and redirectUrl", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({ grantId: "grant_1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      fetch: fetchMock,
+    });
+
+    const a = await il.completeConnect({ publicToken: "pt_1" });
+    assert.equal(a.grantId, "grant_1");
+    assert.match(calls[0]!.url, /\/v1\/grants\/exchange$/);
+    assert.equal(JSON.parse(String(calls[0]!.init?.body)).publicToken, "pt_1");
+
+    const b = await il.completeConnect({
+      redirectUrl: "http://127.0.0.1:9999/done?public_token=pt_2&link_token=lt_x",
+    });
+    assert.equal(b.grantId, "grant_1");
+    assert.equal(JSON.parse(String(calls[1]!.init?.body)).publicToken, "pt_2");
+  });
+
+  it("parseConnectRedirect and connectUrlForToken helpers", () => {
+    const parsed = parseConnectRedirect(
+      "http://127.0.0.1:9999/done?public_token=pt_abc&link_token=lt_1",
+    );
+    assert.equal(parsed.publicToken, "pt_abc");
+    assert.equal(parsed.linkToken, "lt_1");
+
+    assert.equal(
+      connectUrlForToken("lt_1"),
+      `${INBOXLINK_PRODUCTION_URL}/v1/connect/lt_1`,
+    );
+    assert.equal(
+      connectUrlForToken("lt_1", "http://localhost:8787/"),
+      "http://localhost:8787/v1/connect/lt_1",
+    );
+
+    assert.throws(() => parseConnectRedirect("http://127.0.0.1:9999/done"), /missing public_token/);
   });
 
   it("lists messages with limit and cursor query params", async () => {
@@ -131,9 +211,11 @@ describe("InboxLink SDK", () => {
     assert.match(calls[0]!.url, /\/v1\/grants\/grant_1\/sync$/);
   });
 
-  it("throws InboxLinkApiError on non-2xx", async () => {
+  it("throws InboxLinkApiError with parsed detail on non-2xx", async () => {
     const fetchMock: typeof fetch = async () =>
-      new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
+      new Response(JSON.stringify({ error: "not_found", detail: "grant missing" }), {
+        status: 404,
+      });
 
     const il = new InboxLink({
       baseUrl: "http://localhost:8787",
@@ -146,6 +228,9 @@ describe("InboxLink SDK", () => {
       (err: unknown) => {
         assert.ok(err instanceof InboxLinkApiError);
         assert.equal(err.status, 404);
+        assert.equal(err.code, "not_found");
+        assert.equal(err.detail, "grant missing");
+        assert.match(err.message, /grant missing/);
         return true;
       },
     );
