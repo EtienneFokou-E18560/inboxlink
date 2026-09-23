@@ -11,14 +11,15 @@ It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18
 Working TypeScript monorepo with:
 
 - Gmail OAuth **authorization URL + callback** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
+- Microsoft Graph OAuth **authorization URL + callback** (real Entra token exchange when `MICROSOFT_CLIENT_*` are set; placeholder credentials use a stub exchange). Default authority tenant is `common` (personal Microsoft accounts + work/school)
 - Encrypted **token vault** (in-memory AES-256-GCM; revoke deletes the ciphertext)
 - HTTP API skeleton (`/v1/link/sessions`, grants exchange, health)
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail or Microsoft messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History/delta sync, IMAP, and npm publish are not implemented.
 
-Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
+Live acceptance needs a connected Gmail or Microsoft grant. No extra secrets beyond the OAuth clients, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses local HTTP stand-ins and does not call Google or Microsoft.
 
 On Vercel, set `DATABASE_URL` to a Postgres database the functions can reach. The server creates the tables and the `default` tenant on startup. Without `DATABASE_URL`, sessions and grants stay in process memory and a callback on another instance returns Unknown OAuth state.
 
@@ -30,6 +31,14 @@ A real Gmail connect needs these **user-held** values in the environment (never 
 - `INBOXLINK_MASTER_KEY` (16+ characters) and `INBOXLINK_API_SECRET`
 - The Gmail account added as a test user on the OAuth consent screen
 
+A real Microsoft connect needs (never commit them):
+
+- `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET` from an Entra ID app registration
+- Supported account types: **Accounts in any organizational directory and personal Microsoft accounts** (`AzureADandPersonalMicrosoftAccount`) to match the default `MICROSOFT_TENANT=common`
+- Redirect URI (Web): `MICROSOFT_REDIRECT_URI` = `https://inboxlink-two.vercel.app/v1/oauth/microsoft/callback` (or local equivalent)
+- API permission: Microsoft Graph delegated `Mail.Read` (plus `openid` / `offline_access` / `email` via scopes)
+- Optional: set `MICROSOFT_TENANT=organizations` or a directory tenant id to restrict work/school only
+
 With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and shared by every instance. `GET /health` then reports `"store":"postgres"`. Without that variable, storage stays in process memory (`"store":"memory"`).
 
 ## Packages
@@ -37,7 +46,8 @@ With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and 
 | Package | Role |
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
-| `@inboxlink/adapters-gmail` | Gmail OAuth adapter (URL + token exchange) |
+| `@inboxlink/adapters-gmail` | Gmail OAuth + message list adapter |
+| `@inboxlink/adapters-microsoft` | Microsoft Graph OAuth + message list adapter |
 | `@inboxlink/sdk` | Host-app HTTP client |
 | `@inboxlink/server` | Hono HTTP service |
 | `@inboxlink/connect-ui` | Stub (server ships minimal Connect HTML for now) |
@@ -78,7 +88,7 @@ curl -s -X POST http://localhost:8787/v1/link/sessions \
   -d '{"externalUserId":"user-1","redirectUri":"http://localhost:9999/done"}'
 ```
 
-Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange** (no real Google call). Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
+Open the returned `connectUrl`. Choose **Continue with Google** or **Continue with Microsoft**. With placeholder credentials, the callback uses a **stub token exchange** (no real IdP call). Put real `GOOGLE_CLIENT_*` or `MICROSOFT_CLIENT_*` values in `.env` to hit the live token endpoint.
 
 List messages for a grant (single mode needs no API key):
 
@@ -86,7 +96,7 @@ List messages for a grant (single mode needs no API key):
 curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
 ```
 
-`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `body`). It never includes the refresh token.
+`limit` is 1–25 (default 20). `cursor` is the provider page token (`nextPageToken` for Gmail, `$skiptoken` for Graph), returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `body`). It never includes the refresh token.
 
 Demo host client:
 
@@ -117,6 +127,11 @@ See [`.env.example`](.env.example). Placeholders only — never commit real secr
 | `INBOXLINK_MASTER_KEY` | Envelope encryption key for the vault |
 | `INBOXLINK_API_SECRET` | Bearer secret for host APIs in `multi` mode |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail OAuth client |
+| `GOOGLE_REDIRECT_URI` | Gmail OAuth callback URL |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` | Entra app registration (Graph mail) |
+| `MICROSOFT_REDIRECT_URI` | Microsoft OAuth callback URL |
+| `MICROSOFT_TENANT` | Authority tenant (`common` default; or `organizations` / tenant id) |
+| `MICROSOFT_SCOPES` | Delegated Graph scopes (default includes `Mail.Read` + `offline_access`) |
 | `DATABASE_URL` | Postgres for sessions, grants, and vault ciphertext. Unset uses in-memory storage |
 | `REDIS_URL` | Optional BullMQ placeholder |
 

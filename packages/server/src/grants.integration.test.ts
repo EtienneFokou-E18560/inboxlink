@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
 import { createApp } from "./routes/app.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
+
+function stubMicrosoft() {
+  return new MicrosoftAdapter({
+    clientId: "test-microsoft-client-id",
+    clientSecret: "test-microsoft-client-secret",
+    redirectUri: "http://localhost:8787/v1/oauth/microsoft/callback",
+  });
+}
 
 const API_SECRET = "tenant-api-key-test";
 const REFRESH = "1//gmail-refresh-token-test";
@@ -68,6 +77,7 @@ function buildApp() {
     store,
     vault,
     gmail,
+    microsoft: stubMicrosoft(),
     publicBaseUrl: "http://localhost:8787",
     apiSecret: API_SECRET,
     mode: "multi",
@@ -76,6 +86,7 @@ function buildApp() {
       "openid",
       "email",
     ],
+    microsoftScopes: ["openid", "offline_access", "email", "https://graph.microsoft.com/Mail.Read"],
     queue: null,
   });
   return { app, vault };
@@ -118,6 +129,8 @@ describe("grants, vault, and Gmail OAuth", () => {
     const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
     const html = await connect.text();
+    assert.match(html, /Continue with Google/);
+    assert.match(html, /Continue with Microsoft/);
     const href = (html.match(/href="([^"]+)"/)?.[1] ?? "")
       .replaceAll("&amp;", "&")
       .replaceAll("&quot;", '"');
@@ -205,10 +218,12 @@ describe("OAuth callback when Google rejects the code", () => {
         store,
         vault,
         gmail,
+        microsoft: stubMicrosoft(),
         publicBaseUrl: "http://localhost:8787",
         apiSecret: API_SECRET,
         mode: "single",
         gmailScopes: ["openid"],
+        microsoftScopes: ["openid"],
         oauthRedirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
         queue: null,
       });

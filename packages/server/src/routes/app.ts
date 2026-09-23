@@ -1,9 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
+import { MicrosoftAdapter, MicrosoftApiError } from "@inboxlink/adapters-microsoft";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
@@ -20,12 +21,16 @@ export type CreateAppOptions = {
     getCiphertext(grantId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
   };
   gmail: GmailAdapter;
+  microsoft: MicrosoftAdapter;
   publicBaseUrl: string;
   apiSecret: string;
   mode: "single" | "multi";
   gmailScopes: string[];
+  microsoftScopes: string[];
   /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
   oauthRedirectUri?: string;
+  /** Registered Microsoft redirect. Defaults to `{publicBaseUrl}/v1/oauth/microsoft/callback`. */
+  microsoftOauthRedirectUri?: string;
   /** `postgres` when DATABASE_URL is set; otherwise process memory. */
   storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
@@ -123,7 +128,7 @@ export function createApp(opts: CreateAppOptions) {
     });
   });
 
-  /** Minimal Connect stub page — redirects into Gmail OAuth. */
+  /** Minimal Connect stub page — Gmail and Microsoft OAuth. */
   app.get("/v1/connect/:linkToken", async (c) => {
     const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
     if (!session || isExpired(session.expiresAt)) {
@@ -135,100 +140,43 @@ export function createApp(opts: CreateAppOptions) {
     const state = randomToken(16);
     session.oauthState = state;
     await opts.store.saveSession(session);
-    const redirectUri = oauthRedirectUri(opts);
-    const authUrl = opts.gmail.buildAuthorizationUrl({
+    const gmailRedirect = gmailOauthRedirectUri(opts);
+    const microsoftRedirect = microsoftOauthRedirectUri(opts);
+    const gmailAuthUrl = opts.gmail.buildAuthorizationUrl({
       state,
-      redirectUri,
+      redirectUri: gmailRedirect,
       scopes: opts.gmailScopes,
+    });
+    const microsoftAuthUrl = opts.microsoft.buildAuthorizationUrl({
+      state,
+      redirectUri: microsoftRedirect,
+      scopes: opts.microsoftScopes,
     });
     return c.html(`<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><title>InboxLink Connect</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-  a.button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none}
+  a.button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none;margin:.25rem .5rem .25rem 0}
   .muted{color:#555;font-size:.9rem}
 </style></head>
 <body>
   <h1>Connect inbox</h1>
-  <p>InboxLink will request <strong>read-only</strong> Gmail access. Your host app never sees the refresh token.</p>
-  <p><a class="button" href="${escapeHtml(authUrl)}">Continue with Google</a></p>
+  <p>InboxLink will request <strong>read-only</strong> mailbox access. Your host app never sees the refresh token.</p>
+  <p>
+    <a class="button" href="${escapeHtml(gmailAuthUrl)}">Continue with Google</a>
+    <a class="button" href="${escapeHtml(microsoftAuthUrl)}">Continue with Microsoft</a>
+  </p>
   <p class="muted">Stub Connect UI — replace with packages/connect-ui.</p>
 </body></html>`);
   });
 
   app.get("/v1/oauth/gmail/callback", async (c) => {
-    const code = c.req.query("code");
-    const state = c.req.query("state");
-    const error = c.req.query("error");
-    if (error) {
-      return c.html(`<h1>OAuth error</h1><pre>${escapeHtml(error)}</pre>`, 400);
-    }
-    if (!code || !state) {
-      return c.html("<h1>Missing code/state</h1>", 400);
-    }
-    const session = await opts.store.findSessionByOAuthState(state);
-    if (!session || isExpired(session.expiresAt)) {
-      return c.html("<h1>Unknown OAuth state</h1>", 400);
-    }
-    const redirectUri = oauthRedirectUri(opts);
-    let tokens;
-    try {
-      tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
-    } catch (err) {
-      const reason = googleErrorCode(err);
-      return c.html(
-        `<h1>Google token exchange failed</h1><p>${escapeHtml(oauthExchangeHint(reason, redirectUri))}</p>`,
-        400,
-      );
-    }
-    const grantId = newId("grant");
-    const now = new Date().toISOString();
-    const grant: Grant = {
-      id: grantId,
-      tenantId: session.tenantId,
-      externalUserId: session.externalUserId,
-      provider: "gmail",
-      email: tokens.email ?? "unknown@gmail.com",
-      status: "active",
-      scopes: tokens.scopes.length ? tokens.scopes : [...opts.gmailScopes],
-      createdAt: now,
-      updatedAt: now,
-    };
-    await opts.store.putGrant(grant);
-    try {
-      if (tokens.refreshToken) {
-        await opts.vault.seal(tokens.refreshToken, {
-          grantId,
-          tenantId: session.tenantId,
-        });
-      }
-    } catch {
-      await opts.store.deleteGrant(grantId, session.tenantId);
-      return c.html(
-        "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
-        500,
-      );
-    }
-    session.oauthState = undefined;
-    const publicToken = randomToken(24);
-    session.status = "completed";
-    session.grantId = grantId;
-    session.publicToken = publicToken;
-    await opts.store.saveSession(session);
+    return finishOAuthCallback(c, opts, "gmail");
+  });
 
-    if (opts.queue) {
-      await opts.queue.enqueue({
-        grantId,
-        tenantId: session.tenantId,
-        kind: "bootstrap",
-      });
-    }
-
-    const redirect = new URL(session.redirectUri);
-    redirect.searchParams.set("public_token", publicToken);
-    redirect.searchParams.set("link_token", session.linkToken);
-    return c.redirect(redirect.toString(), 302);
+  app.get("/v1/oauth/microsoft/callback", async (c) => {
+    return finishOAuthCallback(c, opts, "microsoft");
   });
 
   app.post("/v1/grants/exchange", async (c) => {
@@ -263,13 +211,15 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
-    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
+    if (grant.provider !== "gmail" && grant.provider !== "microsoft") {
+      return c.json({ error: "unsupported_provider" }, 400);
+    }
     if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
 
     const limit = parseLimit(c.req.query("limit"));
     if (limit === null) return c.json({ error: "invalid_limit" }, 400);
     const cursor = c.req.query("cursor")?.trim() || undefined;
-    if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
+    if (cursor && cursor.length > 2048) return c.json({ error: "invalid_cursor" }, 400);
 
     const ciphertext = await opts.vault.getCiphertext(grantId);
     if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
@@ -280,16 +230,40 @@ export function createApp(opts: CreateAppOptions) {
       return c.json({ error: "missing_refresh_token" }, 409);
     }
 
+    if (grant.provider === "gmail") {
+      let accessToken: string;
+      try {
+        accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
+      } catch {
+        await markNeedsReauth(opts.store, grant);
+        return c.json({ error: "needs_reauth" }, 409);
+      }
+      try {
+        const page = await opts.gmail.listMessages({
+          accessToken,
+          grantId,
+          maxResults: limit,
+          pageToken: cursor,
+        });
+        return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+      } catch (err) {
+        if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+          await markNeedsReauth(opts.store, grant);
+          return c.json({ error: "needs_reauth" }, 409);
+        }
+        return c.json({ error: "gmail_unavailable" }, 502);
+      }
+    }
+
     let accessToken: string;
     try {
-      accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
+      accessToken = (await opts.microsoft.refreshAccessToken(refreshToken)).accessToken;
     } catch {
       await markNeedsReauth(opts.store, grant);
       return c.json({ error: "needs_reauth" }, 409);
     }
-
     try {
-      const page = await opts.gmail.listMessages({
+      const page = await opts.microsoft.listMessages({
         accessToken,
         grantId,
         maxResults: limit,
@@ -297,11 +271,11 @@ export function createApp(opts: CreateAppOptions) {
       });
       return c.json({ messages: page.messages, nextCursor: page.nextCursor });
     } catch (err) {
-      if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+      if (err instanceof MicrosoftApiError && (err.status === 401 || err.status === 403)) {
         await markNeedsReauth(opts.store, grant);
         return c.json({ error: "needs_reauth" }, 409);
       }
-      return c.json({ error: "gmail_unavailable" }, 502);
+      return c.json({ error: "microsoft_unavailable" }, 502);
     }
   });
 
@@ -320,20 +294,125 @@ export function createApp(opts: CreateAppOptions) {
     return c.json({
       grantId,
       status: "accepted",
-      note: "Read messages with GET /v1/grants/:grantId/messages. History sync is not implemented.",
+      note: "Read messages with GET /v1/grants/:grantId/messages. History/delta sync is not implemented.",
     });
   });
 
   return app;
 }
 
-function googleErrorCode(err: unknown): string {
+async function finishOAuthCallback(
+  c: Context<AppEnv>,
+  opts: CreateAppOptions,
+  provider: "gmail" | "microsoft",
+) {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const error = c.req.query("error");
+  if (error) {
+    return c.html(`<h1>OAuth error</h1><pre>${escapeHtml(error)}</pre>`, 400);
+  }
+  if (!code || !state) {
+    return c.html("<h1>Missing code/state</h1>", 400);
+  }
+  const session = await opts.store.findSessionByOAuthState(state);
+  if (!session || isExpired(session.expiresAt)) {
+    return c.html("<h1>Unknown OAuth state</h1>", 400);
+  }
+  const redirectUri =
+    provider === "gmail" ? gmailOauthRedirectUri(opts) : microsoftOauthRedirectUri(opts);
+  let tokens;
+  try {
+    tokens =
+      provider === "gmail"
+        ? await opts.gmail.exchangeAuthorizationCode({ code, redirectUri })
+        : await opts.microsoft.exchangeAuthorizationCode({ code, redirectUri });
+  } catch (err) {
+    const reason = oauthErrorCode(err);
+    const title =
+      provider === "gmail" ? "Google token exchange failed" : "Microsoft token exchange failed";
+    return c.html(
+      `<h1>${title}</h1><p>${escapeHtml(oauthExchangeHint(provider, reason, redirectUri))}</p>`,
+      400,
+    );
+  }
+  const grantId = newId("grant");
+  const now = new Date().toISOString();
+  const defaultScopes =
+    provider === "gmail" ? opts.gmailScopes : opts.microsoftScopes;
+  const fallbackEmail =
+    provider === "gmail" ? "unknown@gmail.com" : "unknown@outlook.com";
+  const grant: Grant = {
+    id: grantId,
+    tenantId: session.tenantId,
+    externalUserId: session.externalUserId,
+    provider,
+    email: tokens.email ?? fallbackEmail,
+    status: "active",
+    scopes: tokens.scopes.length ? tokens.scopes : [...defaultScopes],
+    createdAt: now,
+    updatedAt: now,
+  };
+  await opts.store.putGrant(grant);
+  try {
+    if (tokens.refreshToken) {
+      await opts.vault.seal(tokens.refreshToken, {
+        grantId,
+        tenantId: session.tenantId,
+      });
+    }
+  } catch {
+    await opts.store.deleteGrant(grantId, session.tenantId);
+    return c.html(
+      "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
+      500,
+    );
+  }
+  session.oauthState = undefined;
+  const publicToken = randomToken(24);
+  session.status = "completed";
+  session.grantId = grantId;
+  session.publicToken = publicToken;
+  await opts.store.saveSession(session);
+
+  if (opts.queue) {
+    await opts.queue.enqueue({
+      grantId,
+      tenantId: session.tenantId,
+      kind: "bootstrap",
+    });
+  }
+
+  const redirect = new URL(session.redirectUri);
+  redirect.searchParams.set("public_token", publicToken);
+  redirect.searchParams.set("link_token", session.linkToken);
+  return c.redirect(redirect.toString(), 302);
+}
+
+function oauthErrorCode(err: unknown): string {
   const message = err instanceof Error ? err.message : "";
   const match = message.match(/"error"\s*:\s*"([a-z0-9_]+)"/i);
   return match?.[1] ?? "exchange_failed";
 }
 
-function oauthExchangeHint(code: string, redirectUri: string): string {
+function oauthExchangeHint(
+  provider: "gmail" | "microsoft",
+  code: string,
+  redirectUri: string,
+): string {
+  if (provider === "microsoft") {
+    switch (code) {
+      case "invalid_client":
+        return "Microsoft rejected the OAuth client. Replace MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET with the Entra app registration values, redeploy, and start Connect again.";
+      case "invalid_grant":
+        return "The Microsoft code expired or was already used. Start Connect again.";
+      case "unauthorized_client":
+      case "invalid_request":
+        return `Check the Entra redirect URI matches exactly: ${redirectUri}`;
+      default:
+        return "Microsoft did not accept the authorization code. Check the app registration, redirect URI, and tenant (MICROSOFT_TENANT), redeploy, and start Connect again.";
+    }
+  }
   switch (code) {
     case "invalid_client":
       return "Google rejected the OAuth client. Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET with the web client values, redeploy, and start Connect again.";
@@ -346,10 +425,17 @@ function oauthExchangeHint(code: string, redirectUri: string): string {
   }
 }
 
-function oauthRedirectUri(opts: CreateAppOptions): string {
+function gmailOauthRedirectUri(opts: CreateAppOptions): string {
   return (
     opts.oauthRedirectUri ??
     new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString()
+  );
+}
+
+function microsoftOauthRedirectUri(opts: CreateAppOptions): string {
+  return (
+    opts.microsoftOauthRedirectUri ??
+    new URL("/v1/oauth/microsoft/callback", opts.publicBaseUrl).toString()
   );
 }
 
