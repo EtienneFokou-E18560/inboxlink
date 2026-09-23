@@ -34,7 +34,8 @@ export function createApp(opts: CreateAppOptions) {
 
   app.use("*", cors());
 
-  app.get("/health", async (c) => {
+  // `/` is what the production URL opens. `/health/` is the same check with a trailing slash.
+  const health = async (c: { json: (body: unknown, status?: number) => Response }) => {
     const storeKind = opts.storeKind ?? "memory";
     try {
       await opts.store.ready();
@@ -51,7 +52,10 @@ export function createApp(opts: CreateAppOptions) {
       queue: opts.queue ? "stub" : "disabled",
       store: storeKind,
     });
-  });
+  };
+  app.get("/", health);
+  app.get("/health", health);
+  app.get("/health/", health);
 
   app.get("/v1/schema.sql", (c) =>
     c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
