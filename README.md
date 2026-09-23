@@ -16,7 +16,7 @@ Working TypeScript monorepo with:
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
 
 Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
 
@@ -84,6 +84,12 @@ List messages for a grant (single mode needs no API key):
 
 ```bash
 curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
+```
+
+Get one message with attachment metadata:
+
+```bash
+curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
 ```
 
 `limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `body`). It never includes the refresh token.

@@ -261,47 +261,55 @@ export function createApp(opts: CreateAppOptions) {
   app.get("/v1/grants/:grantId/messages", async (c) => {
     const grantId = c.req.param("grantId");
     const tenantId = c.get("tenantId");
-    const grant = await opts.store.getGrant(grantId);
-    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
-    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
-    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+    const ready = await readyGmailGrant(opts, grantId, tenantId);
+    if (!ready.ok) return c.json({ error: ready.error }, ready.status);
 
     const limit = parseLimit(c.req.query("limit"));
     if (limit === null) return c.json({ error: "invalid_limit" }, 400);
     const cursor = c.req.query("cursor")?.trim() || undefined;
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
 
-    const ciphertext = await opts.vault.getCiphertext(grantId);
-    if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
-    let refreshToken: string;
-    try {
-      refreshToken = await opts.vault.open(ciphertext, { grantId, tenantId: grant.tenantId });
-    } catch {
-      return c.json({ error: "missing_refresh_token" }, 409);
-    }
-
-    let accessToken: string;
-    try {
-      accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
-    } catch {
-      await markNeedsReauth(opts.store, grant);
-      return c.json({ error: "needs_reauth" }, 409);
-    }
+    const access = await openGmailAccess(opts, ready.grant);
+    if (!access.ok) return c.json({ error: access.error }, access.status);
 
     try {
       const page = await opts.gmail.listMessages({
-        accessToken,
+        accessToken: access.accessToken,
         grantId,
         maxResults: limit,
         pageToken: cursor,
       });
       return c.json({ messages: page.messages, nextCursor: page.nextCursor });
     } catch (err) {
-      if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
-        await markNeedsReauth(opts.store, grant);
-        return c.json({ error: "needs_reauth" }, 409);
+      return gmailReadError(opts.store, ready.grant, err);
+    }
+  });
+
+  app.get("/v1/grants/:grantId/messages/:messageId", async (c) => {
+    const grantId = c.req.param("grantId");
+    const tenantId = c.get("tenantId");
+    const providerMessageId = resolveProviderMessageId(c.req.param("messageId"));
+    if (!providerMessageId) return c.json({ error: "invalid_message_id" }, 400);
+
+    const ready = await readyGmailGrant(opts, grantId, tenantId);
+    if (!ready.ok) return c.json({ error: ready.error }, ready.status);
+
+    const access = await openGmailAccess(opts, ready.grant);
+    if (!access.ok) return c.json({ error: access.error }, access.status);
+
+    try {
+      const message = await opts.gmail.getMessage({
+        accessToken: access.accessToken,
+        grantId,
+        messageId: providerMessageId,
+      });
+      if (!message) return c.json({ error: "not_found" }, 404);
+      return c.json({ message });
+    } catch (err) {
+      if (err instanceof GmailApiError && err.status === 404) {
+        return c.json({ error: "not_found" }, 404);
       }
-      return c.json({ error: "gmail_unavailable" }, 502);
+      return gmailReadError(opts.store, ready.grant, err);
     }
   });
 
@@ -351,6 +359,58 @@ function oauthRedirectUri(opts: CreateAppOptions): string {
     opts.oauthRedirectUri ??
     new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString()
   );
+}
+
+async function readyGmailGrant(
+  opts: CreateAppOptions,
+  grantId: string,
+  tenantId: string,
+): Promise<{ ok: true; grant: Grant } | { ok: false; error: string; status: 400 | 404 | 409 }> {
+  const grant = await opts.store.getGrant(grantId);
+  if (!grant || grant.tenantId !== tenantId) return { ok: false, error: "not_found", status: 404 };
+  if (grant.provider !== "gmail") return { ok: false, error: "unsupported_provider", status: 400 };
+  if (grant.status !== "active") return { ok: false, error: "grant_inactive", status: 409 };
+  return { ok: true, grant };
+}
+
+async function openGmailAccess(
+  opts: CreateAppOptions,
+  grant: Grant,
+): Promise<{ ok: true; accessToken: string } | { ok: false; error: string; status: 409 }> {
+  const ciphertext = await opts.vault.getCiphertext(grant.id);
+  if (!ciphertext) return { ok: false, error: "missing_refresh_token", status: 409 };
+  let refreshToken: string;
+  try {
+    refreshToken = await opts.vault.open(ciphertext, { grantId: grant.id, tenantId: grant.tenantId });
+  } catch {
+    return { ok: false, error: "missing_refresh_token", status: 409 };
+  }
+  try {
+    const accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
+    return { ok: true, accessToken };
+  } catch {
+    await markNeedsReauth(opts.store, grant);
+    return { ok: false, error: "needs_reauth", status: 409 };
+  }
+}
+
+async function gmailReadError(store: GrantStore, grant: Grant, err: unknown): Promise<Response> {
+  if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+    await markNeedsReauth(store, grant);
+    return Response.json({ error: "needs_reauth" }, { status: 409 });
+  }
+  return Response.json({ error: "gmail_unavailable" }, { status: 502 });
+}
+
+/** Accept InboxLink `msg_<gmailId>` or the raw Gmail message id. */
+function resolveProviderMessageId(messageId: string): string | null {
+  const trimmed = messageId.trim();
+  if (!trimmed || trimmed.length > 256) return null;
+  if (trimmed.startsWith("msg_")) {
+    const id = trimmed.slice(4);
+    return id || null;
+  }
+  return trimmed;
 }
 
 function parseLimit(value: string | undefined): number | null {
