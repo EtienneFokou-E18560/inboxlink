@@ -1,5 +1,4 @@
-import { serve } from "@hono/node-server";
-import { handle as handleNode } from "@hono/node-server/vercel";
+import { getRequestListener, serve } from "@hono/node-server";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { loadConfig } from "./config.js";
@@ -80,12 +79,13 @@ function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresSto
  * Vercel Node invokes the default export with either a Web Request or the
  * Node (req, res) pair. `hono/vercel` only returns a Response, which the
  * Node listener ignores, so the request hangs. Write the Node response when
- * that is the runtime shape.
+ * that is the runtime shape (`getRequestListener` replaces the removed
+ * `@hono/node-server/vercel` adapter).
  */
 export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
   const { app } = createAppFromEnv(env);
   const web = handleWeb(app);
-  const node = handleNode(app);
+  const node = getRequestListener(app.fetch);
   return (incoming: unknown, outgoing?: unknown) => {
     if (typeof Request !== "undefined" && incoming instanceof Request) {
       return web(incoming);
