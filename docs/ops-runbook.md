@@ -83,6 +83,19 @@ Logs: look for `oauth_callback_failed` with a redacted `reason` code (never the 
 
 Full timed proof steps live in the project plan `proof-deployment-4h.md` (agent store), not in this repo.
 
+## Host redirect allowlist (optional)
+
+Unset `ALLOWED_REDIRECT_ORIGINS` keeps Connect host redirects permissive (any http(s) URL) — appropriate for the current single-tenant demo.
+
+To reduce open-redirect of `public_token` once you court third-party hosts:
+
+```bash
+# Vercel env (Production)
+ALLOWED_REDIRECT_ORIGINS=https://your-host.example,http://127.0.0.1:9999
+```
+
+Session create then rejects non-matching origins with `redirectUri_not_allowed`. Invalid env entries fail boot closed.
+
 ## Rollback triggers
 
 - Health `store: "memory"` or `database_unavailable` after deploy → restore `DATABASE_URL` / roll back deployment; skip Connect.
