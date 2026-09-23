@@ -1,0 +1,1 @@
+InboxLink static output placeholder. HTTP routes are served by the api/index.ts serverless function.
