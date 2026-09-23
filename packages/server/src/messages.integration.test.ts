@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
 import type { Grant, Message } from "@inboxlink/core";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
@@ -148,10 +149,16 @@ function appFor(store: MemoryStore | PostgresStore, vault: MemoryTokenVault | Po
     store,
     vault,
     gmail: gmail(),
+    microsoft: new MicrosoftAdapter({
+      clientId: "test-microsoft-client-id",
+      clientSecret: "test-microsoft-client-secret",
+      redirectUri: "http://localhost:8787/v1/oauth/microsoft/callback",
+    }),
     publicBaseUrl: "http://localhost:8787",
     apiSecret: "tenant-api-key-test",
     mode,
     gmailScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    microsoftScopes: ["openid", "offline_access", "email", "https://graph.microsoft.com/Mail.Read"],
     queue: null,
   });
 }

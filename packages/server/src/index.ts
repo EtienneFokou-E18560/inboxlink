@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { handle as handleNode } from "@hono/node-server/vercel";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
 import { loadConfig } from "./config.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
@@ -40,15 +41,24 @@ export function createAppFromEnv(
     clientSecret: config.googleClientSecret,
     redirectUri: config.googleRedirectUri,
   });
+  const microsoft = new MicrosoftAdapter({
+    clientId: config.microsoftClientId,
+    clientSecret: config.microsoftClientSecret,
+    redirectUri: config.microsoftRedirectUri,
+    tenant: config.microsoftTenant,
+  });
   const app = createApp({
     store,
     vault,
     gmail,
+    microsoft,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
+    microsoftScopes: config.microsoftScopes,
     oauthRedirectUri: config.googleRedirectUri,
+    microsoftOauthRedirectUri: config.microsoftRedirectUri,
     storeKind,
     queue,
   });

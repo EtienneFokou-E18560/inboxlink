@@ -34,6 +34,12 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/adapters-microsoft:
+    dependencies:
+      '@inboxlink/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/connect-ui: {}
 
   packages/core: {}
@@ -52,6 +58,9 @@ importers:
       '@inboxlink/adapters-gmail':
         specifier: workspace:*
         version: link:../adapters-gmail
+      '@inboxlink/adapters-microsoft':
+        specifier: workspace:*
+        version: link:../adapters-microsoft
       '@inboxlink/core':
         specifier: workspace:*
         version: link:../core
