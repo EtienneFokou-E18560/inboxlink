@@ -18,7 +18,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${port}`).replace(/\/$/, "");
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
-    env.INBOXLINK_MASTER_KEY ?? "dev-only-master-key-change-me-32b";
+    env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
   const apiSecret = env.INBOXLINK_API_SECRET ?? "dev-api-secret-change-me";
   const scopes =
     env.GMAIL_SCOPES?.split(/\s+/).filter(Boolean) ??
