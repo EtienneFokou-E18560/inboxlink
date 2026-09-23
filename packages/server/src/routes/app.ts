@@ -4,6 +4,11 @@ import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
+import {
+  connectErrorStatus,
+  renderConnectErrorPage,
+  renderConnectPage,
+} from "@inboxlink/connect-ui";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
@@ -123,14 +128,30 @@ export function createApp(opts: CreateAppOptions) {
     });
   });
 
-  /** Minimal Connect stub page — redirects into Gmail OAuth. */
+  /** Connect UI — hosted Link page that starts Gmail OAuth. */
   app.get("/v1/connect/:linkToken", async (c) => {
     const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
-    if (!session || isExpired(session.expiresAt)) {
-      return c.html("<h1>Invalid or expired link</h1>", 404);
+    if (!session) {
+      return c.html(
+        renderConnectErrorPage({ kind: "invalid" }),
+        connectErrorStatus("invalid"),
+      );
+    }
+    if (isExpired(session.expiresAt) || session.status === "expired") {
+      return c.html(
+        renderConnectErrorPage({ kind: "expired" }),
+        connectErrorStatus("expired"),
+      );
     }
     if (session.status !== "pending") {
-      return c.html(`<h1>Session ${session.status}</h1>`, 400);
+      const kind = session.status === "completed" ? "session_completed" : "session_other";
+      return c.html(
+        renderConnectErrorPage({
+          kind,
+          sessionStatus: session.status,
+        }),
+        connectErrorStatus(kind),
+      );
     }
     const state = randomToken(16);
     session.oauthState = state;
@@ -141,20 +162,12 @@ export function createApp(opts: CreateAppOptions) {
       redirectUri,
       scopes: opts.gmailScopes,
     });
-    return c.html(`<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"/><title>InboxLink Connect</title>
-<style>
-  body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-  a.button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none}
-  .muted{color:#555;font-size:.9rem}
-</style></head>
-<body>
-  <h1>Connect inbox</h1>
-  <p>InboxLink will request <strong>read-only</strong> Gmail access. Your host app never sees the refresh token.</p>
-  <p><a class="button" href="${escapeHtml(authUrl)}">Continue with Google</a></p>
-  <p class="muted">Stub Connect UI — replace with packages/connect-ui.</p>
-</body></html>`);
+    return c.html(
+      renderConnectPage({
+        authUrl,
+        expiresAt: session.expiresAt,
+      }),
+    );
   });
 
   app.get("/v1/oauth/gmail/callback", async (c) => {
@@ -162,14 +175,23 @@ export function createApp(opts: CreateAppOptions) {
     const state = c.req.query("state");
     const error = c.req.query("error");
     if (error) {
-      return c.html(`<h1>OAuth error</h1><pre>${escapeHtml(error)}</pre>`, 400);
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_denied", providerError: error }),
+        connectErrorStatus("oauth_denied"),
+      );
     }
     if (!code || !state) {
-      return c.html("<h1>Missing code/state</h1>", 400);
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_missing" }),
+        connectErrorStatus("oauth_missing"),
+      );
     }
     const session = await opts.store.findSessionByOAuthState(state);
     if (!session || isExpired(session.expiresAt)) {
-      return c.html("<h1>Unknown OAuth state</h1>", 400);
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_unknown_state" }),
+        connectErrorStatus("oauth_unknown_state"),
+      );
     }
     const redirectUri = oauthRedirectUri(opts);
     let tokens;
@@ -178,8 +200,11 @@ export function createApp(opts: CreateAppOptions) {
     } catch (err) {
       const reason = googleErrorCode(err);
       return c.html(
-        `<h1>Google token exchange failed</h1><p>${escapeHtml(oauthExchangeHint(reason, redirectUri))}</p>`,
-        400,
+        renderConnectErrorPage({
+          kind: "oauth_exchange",
+          detail: oauthExchangeHint(reason, redirectUri),
+        }),
+        connectErrorStatus("oauth_exchange"),
       );
     }
     const grantId = newId("grant");
@@ -206,8 +231,8 @@ export function createApp(opts: CreateAppOptions) {
     } catch {
       await opts.store.deleteGrant(grantId, session.tenantId);
       return c.html(
-        "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
-        500,
+        renderConnectErrorPage({ kind: "vault_failed" }),
+        connectErrorStatus("vault_failed"),
       );
     }
     session.oauthState = undefined;
@@ -379,10 +404,3 @@ function safeEqual(left: string, right: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}

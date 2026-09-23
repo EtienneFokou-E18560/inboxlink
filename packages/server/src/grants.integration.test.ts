@@ -118,7 +118,11 @@ describe("grants, vault, and Gmail OAuth", () => {
     const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
     const html = await connect.text();
-    const href = (html.match(/href="([^"]+)"/)?.[1] ?? "")
+    assert.match(html, /Inbox<span>Link<\/span>/);
+    assert.match(html, /data-testid="connect-cta"/);
+    assert.match(html, /This link expires/);
+    assert.doesNotMatch(html, /Stub Connect UI/);
+    const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
       .replaceAll("&amp;", "&")
       .replaceAll("&quot;", '"');
     const authUrl = new URL(href);
@@ -222,7 +226,7 @@ describe("OAuth callback when Google rejects the code", () => {
       });
       const session = (await created.json()) as { linkToken: string };
       const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
-      const href = ((await connect.text()).match(/href="([^"]+)"/)?.[1] ?? "")
+      const href = ((await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
         .replaceAll("&amp;", "&")
         .replaceAll("&quot;", '"');
       const state = new URL(href).searchParams.get("state");
@@ -232,8 +236,9 @@ describe("OAuth callback when Google rejects the code", () => {
       );
       assert.equal(callback.status, 400);
       const html = await callback.text();
-      assert.match(html, /Google token exchange failed/);
+      assert.match(html, /Google did not accept the authorization/);
       assert.match(html, /rejected the OAuth client/);
+      assert.match(html, /Inbox<span>Link<\/span>/);
       const listed = await app.request("/v1/grants?externalUserId=user-1");
       const { grants } = (await listed.json()) as { grants: unknown[] };
       assert.equal(grants.length, 0);
@@ -242,5 +247,90 @@ describe("OAuth callback when Google rejects the code", () => {
         google.close((err) => (err ? reject(err) : resolve()));
       });
     }
+  });
+});
+
+describe("Connect UI session errors", () => {
+  function buildApp() {
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault("test-master-key-at-least-16");
+    const gmail = new GmailAdapter({
+      clientId: "test-client-id.apps.googleusercontent.com",
+      clientSecret: "test-client-secret",
+      redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+      tokenUrl,
+      userinfoUrl,
+    });
+    return {
+      store,
+      app: createApp({
+        store,
+        vault,
+        gmail,
+        publicBaseUrl: "http://localhost:8787",
+        apiSecret: API_SECRET,
+        mode: "single",
+        gmailScopes: ["openid"],
+        oauthRedirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        queue: null,
+      }),
+    };
+  }
+
+  it("shows a polished invalid-link page for unknown tokens", async () => {
+    const { app } = buildApp();
+    const res = await app.request("/v1/connect/not-a-real-token");
+    assert.equal(res.status, 404);
+    const html = await res.text();
+    assert.match(html, /This connect link is invalid/);
+    assert.match(html, /role="alert"/);
+    assert.match(html, /Inbox<span>Link<\/span>/);
+  });
+
+  it("shows session-expiry UX when the link has timed out", async () => {
+    const { app, store } = buildApp();
+    const created = await app.request("/v1/link/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        externalUserId: "user-exp",
+        redirectUri: "http://localhost:9999/done",
+      }),
+    });
+    const session = (await created.json()) as { linkToken: string; sessionId: string };
+    const stored = await store.getSession(session.sessionId);
+    assert.ok(stored);
+    stored.expiresAt = new Date(Date.now() - 60_000).toISOString();
+    await store.saveSession(stored);
+
+    const res = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
+    assert.equal(res.status, 404);
+    const html = await res.text();
+    assert.match(html, /This connect link has expired/);
+    assert.match(html, /request a new connect link/i);
+    assert.doesNotMatch(html, /Continue with Google/);
+  });
+
+  it("explains completed sessions instead of offering another CTA", async () => {
+    const { app, store } = buildApp();
+    const created = await app.request("/v1/link/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        externalUserId: "user-done",
+        redirectUri: "http://localhost:9999/done",
+      }),
+    });
+    const session = (await created.json()) as { linkToken: string; sessionId: string };
+    const stored = await store.getSession(session.sessionId);
+    assert.ok(stored);
+    stored.status = "completed";
+    await store.saveSession(stored);
+
+    const res = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
+    assert.equal(res.status, 400);
+    const html = await res.text();
+    assert.match(html, /This session already finished/);
+    assert.doesNotMatch(html, /Continue with Google/);
   });
 });

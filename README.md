@@ -40,7 +40,7 @@ With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and 
 | `@inboxlink/adapters-gmail` | Gmail OAuth adapter (URL + token exchange) |
 | `@inboxlink/sdk` | Host-app HTTP client |
 | `@inboxlink/server` | Hono HTTP service |
-| `@inboxlink/connect-ui` | Stub (server ships minimal Connect HTML for now) |
+| `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors) |
 | `@inboxlink/demo` | Tiny SDK demo (`apps/demo`) |
 
 ## Requirements

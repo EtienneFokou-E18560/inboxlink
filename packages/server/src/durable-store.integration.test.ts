@@ -86,8 +86,10 @@ function pair(db: PgDatabase) {
   return { app, vault };
 }
 
-function connectHref(html: string): URL {
-  const href = (html.match(/href="([^"]+)"/)?.[1] ?? "")
+function connectAuthUrl(html: string): URL {
+  const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1]
+    ?? html.match(/href="([^"]+)"[^>]*data-testid="connect-cta"/)?.[1]
+    ?? "")
     .replaceAll("&amp;", "&")
     .replaceAll("&quot;", '"');
   return new URL(href);
@@ -132,7 +134,7 @@ describe("shared Postgres store across instances", () => {
 
     const connect = await second.app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
-    const state = connectHref(await connect.text()).searchParams.get("state");
+    const state = connectAuthUrl(await connect.text()).searchParams.get("state");
     assert.ok(state);
 
     const callback = await first.app.request(
