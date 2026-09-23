@@ -9,15 +9,10 @@ Gmail-first surface: Connect sessions, grant exchange, **list / get messages**, 
 ## Install
 
 ```bash
-# After a public npm release (maintainer runs the publish workflow):
 npm install @inboxlink/sdk
-
-# Until then — monorepo / git dependency:
-pnpm add @inboxlink/sdk --filter your-app
-# or: "file:../inboxlink/packages/sdk" / git+https://github.com/EtienneFokou-E18560/inboxlink.git
 ```
 
-Until the first npm publish, consume the package from this repository via the pnpm workspace or a git dependency. See [docs/publishing.md](../../docs/publishing.md).
+Monorepo / git consumers can still use the workspace or a `file:` / git dependency. See [docs/publishing.md](../../docs/publishing.md) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Quick start (Production, single mode)
 

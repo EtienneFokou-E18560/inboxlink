@@ -73,7 +73,7 @@ Details and diagram: [README.md](README.md#architecture-overview).
 
 ## Deferred work (do not assume in-scope)
 
-Microsoft Graph, IMAP, a live npm release (publish path is prepared), and career-workspace integration are **deferred**. Document stub vs production behavior in the PR when you touch OAuth, vault, or sync.
+Microsoft Graph, IMAP, and career-workspace integration are **deferred**. npm releases of `@inboxlink/core` / `@inboxlink/sdk` are manual (`publish-npm.yml`). Document stub vs production behavior in the PR when you touch OAuth, vault, or sync.
 
 ## Pull requests
 
