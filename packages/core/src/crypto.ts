@@ -12,16 +12,17 @@ function deriveKey(masterKey: string): Buffer {
  * AES-256-GCM envelope helpers for the local/dev vault.
  * Production deployments should swap the KEK source for KMS while keeping this envelope shape.
  */
-export function sealSecret(masterKey: string, plaintext: string): Uint8Array {
+export function sealSecret(masterKey: string, plaintext: string, aad?: string): Uint8Array {
   const key = deriveKey(masterKey);
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGO, key, iv);
+  if (aad) cipher.setAAD(Buffer.from(aad, "utf8"));
   const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return new Uint8Array(Buffer.concat([iv, tag, encrypted]));
 }
 
-export function openSecret(masterKey: string, ciphertext: Uint8Array): string {
+export function openSecret(masterKey: string, ciphertext: Uint8Array, aad?: string): string {
   const buf = Buffer.from(ciphertext);
   if (buf.length < IV_LENGTH + TAG_LENGTH + 1) {
     throw new Error("ciphertext too short");
@@ -31,6 +32,7 @@ export function openSecret(masterKey: string, ciphertext: Uint8Array): string {
   const data = buf.subarray(IV_LENGTH + TAG_LENGTH);
   const key = deriveKey(masterKey);
   const decipher = createDecipheriv(ALGO, key, iv);
+  if (aad) decipher.setAAD(Buffer.from(aad, "utf8"));
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
 }

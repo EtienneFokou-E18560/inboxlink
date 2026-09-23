@@ -37,6 +37,7 @@ export function createAppFromEnv(
     apiSecret: config.apiSecret,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
+    oauthRedirectUri: config.googleRedirectUri,
     queue,
   });
   return { app, config, store, vault };

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, Message } from "@inboxlink/core";
@@ -22,6 +23,8 @@ export type CreateAppOptions = {
   apiSecret: string;
   mode: "single" | "multi";
   gmailScopes: string[];
+  /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
+  oauthRedirectUri?: string;
   queue: QueueHandle | null;
 };
 
@@ -57,7 +60,7 @@ export function createApp(opts: CreateAppOptions) {
     }
     const auth = c.req.header("authorization") ?? "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!token || token !== opts.apiSecret) {
+    if (!safeEqual(token, opts.apiSecret)) {
       return c.json({ error: "unauthorized" }, 401);
     }
     c.set("tenantId", "default");
@@ -106,13 +109,15 @@ export function createApp(opts: CreateAppOptions) {
   /** Minimal Connect stub page — redirects into Gmail OAuth. */
   app.get("/v1/connect/:linkToken", (c) => {
     const session = opts.store.getSessionByToken(c.req.param("linkToken"));
-    if (!session) return c.html("<h1>Invalid or expired link</h1>", 404);
+    if (!session || isExpired(session.expiresAt)) {
+      return c.html("<h1>Invalid or expired link</h1>", 404);
+    }
     if (session.status !== "pending") {
       return c.html(`<h1>Session ${session.status}</h1>`, 400);
     }
     const state = randomToken(16);
     session.oauthState = state;
-    const redirectUri = new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString();
+    const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
       redirectUri,
@@ -129,7 +134,7 @@ export function createApp(opts: CreateAppOptions) {
 <body>
   <h1>Connect inbox</h1>
   <p>InboxLink will request <strong>read-only</strong> Gmail access. Your host app never sees the refresh token.</p>
-  <p><a class="button" href="${authUrl}">Continue with Google</a></p>
+  <p><a class="button" href="${escapeHtml(authUrl)}">Continue with Google</a></p>
   <p class="muted">Stub Connect UI — replace with packages/connect-ui.</p>
 </body></html>`);
   });
@@ -145,10 +150,11 @@ export function createApp(opts: CreateAppOptions) {
       return c.html("<h1>Missing code/state</h1>", 400);
     }
     const session = [...opts.store.sessions.values()].find((s) => s.oauthState === state);
-    if (!session) {
+    if (!session || isExpired(session.expiresAt)) {
       return c.html("<h1>Unknown OAuth state</h1>", 400);
     }
-    const redirectUri = new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString();
+    session.oauthState = undefined;
+    const redirectUri = oauthRedirectUri(opts);
     const tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
     const grantId = newId("grant");
     const now = new Date().toISOString();
@@ -214,7 +220,8 @@ export function createApp(opts: CreateAppOptions) {
   app.delete("/v1/grants/:grantId", async (c) => {
     const grantId = c.req.param("grantId");
     const grant = opts.store.grants.get(grantId);
-    if (!grant) return c.json({ error: "not_found" }, 404);
+    const tenantId = c.get("tenantId");
+    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     await opts.vault.destroy(grantId);
     opts.store.grants.delete(grantId);
     opts.store.messages.delete(grantId);
@@ -248,6 +255,25 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   return app;
+}
+
+function oauthRedirectUri(opts: CreateAppOptions): string {
+  return (
+    opts.oauthRedirectUri ??
+    new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString()
+  );
+}
+
+function isExpired(iso: string): boolean {
+  const at = Date.parse(iso);
+  return Number.isNaN(at) || at <= Date.now();
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function escapeHtml(value: string): string {

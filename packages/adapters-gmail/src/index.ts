@@ -7,6 +7,7 @@ export type GmailAdapterConfig = {
   redirectUri: string;
   authBaseUrl?: string;
   tokenUrl?: string;
+  userinfoUrl?: string;
 };
 
 const DEFAULT_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -90,7 +91,10 @@ export class GmailAdapter implements MailboxAdapter {
       refresh_token?: string;
       expires_in?: number;
       scope?: string;
+      id_token?: string;
     };
+    const email =
+      emailFromIdToken(json.id_token) ?? (await this.fetchEmail(json.access_token));
     return {
       accessToken: json.access_token,
       refreshToken: json.refresh_token,
@@ -98,8 +102,19 @@ export class GmailAdapter implements MailboxAdapter {
         typeof json.expires_in === "number"
           ? new Date(Date.now() + json.expires_in * 1000).toISOString()
           : undefined,
+      email,
       scopes: (json.scope ?? "").split(/\s+/).filter(Boolean),
     };
+  }
+
+  private async fetchEmail(accessToken: string): Promise<string | undefined> {
+    const res = await fetch(
+      this.config.userinfoUrl ?? "https://openidconnect.googleapis.com/v1/userinfo",
+      { headers: { authorization: `Bearer ${accessToken}` } },
+    );
+    if (!res.ok) return undefined;
+    const json = (await res.json()) as { email?: string };
+    return json.email;
   }
 
   async refreshAccessToken(refreshToken: string): Promise<{
@@ -134,6 +149,20 @@ export class GmailAdapter implements MailboxAdapter {
           ? new Date(Date.now() + json.expires_in * 1000).toISOString()
           : undefined,
     };
+  }
+}
+
+function emailFromIdToken(idToken: string | undefined): string | undefined {
+  if (!idToken) return undefined;
+  const payload = idToken.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      email?: string;
+    };
+    return json.email;
+  } catch {
+    return undefined;
   }
 }
 
