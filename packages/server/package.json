@@ -16,23 +16,27 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json",
     "lint": "tsc -b tsconfig.json",
     "dev": "tsx watch src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "node --import tsx --test src/grants.integration.test.ts src/config.test.ts"
+    "test": "node --import tsx --test src/grants.integration.test.ts src/config.test.ts src/durable-store.integration.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
     "@inboxlink/adapters-gmail": "workspace:*",
     "@inboxlink/core": "workspace:*",
     "drizzle-orm": "^0.41.0",
-    "hono": "^4.7.5"
+    "hono": "^4.7.5",
+    "postgres": "^3.4.9"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "tsx": "^4.19.3"
   },
   "optionalDependencies": {

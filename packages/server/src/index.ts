@@ -6,15 +6,21 @@ import { loadConfig } from "./config.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
 import { createSyncQueue } from "./queue/sync-queue.js";
+import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
+import { createPostgresClient, PostgresJsExecutor } from "./db/sql.js";
+import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
 
 type AppBundle = {
   app: ReturnType<typeof createApp>;
   config: ReturnType<typeof loadConfig>;
-  store: MemoryStore;
-  vault: MemoryTokenVault;
+  store: GrantStore;
+  vault: MemoryTokenVault | PostgresTokenVault;
+  storeKind: "memory" | "postgres";
 };
+
+const postgresByUrl = new Map<string, { db: PgDatabase; store: PostgresStore }>();
 
 /** Build the Hono app from env (no listen). Used by Node CLI and Vercel. */
 export function createAppFromEnv(
@@ -22,8 +28,13 @@ export function createAppFromEnv(
   queue: QueueHandle | null = null,
 ): AppBundle {
   const config = loadConfig(env);
-  const store = new MemoryStore();
-  const vault = new MemoryTokenVault(config.masterKey);
+  const databaseUrl = config.databaseUrl?.trim();
+  const opened = databaseUrl ? openPostgres(databaseUrl) : undefined;
+  const store = opened?.store ?? new MemoryStore();
+  const vault = opened
+    ? new PostgresTokenVault(opened.db, config.masterKey)
+    : new MemoryTokenVault(config.masterKey);
+  const storeKind = opened ? "postgres" : "memory";
   const gmail = new GmailAdapter({
     clientId: config.googleClientId,
     clientSecret: config.googleClientSecret,
@@ -38,9 +49,19 @@ export function createAppFromEnv(
     mode: config.mode,
     gmailScopes: config.gmailScopes,
     oauthRedirectUri: config.googleRedirectUri,
+    storeKind,
     queue,
   });
-  return { app, config, store, vault };
+  return { app, config, store, vault, storeKind };
+}
+
+function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresStore } {
+  const existing = postgresByUrl.get(databaseUrl);
+  if (existing) return existing;
+  const db = new PgDatabase(new PostgresJsExecutor(createPostgresClient(databaseUrl)));
+  const created = { db, store: new PostgresStore(db) };
+  postgresByUrl.set(databaseUrl, created);
+  return created;
 }
 
 /**
@@ -79,4 +100,4 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
   return { app, server, config, queue };
 }
 
-export { createApp, loadConfig, MemoryStore, MemoryTokenVault };
+export { createApp, loadConfig, MemoryStore, MemoryTokenVault, PostgresStore, PostgresTokenVault };

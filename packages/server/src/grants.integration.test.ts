@@ -155,7 +155,7 @@ describe("grants, vault, and Gmail OAuth", () => {
     assert.equal(grants[0]?.email, EMAIL);
     assert.equal(grants[0]?.status, "active");
 
-    const ciphertext = vault.getCiphertext(grantId);
+    const ciphertext = await vault.getCiphertext(grantId);
     assert.ok(ciphertext);
     assert.equal(Buffer.from(ciphertext).toString("utf8").includes(REFRESH), false);
     const opened = await vault.open(ciphertext, { grantId, tenantId: "default" });
@@ -173,7 +173,7 @@ describe("grants, vault, and Gmail OAuth", () => {
       headers: auth,
     });
     assert.equal(revoked.status, 204);
-    assert.equal(vault.getCiphertext(grantId), undefined);
+    assert.equal(await vault.getCiphertext(grantId), undefined);
 
     const after = await app.request("/v1/grants?externalUserId=user-1", { headers: auth });
     const remaining = (await after.json()) as { grants: unknown[] };
@@ -232,7 +232,9 @@ describe("OAuth callback when Google rejects the code", () => {
       const html = await callback.text();
       assert.match(html, /Google token exchange failed/);
       assert.match(html, /rejected the OAuth client/);
-      assert.equal([...store.grants.keys()].length, 0);
+      const listed = await app.request("/v1/grants?externalUserId=user-1");
+      const { grants } = (await listed.json()) as { grants: unknown[] };
+      assert.equal(grants.length, 0);
     } finally {
       await new Promise<void>((resolve, reject) => {
         google.close((err) => (err ? reject(err) : resolve()));
