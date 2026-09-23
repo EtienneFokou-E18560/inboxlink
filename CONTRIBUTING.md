@@ -83,6 +83,10 @@ Microsoft Graph, IMAP, a live npm release (publish path is prepared), and career
 - Do not put Production URLs with live tokens, grant IDs tied to real mailboxes, or secret values in the PR body.
 - Document stub vs production behavior in the PR body when touching OAuth or vault code.
 
+## Suggested merge hierarchy (optional slices)
+
+Core connect + messages (and Gmail-complete work) land first. Host-integration docs/examples ([docs/host-integration.md](docs/host-integration.md), Slice J) are **optional and last** — merge only when you want a host product path. They must not introduce a dependency on career-workspace or any other host app.
+
 ## npm packages
 
 - Publishable packages: `@inboxlink/core`, `@inboxlink/sdk` (see [docs/publishing.md](docs/publishing.md)).

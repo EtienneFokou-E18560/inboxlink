@@ -240,6 +240,15 @@ Connect (`/v1/connect/...`) and the Gmail OAuth callback stay public (state-boun
 - No imports, shared DB, or shared types with career-workspace.
 - Job-application domain (Review Queue, classifiers, coach) stays out of this repo.
 
+## Host integration (optional — Slice J, last)
+
+Any host app can drive Connect without coupling this repo to a product codebase. See:
+
+- [docs/host-integration.md](docs/host-integration.md) — create session → redirect → grant exchange (+ optional webhook notes)
+- [examples/host-integration/](examples/host-integration/) — curl / Node sketches
+
+Treat this slice as **optional and last** in the merge hierarchy (after connect + messages are proven). Do not add host-app dependencies here.
+
 ## License
 
 [MIT](LICENSE)
