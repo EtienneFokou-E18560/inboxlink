@@ -60,7 +60,9 @@ pnpm build
 pnpm --filter @inboxlink/server dev
 ```
 
-Health check: [http://localhost:8787/health](http://localhost:8787/health). `GET /` and `GET /health/` return the same JSON.
+Health check: [http://localhost:8787/health](http://localhost:8787/health). `GET /` and `GET /health/` return the same JSON. When the store is not Postgres, the body includes `warning: "ephemeral_store"` and operator `guidance`.
+
+Ops: structured JSON logs (secrets redacted), [docs/ops-runbook.md](docs/ops-runbook.md), and `pnpm smoke:health -- <base-url>` (requires `store: "postgres"` unless you pass `--allow-memory`).
 
 ### Vercel
 

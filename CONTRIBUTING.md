@@ -18,6 +18,7 @@ Node **22+** and **pnpm** are required.
 - This repo is **standalone**. Do not import or depend on [career-workspace](https://github.com/EtienneFokou-E18560/career-workspace).
 - Prefer least-privilege Gmail scopes (`gmail.readonly`) unless a feature explicitly needs more.
 - Never commit real OAuth client secrets, refresh tokens, or master keys. Use `.env.example` placeholders only.
+- Prefer structured logs via `@inboxlink/server` `log` helpers (secrets are redacted). See [docs/ops-runbook.md](docs/ops-runbook.md).
 
 ## Pull requests
 
