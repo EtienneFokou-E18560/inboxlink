@@ -77,8 +77,9 @@ function buildApp() {
       "email",
     ],
     queue: null,
+    rateLimiter: null,
   });
-  return { app, vault };
+  return { app, vault, store };
 }
 
 describe("grants, vault, and Gmail OAuth", () => {
@@ -169,6 +170,8 @@ describe("grants, vault, and Gmail OAuth", () => {
     assert.equal(grants[0]?.id, grantId);
     assert.equal(grants[0]?.email, EMAIL);
     assert.equal(grants[0]?.status, "active");
+    assert.equal("tenantId" in (grants[0] ?? {}), false);
+    assert.equal("externalUserId" in (grants[0] ?? {}), false);
 
     const ciphertext = await vault.getCiphertext(grantId);
     assert.ok(ciphertext);

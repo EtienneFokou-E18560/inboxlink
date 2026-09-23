@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
@@ -9,6 +8,13 @@ import {
   renderConnectErrorPage,
   renderConnectPage,
 } from "@inboxlink/connect-ui";
+import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
+import { toPublicGrant, validateExternalUserId, validateRedirectUri } from "../grants-public.js";
+import {
+  createPassthroughRateLimiter,
+  createRateLimiter,
+  type RateLimiter,
+} from "../rate-limit.js";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
@@ -34,7 +40,12 @@ export type CreateAppOptions = {
   };
   gmail: GmailAdapter;
   publicBaseUrl: string;
+  /** Bearer secret for the default tenant (backward compatible). */
   apiSecret: string;
+  /** Optional tenantId → secret map for multi-host deployments. */
+  tenantSecrets?: Record<string, string>;
+  /** Tenant bound to `apiSecret` when not listed in `tenantSecrets`. */
+  tenantId?: string;
   mode: "single" | "multi";
   gmailScopes: string[];
   /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
@@ -42,10 +53,26 @@ export type CreateAppOptions = {
   /** `postgres` when DATABASE_URL is set; otherwise process memory. */
   storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
+  /** Soft abuse guard. Pass `null` to disable (tests). Multi mode enables a default limiter. */
+  rateLimiter?: RateLimiter | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
   const app = new Hono<AppEnv>();
+  const tenantSecrets =
+    opts.tenantSecrets && Object.keys(opts.tenantSecrets).length > 0
+      ? opts.tenantSecrets
+      : buildTenantSecrets({
+          apiSecret: opts.apiSecret,
+          tenantId: opts.tenantId,
+        });
+  const rateLimiter =
+    opts.rateLimiter === null
+      ? createPassthroughRateLimiter()
+      : (opts.rateLimiter ??
+        (opts.mode === "multi"
+          ? createRateLimiter({ windowMs: 60_000, maxRequests: 120 })
+          : createPassthroughRateLimiter()));
 
   app.use("*", cors());
   app.use("*", async (c, next) => {
@@ -109,18 +136,34 @@ export function createApp(opts: CreateAppOptions) {
       return next();
     }
     if (c.req.path.startsWith("/v1/connect/")) {
+      const limited = rateLimiter.check(`connect:${clientKey(c)}`);
+      if (!limited.ok) {
+        return c.json({ error: "rate_limited" }, 429, {
+          "retry-after": String(limited.retryAfterSec),
+        });
+      }
       return next();
     }
     if (opts.mode === "single") {
-      c.set("tenantId", "default");
+      c.set("tenantId", opts.tenantId?.trim() || "default");
       return next();
     }
-    const auth = c.req.header("authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!safeEqual(token, opts.apiSecret)) {
+
+    const token = parseBearerToken(c.req.header("authorization"));
+    if (!token) {
       return c.json({ error: "unauthorized" }, 401);
     }
-    c.set("tenantId", "default");
+    const tenantId = resolveTenantId(token, tenantSecrets);
+    if (!tenantId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const limited = rateLimiter.check(`tenant:${tenantId}`);
+    if (!limited.ok) {
+      return c.json({ error: "rate_limited" }, 429, {
+        "retry-after": String(limited.retryAfterSec),
+      });
+    }
+    c.set("tenantId", tenantId);
     return next();
   });
 
@@ -130,14 +173,16 @@ export function createApp(opts: CreateAppOptions) {
       redirectUri?: string;
       products?: string[];
     };
-    if (!body.externalUserId || !body.redirectUri) {
+    const externalUserId = validateExternalUserId(body.externalUserId);
+    const redirectUri = validateRedirectUri(body.redirectUri);
+    if (!externalUserId || !redirectUri) {
       return c.json({ error: "externalUserId and redirectUri are required" }, 400);
     }
     const tenantId = c.get("tenantId");
     const session = await opts.store.createSession({
       tenantId,
-      externalUserId: body.externalUserId,
-      redirectUri: body.redirectUri,
+      externalUserId,
+      redirectUri,
       products: body.products ?? ["messages"],
     });
     const connectUrl = new URL(
@@ -153,8 +198,9 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   app.get("/v1/link/sessions/:id", async (c) => {
+    const tenantId = c.get("tenantId");
     const session = await opts.store.getSession(c.req.param("id"));
-    if (!session) return c.json({ error: "not_found" }, 404);
+    if (!session || session.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     return c.json({
       id: session.id,
       status: session.status,
@@ -308,17 +354,22 @@ export function createApp(opts: CreateAppOptions) {
   app.post("/v1/grants/exchange", async (c) => {
     const body = (await c.req.json()) as { publicToken?: string };
     if (!body.publicToken) return c.json({ error: "publicToken required" }, 400);
-    const grantId = await opts.store.consumePublicToken(body.publicToken);
+    const tenantId = c.get("tenantId");
+    const grantId = await opts.store.consumePublicToken(body.publicToken, tenantId);
     if (!grantId) return c.json({ error: "invalid_public_token" }, 400);
+    const grant = await opts.store.getGrant(grantId);
+    if (!grant || grant.tenantId !== tenantId) {
+      return c.json({ error: "invalid_public_token" }, 400);
+    }
     return c.json({ grantId });
   });
 
   app.get("/v1/grants", async (c) => {
-    const externalUserId = c.req.query("externalUserId");
+    const externalUserId = validateExternalUserId(c.req.query("externalUserId"));
     if (!externalUserId) return c.json({ error: "externalUserId required" }, 400);
     const tenantId = c.get("tenantId");
     const grants = await opts.store.listGrants(tenantId, externalUserId);
-    return c.json({ grants });
+    return c.json({ grants: grants.map(toPublicGrant) });
   });
 
   app.delete("/v1/grants/:grantId", async (c) => {
@@ -590,10 +641,8 @@ function isExpired(iso: string): boolean {
   return Number.isNaN(at) || at <= Date.now();
 }
 
-function safeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+function clientKey(c: { req: { header: (name: string) => string | undefined } }): string {
+  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  return forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
 }
 

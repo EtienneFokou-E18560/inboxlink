@@ -22,4 +22,20 @@ describe("public URL and OAuth redirect", () => {
       "https://inboxlink-two.vercel.app",
     );
   });
+
+  it("defaults to single mode and maps tenant secrets", () => {
+    const single = loadConfig({});
+    assert.equal(single.mode, "single");
+    const multi = loadConfig({
+      INBOXLINK_MODE: "multi",
+      INBOXLINK_API_SECRET: "primary-secret",
+      INBOXLINK_TENANT_ID: "default",
+      INBOXLINK_TENANT_SECRETS: "acme=acme-secret",
+    });
+    assert.equal(multi.mode, "multi");
+    assert.deepEqual(multi.tenantSecrets, {
+      default: "primary-secret",
+      acme: "acme-secret",
+    });
+  });
 });

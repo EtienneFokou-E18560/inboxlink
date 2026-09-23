@@ -120,8 +120,11 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `GOOGLE_CLIENT_ID` | **Yes** for live Gmail | OAuth **web** client |
 | `GOOGLE_CLIENT_SECRET` | **Yes** for live Gmail | Matching secret |
 | `GOOGLE_REDIRECT_URI` | Strongly recommended | Must match Console exactly (local or prod callback URL) |
-| `INBOXLINK_MODE` | Optional | Default `single` (no Bearer). `multi` needs API secret. |
-| `INBOXLINK_API_SECRET` | If `multi` | Bearer for `/v1/*` except oauth/connect |
+| `INBOXLINK_MODE` | Optional | Default **`single`** (no Bearer). Do not flip Production to `multi` without an explicit ops decision and a real API secret. |
+| `INBOXLINK_API_SECRET` | If `multi` | Bearer for the default tenant (`/v1/*` except oauth/connect). Never commit real values. |
+| `INBOXLINK_TENANT_ID` | Optional | Tenant id for `INBOXLINK_API_SECRET` (default `default`) |
+| `INBOXLINK_TENANT_SECRETS` | Optional | Extra `tenantId=secret` pairs (comma/newline) for multiple host apps |
+| `INBOXLINK_RATE_LIMIT_WINDOW_MS` / `INBOXLINK_RATE_LIMIT_MAX` | Optional | Soft in-process abuse guard in multi (defaults 60000 / 120) |
 | `GMAIL_SCOPES` | Optional | Default readonly + openid email |
 | `PORT` / `HOST` | Local only | Not used on Vercel |
 | `REDIS_URL` | Optional | Queue stub |
@@ -213,12 +216,23 @@ Set Project → Environment Variables from the checklist above (never commit Pro
 | Microsoft Graph adapter | Separate OAuth console + `MICROSOFT_*` env |
 | IMAP adapter | App-password / password vaulting; security review first |
 | npm publish (`@inboxlink/sdk` et al.) | Path ready ([docs/publishing.md](docs/publishing.md)); no live release yet |
-| Multi-tenant production hardening | Mode can be `multi`; rate limits / audits still light |
 | career-workspace host wiring | Optional **last**; core must stay independent |
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks, PR expectations, and scope rules.
+
+### Multi mode (optional)
+
+Default mode is **`single`** — demos and Production should not flip to `multi` casually. When you do enable multi:
+
+1. Set `INBOXLINK_MODE=multi` and a **non-placeholder** `INBOXLINK_API_SECRET` (hosted/production refuses the committed `dev-api-secret-change-me` value).
+2. Host apps must send `Authorization: Bearer <secret>` on every host API (not Basic, not bare tokens).
+3. Sessions, grant list/exchange/revoke, and messages are scoped to the tenant resolved from that Bearer secret.
+4. `GET /v1/grants` returns a public grant shape (no `tenantId` / `externalUserId` in the JSON).
+5. **Rotate** `INBOXLINK_API_SECRET` (or a row in `INBOXLINK_TENANT_SECRETS`) by deploying the new value, updating host clients, then retiring the old secret — never commit the secret.
+
+Connect (`/v1/connect/...`) and the Gmail OAuth callback stay public (state-bound). Soft rate limits apply to connect and authenticated host routes in multi mode.
 
 ## Independence from career-workspace
 

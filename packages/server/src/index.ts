@@ -9,6 +9,7 @@ import type { QueueHandle } from "./queue/sync-queue.js";
 import { createSyncQueue } from "./queue/sync-queue.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import { createPostgresClient, PostgresJsExecutor } from "./db/sql.js";
+import { createRateLimiter } from "./rate-limit.js";
 import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
@@ -47,11 +48,20 @@ export function createAppFromEnv(
     gmail,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
+    tenantId: config.tenantId,
+    tenantSecrets: config.tenantSecrets,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
     oauthRedirectUri: config.googleRedirectUri,
     storeKind,
     queue,
+    rateLimiter:
+      config.mode === "multi"
+        ? createRateLimiter({
+            windowMs: config.rateLimitWindowMs,
+            maxRequests: config.rateLimitMaxRequests,
+          })
+        : null,
   });
   return { app, config, store, vault, storeKind };
 }

@@ -1,3 +1,9 @@
+import {
+  buildTenantSecrets,
+  DEV_API_SECRET_PLACEHOLDER,
+  parseTenantSecrets,
+} from "./auth.js";
+
 export type ServerConfig = {
   port: number;
   host: string;
@@ -5,21 +11,36 @@ export type ServerConfig = {
   mode: "single" | "multi";
   masterKey: string;
   apiSecret: string;
+  /** Default tenant when only INBOXLINK_API_SECRET is set. */
+  tenantId: string;
+  /** tenantId → Bearer secret for multi mode. */
+  tenantSecrets: Record<string, string>;
   databaseUrl?: string;
   redisUrl?: string;
   googleClientId: string;
   googleClientSecret: string;
   googleRedirectUri: string;
   gmailScopes: string[];
+  /** Soft abuse guard for host APIs (multi mode). */
+  rateLimitWindowMs: number;
+  rateLimitMaxRequests: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
   const publicBaseUrl = resolvePublicBaseUrl(env, port);
+  // Default stays single — do not flip Production to multi without an explicit ops decision.
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
     env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
-  const apiSecret = env.INBOXLINK_API_SECRET ?? "dev-api-secret-change-me";
+  const apiSecret = env.INBOXLINK_API_SECRET ?? DEV_API_SECRET_PLACEHOLDER;
+  const tenantId = env.INBOXLINK_TENANT_ID?.trim() || "default";
+  const tenantSecrets = buildTenantSecrets({
+    apiSecret,
+    tenantId,
+    extra: parseTenantSecrets(env.INBOXLINK_TENANT_SECRETS),
+  });
+  assertMultiModeSecrets(mode, tenantSecrets, env);
   const scopes =
     env.GMAIL_SCOPES?.split(/\s+/).filter(Boolean) ??
     [
@@ -35,6 +56,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     mode,
     masterKey,
     apiSecret,
+    tenantId,
+    tenantSecrets,
     databaseUrl: env.DATABASE_URL,
     redisUrl: env.REDIS_URL,
     googleClientId: env.GOOGLE_CLIENT_ID ?? "your-google-client-id.apps.googleusercontent.com",
@@ -42,7 +65,38 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     googleRedirectUri:
       env.GOOGLE_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/gmail/callback`,
     gmailScopes: scopes,
+    rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
+    rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
   };
+}
+
+/**
+ * Multi mode in a hosted/production environment must not use the committed
+ * placeholder secret. Local demos may still use the placeholder.
+ */
+export function assertMultiModeSecrets(
+  mode: "single" | "multi",
+  tenantSecrets: Record<string, string>,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (mode !== "multi") return;
+  const hosted =
+    Boolean(env.VERCEL) ||
+    env.NODE_ENV === "production" ||
+    env.VERCEL_ENV === "production";
+  if (!hosted) return;
+  for (const [tenantId, secret] of Object.entries(tenantSecrets)) {
+    if (!secret || secret === DEV_API_SECRET_PLACEHOLDER) {
+      throw new Error(
+        `INBOXLINK_MODE=multi requires a non-default Bearer secret for tenant "${tenantId}" (set INBOXLINK_API_SECRET / INBOXLINK_TENANT_SECRETS). Default mode remains single until you explicitly enable multi.`,
+      );
+    }
+  }
+}
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw ?? "");
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
 /** Prefer an explicit public URL, then the stable Vercel production host. */
