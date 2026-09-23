@@ -2,6 +2,14 @@
 # Never runs on push or pull_request. Default is dry-run (no registry write).
 # Real publishes authenticate with the repository NPM_TOKEN secret.
 #
+# Provenance: npm attestations require a *public* GitHub source repository.
+# This workflow enables --provenance only when github.repository_visibility
+# is "public". While the repo is private/internal, publishes omit provenance
+# (package.json must not set publishConfig.provenance: true — that flag
+# overrides NPM_CONFIG_PROVENANCE and fails private-repo publishes).
+# Making the GitHub repository public automatically re-enables provenance.
+# Long-term recommendation for MIT OSS: make the repo public for provenance trust.
+#
 # Setup (one-time, before first real publish):
 # 1. Add an npm access token as the GitHub Actions secret NPM_TOKEN.
 # 2. Optionally add GitHub Environment "npm-publish" with required reviewers.
@@ -30,6 +38,7 @@ on:
 
 permissions:
   contents: read
+  # Required for npm provenance when the source repository is public.
   id-token: write
 
 concurrency:
@@ -66,6 +75,8 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           NPM_TAG: ${{ inputs.tag }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # public → provenance on; private/internal → provenance off (auto).
+          REPO_VISIBILITY: ${{ github.repository_visibility }}
         run: |
           set -euo pipefail
 
@@ -74,14 +85,30 @@ jobs:
             exit 1
           fi
 
+          # Do not set publishConfig.provenance in package.json while relying on
+          # NPM_CONFIG_PROVENANCE alone — package.json provenance:true wins and
+          # breaks private-repo publishes.
+          PROVENANCE_FLAG=""
+          if [ "${REPO_VISIBILITY}" = "public" ]; then
+            echo "Public source repository: enabling npm provenance."
+            export NPM_CONFIG_PROVENANCE=true
+            PROVENANCE_FLAG="--provenance"
+          else
+            echo "Source repository visibility is \"${REPO_VISIBILITY}\" (not public)."
+            echo "Publishing without provenance. Make the GitHub repo public to re-enable it."
+            export NPM_CONFIG_PROVENANCE=false
+          fi
+
           publish_one() {
             local filter="$1"
-            echo "::group::${filter} (dry_run=${DRY_RUN})"
+            echo "::group::${filter} (dry_run=${DRY_RUN}, provenance=${NPM_CONFIG_PROVENANCE})"
             if [ "${DRY_RUN}" = "true" ]; then
               pnpm --filter "$filter" exec npm pack --dry-run
-              pnpm --filter "$filter" publish --dry-run --access public --no-git-checks --tag "$NPM_TAG"
+              # shellcheck disable=SC2086 # intentional optional --provenance flag
+              pnpm --filter "$filter" publish --dry-run --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
             else
-              pnpm --filter "$filter" publish --access public --no-git-checks --tag "$NPM_TAG"
+              # shellcheck disable=SC2086 # intentional optional --provenance flag
+              pnpm --filter "$filter" publish --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
             fi
             echo "::endgroup::"
           }
