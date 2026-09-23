@@ -63,7 +63,7 @@ Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
 | `@inboxlink/adapters-gmail` | Gmail OAuth + message list/normalize |
 | `@inboxlink/sdk` | Host-app HTTP client |
 | `@inboxlink/server` | Hono HTTP service |
-| `@inboxlink/connect-ui` | Stub (server ships minimal Connect HTML for now) |
+| `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors) |
 | `@inboxlink/demo` | Tiny SDK demo (`apps/demo`) |
 
 ## Requirements
