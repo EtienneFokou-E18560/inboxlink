@@ -153,9 +153,17 @@ export function createApp(opts: CreateAppOptions) {
     if (!session || isExpired(session.expiresAt)) {
       return c.html("<h1>Unknown OAuth state</h1>", 400);
     }
-    session.oauthState = undefined;
     const redirectUri = oauthRedirectUri(opts);
-    const tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
+    let tokens;
+    try {
+      tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
+    } catch (err) {
+      const reason = googleErrorCode(err);
+      return c.html(
+        `<h1>Google token exchange failed</h1><p>${escapeHtml(oauthExchangeHint(reason, redirectUri))}</p>`,
+        400,
+      );
+    }
     const grantId = newId("grant");
     const now = new Date().toISOString();
     const grant: Grant = {
@@ -170,12 +178,21 @@ export function createApp(opts: CreateAppOptions) {
       updatedAt: now,
     };
     opts.store.grants.set(grantId, grant);
-    if (tokens.refreshToken) {
-      await opts.vault.seal(tokens.refreshToken, {
-        grantId,
-        tenantId: session.tenantId,
-      });
+    try {
+      if (tokens.refreshToken) {
+        await opts.vault.seal(tokens.refreshToken, {
+          grantId,
+          tenantId: session.tenantId,
+        });
+      }
+    } catch {
+      opts.store.grants.delete(grantId);
+      return c.html(
+        "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
+        500,
+      );
     }
+    session.oauthState = undefined;
     const publicToken = randomToken(24);
     session.status = "completed";
     session.grantId = grantId;
@@ -255,6 +272,25 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   return app;
+}
+
+function googleErrorCode(err: unknown): string {
+  const message = err instanceof Error ? err.message : "";
+  const match = message.match(/"error"\s*:\s*"([a-z0-9_]+)"/i);
+  return match?.[1] ?? "exchange_failed";
+}
+
+function oauthExchangeHint(code: string, redirectUri: string): string {
+  switch (code) {
+    case "invalid_client":
+      return "Google rejected the OAuth client. Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET with the web client values, redeploy, and start Connect again.";
+    case "redirect_uri_mismatch":
+      return `Add this exact redirect in the Google OAuth client: ${redirectUri}`;
+    case "invalid_grant":
+      return "The Google code expired or was already used. Start Connect again.";
+    default:
+      return "Google did not accept the authorization code. Check the OAuth client and redirect URI, redeploy, and start Connect again.";
+  }
 }
 
 function oauthRedirectUri(opts: CreateAppOptions): string {
