@@ -5,7 +5,7 @@
 | Component | Supported |
 |-----------|-----------|
 | Latest `main` (self-host / Production deploy) | Yes |
-| Published `@inboxlink/sdk` / `@inboxlink/core` (0.x while pre-1.0) | Yes — latest release on npm once published |
+| Published `@inboxlink/sdk` / `@inboxlink/core` (0.x while pre-1.0) | Yes — latest release on npm (`0.1.0`+) |
 | Older unpublished / forked trees | Best-effort only |
 
 Microsoft Graph and IMAP adapters are parked and out of scope for security support until unparked.
