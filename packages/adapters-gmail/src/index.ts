@@ -1,4 +1,5 @@
-import type { MailboxAdapter } from "@inboxlink/core";
+import type { MailboxAdapter, Message } from "@inboxlink/core";
+import { normalizeGmailMessage, type GmailMessageResource } from "./normalize.js";
 
 export type GmailAdapterConfig = {
   clientId: string;
@@ -8,7 +9,18 @@ export type GmailAdapterConfig = {
   authBaseUrl?: string;
   tokenUrl?: string;
   userinfoUrl?: string;
+  /** Gmail REST base, default `https://gmail.googleapis.com/gmail/v1`. Tests point this at a local server. */
+  gmailApiBaseUrl?: string;
 };
+
+export class GmailApiError extends Error {
+  constructor(readonly status: number) {
+    super(`Gmail API request failed: ${status}`);
+    this.name = "GmailApiError";
+  }
+}
+
+export { normalizeGmailMessage, type GmailMessageResource };
 
 const DEFAULT_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_TOKEN = "https://oauth2.googleapis.com/token";
@@ -16,7 +28,8 @@ const DEFAULT_TOKEN = "https://oauth2.googleapis.com/token";
 /**
  * Gmail OAuth adapter (v0 stub).
  * Builds real authorization URLs and token exchange requests against Google,
- * but does not call Gmail REST until Slice 2. No production secrets are bundled.
+ * and lists messages when a vaulted refresh token is exchanged for an access token.
+ * No production secrets are bundled.
  */
 export class GmailAdapter implements MailboxAdapter {
   readonly provider = "gmail" as const;
@@ -150,6 +163,41 @@ export class GmailAdapter implements MailboxAdapter {
           : undefined,
     };
   }
+
+  /**
+   * List mailbox messages and normalize each `format=full` resource.
+   * Callers pass a short-lived access token. This method does not see the refresh token.
+   */
+  async listMessages(input: {
+    accessToken: string;
+    grantId: string;
+    maxResults?: number;
+    pageToken?: string;
+  }): Promise<{ messages: Message[]; nextCursor?: string }> {
+    const base = (this.config.gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
+    const listUrl = new URL(`${base}/users/me/messages`);
+    listUrl.searchParams.set("maxResults", String(input.maxResults ?? 20));
+    if (input.pageToken) listUrl.searchParams.set("pageToken", input.pageToken);
+    const listed = await gmailJson<{ messages?: { id: string }[]; nextPageToken?: string }>(
+      listUrl,
+      input.accessToken,
+    );
+    const messages: Message[] = [];
+    for (const item of listed.messages ?? []) {
+      const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(item.id)}`);
+      getUrl.searchParams.set("format", "full");
+      const raw = await gmailJson<GmailMessageResource>(getUrl, input.accessToken);
+      const message = normalizeGmailMessage(raw, input.grantId);
+      if (message) messages.push(message);
+    }
+    return { messages, nextCursor: listed.nextPageToken };
+  }
+}
+
+async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
+  const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) throw new GmailApiError(res.status);
+  return (await res.json()) as T;
 }
 
 function emailFromIdToken(idToken: string | undefined): string | undefined {

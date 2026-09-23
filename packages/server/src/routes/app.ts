@@ -1,9 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Grant, Message, TokenVault } from "@inboxlink/core";
+import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
-import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
@@ -16,7 +16,9 @@ export type AppEnv = {
 
 export type CreateAppOptions = {
   store: GrantStore;
-  vault: TokenVault;
+  vault: TokenVault & {
+    getCiphertext(grantId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
+  };
   gmail: GmailAdapter;
   publicBaseUrl: string;
   apiSecret: string;
@@ -258,16 +260,56 @@ export function createApp(opts: CreateAppOptions) {
 
   app.get("/v1/grants/:grantId/messages", async (c) => {
     const grantId = c.req.param("grantId");
-    if (!(await opts.store.getGrant(grantId))) return c.json({ error: "not_found" }, 404);
-    const messages: Message[] = await opts.store.listMessages(grantId);
-    return c.json({ messages, nextCursor: undefined });
+    const tenantId = c.get("tenantId");
+    const grant = await opts.store.getGrant(grantId);
+    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
+    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+
+    const limit = parseLimit(c.req.query("limit"));
+    if (limit === null) return c.json({ error: "invalid_limit" }, 400);
+    const cursor = c.req.query("cursor")?.trim() || undefined;
+    if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
+
+    const ciphertext = await opts.vault.getCiphertext(grantId);
+    if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
+    let refreshToken: string;
+    try {
+      refreshToken = await opts.vault.open(ciphertext, { grantId, tenantId: grant.tenantId });
+    } catch {
+      return c.json({ error: "missing_refresh_token" }, 409);
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
+    } catch {
+      await markNeedsReauth(opts.store, grant);
+      return c.json({ error: "needs_reauth" }, 409);
+    }
+
+    try {
+      const page = await opts.gmail.listMessages({
+        accessToken,
+        grantId,
+        maxResults: limit,
+        pageToken: cursor,
+      });
+      return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+    } catch (err) {
+      if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+        await markNeedsReauth(opts.store, grant);
+        return c.json({ error: "needs_reauth" }, 409);
+      }
+      return c.json({ error: "gmail_unavailable" }, 502);
+    }
   });
 
   app.post("/v1/grants/:grantId/sync", async (c) => {
     const grantId = c.req.param("grantId");
+    const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
-    if (!grant) return c.json({ error: "not_found" }, 404);
-    // Slice 2 will call Gmail history.list; v0 returns empty watermark.
+    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     if (opts.queue) {
       await opts.queue.enqueue({
         grantId,
@@ -278,7 +320,7 @@ export function createApp(opts: CreateAppOptions) {
     return c.json({
       grantId,
       status: "accepted",
-      note: "Sync engine stub — Gmail history sync lands in Slice 2",
+      note: "Read messages with GET /v1/grants/:grantId/messages. History sync is not implemented.",
     });
   });
 
@@ -309,6 +351,20 @@ function oauthRedirectUri(opts: CreateAppOptions): string {
     opts.oauthRedirectUri ??
     new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString()
   );
+}
+
+function parseLimit(value: string | undefined): number | null {
+  if (value === undefined || value === "") return 20;
+  if (!/^\d+$/.test(value)) return null;
+  const limit = Number(value);
+  if (limit < 1 || limit > 25) return null;
+  return limit;
+}
+
+async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
+  grant.status = "needs_reauth";
+  grant.updatedAt = new Date().toISOString();
+  await store.updateGrant(grant);
 }
 
 function isExpired(iso: string): boolean {

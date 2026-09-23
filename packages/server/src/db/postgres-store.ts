@@ -167,6 +167,14 @@ export class PostgresStore implements GrantStore {
     );
   }
 
+  async updateGrant(grant: Grant): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(
+      `UPDATE grants SET status = $2, updated_at = $3 WHERE id = $1 AND tenant_id = $4`,
+      [grant.id, grant.status, grant.updatedAt, grant.tenantId],
+    );
+  }
+
   async putGrant(grant: Grant): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(
