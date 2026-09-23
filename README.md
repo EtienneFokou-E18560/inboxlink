@@ -12,11 +12,11 @@ Working TypeScript monorepo with:
 
 - Gmail OAuth **authorization URL + callback** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
 - Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext)
-- HTTP API: link sessions, Connect stub, grants exchange/list/revoke, message list, health
+- HTTP API: link sessions, Connect stub, grants exchange/list/revoke, message list/get, health
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
 - Optional Redis/BullMQ **queue placeholder** (history sync not implemented)
 
-`GET /v1/grants/:grantId/messages` opens the vaulted refresh token, refreshes Gmail access, and returns the normalized message shape. CI uses a local Gmail HTTP stand-in and does not call Google.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. Both open the vaulted refresh token, refresh Gmail access, and return the normalized message shape. CI uses a local Gmail HTTP stand-in and does not call Google. History sync, Microsoft/IMAP, and npm publish are not implemented.
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
 
@@ -164,7 +164,13 @@ List messages for a grant (`single` mode needs no API key):
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
 ```
 
-`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON never includes the refresh token.
+Get one message with attachment metadata:
+
+```bash
+curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
+```
+
+`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `attachments` / `body`). It never includes the refresh token.
 
 Demo host client:
 
