@@ -32,7 +32,7 @@
     "@inboxlink/adapters-gmail": "workspace:*",
     "@inboxlink/connect-ui": "workspace:*",
     "@inboxlink/core": "workspace:*",
-    "drizzle-orm": "^0.41.0",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.7.5",
     "postgres": "^3.4.9"
   },
