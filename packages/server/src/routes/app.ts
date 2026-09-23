@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
@@ -21,13 +22,8 @@ import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
 import { syncGmailGrant } from "../sync/gmail-sync.js";
-import {
-  DATABASE_UNAVAILABLE_GUIDANCE,
-  MEMORY_STORE_GUIDANCE,
-  NEEDS_REAUTH_GUIDANCE,
-  isHealthPath,
-  log,
-} from "../log.js";
+import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
+import { probeHealth, renderStatusPage } from "../public/index.js";
 
 export type AppEnv = {
   Variables: {
@@ -98,40 +94,39 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   // `/` is what the production URL opens. `/health/` is the same check with a trailing slash.
-  const health = async (c: { json: (body: unknown, status?: number) => Response }) => {
-    const storeKind = opts.storeKind ?? "memory";
-    try {
-      await opts.store.ready();
-    } catch {
-      log.error("health_database_unavailable", { store: storeKind });
-      return c.json(
-        {
-          ok: false,
-          service: "inboxlink",
-          mode: opts.mode,
-          store: storeKind,
-          error: "database_unavailable",
-          guidance: DATABASE_UNAVAILABLE_GUIDANCE,
-        },
-        503,
-      );
-    }
-    const body: Record<string, unknown> = {
-      ok: true,
-      service: "inboxlink",
+  // `/status` is a human HTML view of the same probe — JSON on `/health` stays canonical.
+  const runHealth = () =>
+    probeHealth({
+      store: opts.store,
       mode: opts.mode,
-      queue: opts.queue ? "stub" : "disabled",
-      store: storeKind,
-    };
-    if (storeKind !== "postgres") {
-      body.warning = "ephemeral_store";
-      body.guidance = MEMORY_STORE_GUIDANCE;
+      storeKind: opts.storeKind,
+      queue: opts.queue,
+    });
+
+  const healthJson = async (c: Context<AppEnv>) => {
+    const result = await runHealth();
+    if (!result.body.ok) {
+      log.error("health_database_unavailable", { store: result.body.store });
     }
-    return c.json(body);
+    return c.json(result.body, result.status);
   };
-  app.get("/", health);
-  app.get("/health", health);
-  app.get("/health/", health);
+
+  const healthHtml = async (c: Context<AppEnv>) => {
+    const result = await runHealth();
+    if (!result.body.ok) {
+      log.error("health_database_unavailable", { store: result.body.store });
+    }
+    return c.html(
+      renderStatusPage({ health: result.body, healthJsonHref: "/health" }),
+      result.status,
+    );
+  };
+
+  app.get("/", healthJson);
+  app.get("/health", healthJson);
+  app.get("/health/", healthJson);
+  app.get("/status", healthHtml);
+  app.get("/status/", healthHtml);
 
   /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
   app.get("/home", (c) => c.html(renderLandingPage()));
