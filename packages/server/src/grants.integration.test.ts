@@ -180,3 +180,63 @@ describe("grants, vault, and Gmail OAuth", () => {
     assert.deepEqual(remaining.grants, []);
   });
 });
+
+describe("OAuth callback when Google rejects the code", () => {
+  it("returns the Google error instead of an unhandled 500", async () => {
+    const google = createServer((_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_client" }));
+    });
+    await new Promise<void>((resolve) => google.listen(0, "127.0.0.1", resolve));
+    const port = (google.address() as { port: number }).port;
+    try {
+      const store = new MemoryStore();
+      const vault = new MemoryTokenVault("test-master-key-at-least-16");
+      const gmail = new GmailAdapter({
+        clientId: "test-client-id.apps.googleusercontent.com",
+        clientSecret: "test-client-secret",
+        redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        tokenUrl: `http://127.0.0.1:${port}/token`,
+        userinfoUrl: `http://127.0.0.1:${port}/userinfo`,
+      });
+      const app = createApp({
+        store,
+        vault,
+        gmail,
+        publicBaseUrl: "http://localhost:8787",
+        apiSecret: API_SECRET,
+        mode: "single",
+        gmailScopes: ["openid"],
+        oauthRedirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        queue: null,
+      });
+      const created = await app.request("/v1/link/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          externalUserId: "user-1",
+          redirectUri: "http://localhost:9999/done",
+        }),
+      });
+      const session = (await created.json()) as { linkToken: string };
+      const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
+      const href = ((await connect.text()).match(/href="([^"]+)"/)?.[1] ?? "")
+        .replaceAll("&amp;", "&")
+        .replaceAll("&quot;", '"');
+      const state = new URL(href).searchParams.get("state");
+      assert.ok(state);
+      const callback = await app.request(
+        `/v1/oauth/gmail/callback?code=used-code&state=${encodeURIComponent(state)}`,
+      );
+      assert.equal(callback.status, 400);
+      const html = await callback.text();
+      assert.match(html, /Google token exchange failed/);
+      assert.match(html, /rejected the OAuth client/);
+      assert.equal([...store.grants.keys()].length, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        google.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
+});
