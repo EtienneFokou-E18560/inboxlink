@@ -1,14 +1,13 @@
 # Manual / opt-in publish for @inboxlink/core and @inboxlink/sdk.
 # Never runs on push or pull_request. Default is dry-run (no registry write).
-# Real publish needs dry_run=false plus npm Trusted Publishing (OIDC) for this
-# workflow filename, or a granular NPM_TOKEN secret. Prefer OIDC; do not commit tokens.
+# Real publishes use npm Trusted Publishing (OIDC) configured for this workflow.
 #
 # Setup (one-time, before first real publish):
-# 1. Create empty packages on npmjs.com (or first publish with a classic token once).
-# 2. Add Trusted Publisher: GitHub Actions → repo EtienneFokou-E18560/inboxlink →
-#    workflow filename publish-npm.yml
+# 1. Create the packages on npmjs.com.
+# 2. Add a Trusted Publisher for each package: GitHub Actions → repo
+#    EtienneFokou-E18560/inboxlink → workflow filename publish-npm.yml.
 # 3. Optionally add GitHub Environment "npm-publish" with required reviewers.
-# 4. Optionally set secret NPM_TOKEN as fallback (stage-only preferred over write).
+#
 name: Publish npm packages
 
 on:
@@ -33,7 +32,7 @@ on:
 
 permissions:
   contents: read
-  # Required for npm Trusted Publishing (OIDC). Harmless for dry-run / token fallback.
+  # Required for npm Trusted Publishing (OIDC).
   id-token: write
 
 concurrency:
@@ -64,29 +63,15 @@ jobs:
       - name: Test SDK
         run: pnpm --filter @inboxlink/sdk test
 
+      # npm Trusted Publishing support is available in npm 11.5.1+.
       - name: Ensure npm CLI supports trusted publishing
         run: npm install -g npm@11.5.1
-
-      - name: Configure token fallback (optional)
-        if: ${{ inputs.dry_run == false }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${NPM_TOKEN:-}" ]; then
-            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> "$HOME/.npmrc"
-            echo "Configured NPM_TOKEN for publish fallback."
-          else
-            echo "No NPM_TOKEN secret. Relying on npm Trusted Publishing (OIDC)."
-            echo "If OIDC is not configured on npmjs.com for publish-npm.yml, this job will fail closed."
-          fi
 
       - name: Publish packages
         env:
           DRY_RUN: ${{ inputs.dry_run }}
           PACKAGE: ${{ inputs.package }}
           NPM_TAG: ${{ inputs.tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
 
