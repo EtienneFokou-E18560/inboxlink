@@ -47,7 +47,11 @@ export const linkSessions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  (t) => [uniqueIndex("link_sessions_token_idx").on(t.linkToken)],
+  (t) => [
+    uniqueIndex("link_sessions_token_idx").on(t.linkToken),
+    uniqueIndex("link_sessions_public_token_idx").on(t.publicToken),
+    index("link_sessions_oauth_state_idx").on(t.oauthState),
+  ],
 );
 
 export const grants = pgTable(
@@ -132,6 +136,8 @@ CREATE TABLE IF NOT EXISTS link_sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS link_sessions_public_token_idx ON link_sessions (public_token);
+CREATE INDEX IF NOT EXISTS link_sessions_oauth_state_idx ON link_sessions (oauth_state);
 
 CREATE TABLE IF NOT EXISTS grants (
   id TEXT PRIMARY KEY,

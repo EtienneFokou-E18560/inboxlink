@@ -1,0 +1,382 @@
+import type { Grant, GrantStatus, Message, Provider, TokenVault } from "@inboxlink/core";
+import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
+import type { GrantStore, StoredSession } from "../store.js";
+import { SCHEMA_SQL } from "./schema.js";
+import type { SqlExecutor } from "./sql.js";
+
+const TENANT_SQL = `
+INSERT INTO tenants (id, name, api_secret_hash)
+VALUES ('default', 'default', 'managed-by-env')
+ON CONFLICT (id) DO NOTHING;
+`;
+
+export class PgDatabase {
+  private ready: Promise<void> | null = null;
+
+  constructor(readonly sql: SqlExecutor) {}
+
+  ensure(): Promise<void> {
+    this.ready ??= this.migrate().catch((err) => {
+      this.ready = null;
+      throw err;
+    });
+    return this.ready;
+  }
+
+  private async migrate(): Promise<void> {
+    for (const statement of sqlStatements(SCHEMA_SQL + TENANT_SQL)) {
+      try {
+        await this.sql.exec(statement);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/already exists/i.test(message)) throw err;
+      }
+    }
+  }
+}
+
+type SessionRow = {
+  id: string;
+  link_token: string;
+  tenant_id: string;
+  external_user_id: string;
+  redirect_uri: string;
+  products: unknown;
+  status: string;
+  oauth_state: string | null;
+  public_token: string | null;
+  grant_id: string | null;
+  created_at: Date | string;
+  expires_at: Date | string;
+};
+
+type GrantRow = {
+  id: string;
+  tenant_id: string;
+  external_user_id: string;
+  provider: string;
+  email: string;
+  status: string;
+  scopes: unknown;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
+const SESSION_COLUMNS = `
+  id, link_token, tenant_id, external_user_id, redirect_uri, products, status,
+  oauth_state, public_token, grant_id, created_at, expires_at
+`;
+
+export class PostgresStore implements GrantStore {
+  constructor(private readonly db: PgDatabase) {}
+
+  ready(): Promise<void> {
+    return this.db.ensure();
+  }
+
+  async createSession(input: {
+    tenantId: string;
+    externalUserId: string;
+    redirectUri: string;
+    products: string[];
+    ttlMs?: number;
+  }): Promise<StoredSession> {
+    await this.db.ensure();
+    const id = newId("ls");
+    const linkToken = randomToken(24);
+    const now = Date.now();
+    const session: StoredSession = {
+      id,
+      linkToken,
+      tenantId: input.tenantId,
+      externalUserId: input.externalUserId,
+      redirectUri: input.redirectUri,
+      products: input.products,
+      status: "pending",
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + (input.ttlMs ?? 30 * 60_000)).toISOString(),
+    };
+    await this.db.sql.query(
+      `INSERT INTO link_sessions (
+         id, link_token, tenant_id, external_user_id, redirect_uri, products, status, created_at, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
+      [
+        session.id,
+        session.linkToken,
+        session.tenantId,
+        session.externalUserId,
+        session.redirectUri,
+        JSON.stringify(session.products),
+        session.status,
+        session.createdAt,
+        session.expiresAt,
+      ],
+    );
+    return session;
+  }
+
+  async getSession(id: string): Promise<StoredSession | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM link_sessions WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? mapSession(rows[0]) : undefined;
+  }
+
+  async getSessionByToken(linkToken: string): Promise<StoredSession | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM link_sessions WHERE link_token = $1`,
+      [linkToken],
+    );
+    return rows[0] ? mapSession(rows[0]) : undefined;
+  }
+
+  async findSessionByOAuthState(state: string): Promise<StoredSession | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SessionRow>(
+      `SELECT ${SESSION_COLUMNS} FROM link_sessions WHERE oauth_state = $1`,
+      [state],
+    );
+    return rows[0] ? mapSession(rows[0]) : undefined;
+  }
+
+  async saveSession(session: StoredSession): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(
+      `UPDATE link_sessions SET
+         status = $2,
+         oauth_state = $3,
+         public_token = $4,
+         grant_id = $5,
+         redirect_uri = $6,
+         products = $7::jsonb,
+         expires_at = $8
+       WHERE id = $1`,
+      [
+        session.id,
+        session.status,
+        session.oauthState ?? null,
+        session.publicToken ?? null,
+        session.grantId ?? null,
+        session.redirectUri,
+        JSON.stringify(session.products),
+        session.expiresAt,
+      ],
+    );
+  }
+
+  async putGrant(grant: Grant): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(
+      `INSERT INTO grants (
+         id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`,
+      [
+        grant.id,
+        grant.tenantId,
+        grant.externalUserId,
+        grant.provider,
+        grant.email,
+        grant.status,
+        JSON.stringify(grant.scopes),
+        grant.createdAt,
+        grant.updatedAt,
+      ],
+    );
+  }
+
+  async getGrant(id: string): Promise<Grant | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow>(
+      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+       FROM grants WHERE id = $1`,
+      [id],
+    );
+    return rows[0] ? mapGrant(rows[0]) : undefined;
+  }
+
+  async deleteGrant(id: string, tenantId: string): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(`DELETE FROM grants WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
+  }
+
+  async listGrants(tenantId: string, externalUserId: string): Promise<Grant[]> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow>(
+      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+       FROM grants WHERE tenant_id = $1 AND external_user_id = $2
+       ORDER BY created_at ASC`,
+      [tenantId, externalUserId],
+    );
+    return rows.map(mapGrant);
+  }
+
+  async consumePublicToken(publicToken: string): Promise<string | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<{ grant_id: string | null }>(
+      `UPDATE link_sessions SET public_token = NULL
+       WHERE public_token = $1
+       RETURNING grant_id`,
+      [publicToken],
+    );
+    return rows[0]?.grant_id ?? undefined;
+  }
+
+  async listMessages(grantId: string): Promise<Message[]> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<{ payload: unknown }>(
+      `SELECT payload FROM messages WHERE grant_id = $1 ORDER BY received_at ASC`,
+      [grantId],
+    );
+    const messages: Message[] = [];
+    for (const row of rows) {
+      const message = asMessage(row.payload);
+      if (message) messages.push(message);
+    }
+    return messages;
+  }
+
+  async deleteMessages(grantId: string): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(`DELETE FROM messages WHERE grant_id = $1`, [grantId]);
+  }
+}
+
+export class PostgresTokenVault implements TokenVault {
+  constructor(
+    private readonly db: PgDatabase,
+    private readonly masterKey: string,
+  ) {
+    if (!masterKey || masterKey.length < 16) {
+      throw new Error("INBOXLINK_MASTER_KEY must be at least 16 characters");
+    }
+  }
+
+  async seal(
+    plaintext: string,
+    context: { grantId: string; tenantId: string },
+  ): Promise<Uint8Array> {
+    await this.db.ensure();
+    const ciphertext = sealSecret(this.masterKey, plaintext, aadFor(context));
+    await this.db.sql.query(
+      `INSERT INTO token_vault (grant_id, tenant_id, ciphertext, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (grant_id) DO UPDATE
+         SET ciphertext = EXCLUDED.ciphertext,
+             tenant_id = EXCLUDED.tenant_id,
+             updated_at = NOW()`,
+      [context.grantId, context.tenantId, ciphertext],
+    );
+    return ciphertext;
+  }
+
+  async open(
+    ciphertext: Uint8Array,
+    context: { grantId: string; tenantId: string },
+  ): Promise<string> {
+    return openSecret(this.masterKey, ciphertext, aadFor(context));
+  }
+
+  async destroy(grantId: string): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(`DELETE FROM token_vault WHERE grant_id = $1`, [grantId]);
+  }
+
+  async getCiphertext(grantId: string): Promise<Uint8Array | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<{ ciphertext: unknown }>(
+      `SELECT ciphertext FROM token_vault WHERE grant_id = $1`,
+      [grantId],
+    );
+    const raw = rows[0]?.ciphertext;
+    return raw === undefined ? undefined : asBytes(raw);
+  }
+}
+
+function sqlStatements(script: string): string[] {
+  return script
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function aadFor(context: { grantId: string; tenantId: string }): string {
+  return `${context.tenantId}\0${context.grantId}`;
+}
+
+function mapSession(row: SessionRow): StoredSession {
+  const session: StoredSession = {
+    id: row.id,
+    linkToken: row.link_token,
+    tenantId: row.tenant_id,
+    externalUserId: row.external_user_id,
+    redirectUri: row.redirect_uri,
+    products: asStringArray(row.products),
+    status: asSessionStatus(row.status),
+    createdAt: asIso(row.created_at),
+    expiresAt: asIso(row.expires_at),
+  };
+  if (row.oauth_state) session.oauthState = row.oauth_state;
+  if (row.public_token) session.publicToken = row.public_token;
+  if (row.grant_id) session.grantId = row.grant_id;
+  return session;
+}
+
+function mapGrant(row: GrantRow): Grant {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    externalUserId: row.external_user_id,
+    provider: asProvider(row.provider),
+    email: row.email,
+    status: asGrantStatus(row.status),
+    scopes: asStringArray(row.scopes),
+    createdAt: asIso(row.created_at),
+    updatedAt: asIso(row.updated_at),
+  };
+}
+
+function asSessionStatus(value: string): StoredSession["status"] {
+  if (value === "pending" || value === "completed" || value === "expired") return value;
+  return "expired";
+}
+
+function asGrantStatus(value: string): GrantStatus {
+  if (value === "active" || value === "needs_reauth" || value === "revoked") return value;
+  return "revoked";
+}
+
+function asProvider(value: string): Provider {
+  if (value === "gmail" || value === "microsoft" || value === "imap") return value;
+  throw new Error("Unknown grant provider");
+}
+
+function asStringArray(value: unknown): string[] {
+  const parsed = typeof value === "string" ? JSON.parse(value) : value;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item) => String(item));
+}
+
+function asIso(value: Date | string): string {
+  if (value instanceof Date) return value.toISOString();
+  return new Date(value).toISOString();
+}
+
+function asBytes(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return new Uint8Array(value);
+  if (typeof value === "string") {
+    const hex = value.startsWith("\\x") ? value.slice(2) : value;
+    return new Uint8Array(Buffer.from(hex, "hex"));
+  }
+  throw new Error("Unexpected vault ciphertext");
+}
+
+function asMessage(payload: unknown): Message | undefined {
+  const parsed = typeof payload === "string" ? JSON.parse(payload) : payload;
+  if (!parsed || typeof parsed !== "object" || !("id" in parsed) || !("grantId" in parsed)) {
+    return undefined;
+  }
+  return parsed as Message;
+}
