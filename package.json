@@ -10,8 +10,8 @@
   "packageManager": "pnpm@10.33.3",
   "scripts": {
     "build": "pnpm -r run build",
-    "typecheck": "pnpm -r run typecheck",
-    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.vercel.json --noEmit",
+    "lint": "pnpm -r run lint && tsc -p tsconfig.vercel.json --noEmit",
     "dev:server": "pnpm --filter @inboxlink/server dev",
     "clean": "pnpm -r exec rm -rf dist *.tsbuildinfo"
   },
