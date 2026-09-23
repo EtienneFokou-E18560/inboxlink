@@ -28,6 +28,7 @@ export interface GrantStore {
   findSessionByOAuthState(state: string): Promise<StoredSession | undefined>;
   saveSession(session: StoredSession): Promise<void>;
   putGrant(grant: Grant): Promise<void>;
+  updateGrant(grant: Grant): Promise<void>;
   getGrant(id: string): Promise<Grant | undefined>;
   deleteGrant(id: string, tenantId: string): Promise<void>;
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
@@ -95,6 +96,12 @@ export class MemoryStore implements GrantStore {
   }
 
   async putGrant(grant: Grant): Promise<void> {
+    this.grants.set(grant.id, grant);
+  }
+
+  async updateGrant(grant: Grant): Promise<void> {
+    const existing = this.grants.get(grant.id);
+    if (!existing || existing.tenantId !== grant.tenantId) return;
     this.grants.set(grant.id, grant);
   }
 
