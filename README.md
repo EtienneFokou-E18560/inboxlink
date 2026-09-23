@@ -50,7 +50,7 @@ Health check: [http://localhost:8787/health](http://localhost:8787/health)
 
 ### Vercel
 
-`src/index.ts` default-exports the Hono app, which is the entry [Vercel’s Hono preset](https://vercel.com/docs/frameworks/backend/hono) deploys. `vercel.json` sets `"framework": "hono"` and runs `pnpm build` so workspace packages emit `dist/` before that entry is bundled. After deploy, `GET /health` should return JSON.
+`vercel.json` routes all traffic to a Node serverless entry (`api/index.ts`) wrapping `@inboxlink/server` (Hono). After deploy, `GET /health` should return JSON.
 
 Note: v0 uses an **in-memory** store on Vercel — grants reset on cold starts. Use the long-running server + Postgres for anything real.
 
