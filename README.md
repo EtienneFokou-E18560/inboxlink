@@ -6,38 +6,61 @@ InboxLink is standalone **mailbox connection infrastructure**: Link-style Connec
 
 It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18560/career-workspace). That app may become a later *consumer* via `@inboxlink/sdk` — never the other way around.
 
-## Status (v0 scaffold)
+## Status (v0)
 
 Working TypeScript monorepo with:
 
 - Gmail OAuth **authorization URL + callback** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
-- Encrypted **token vault** (in-memory AES-256-GCM; revoke deletes the ciphertext)
-- HTTP API skeleton (`/v1/link/sessions`, grants exchange, health)
-- Postgres **Drizzle schema stubs** + raw SQL export
-- Optional Redis/BullMQ **queue placeholder**
+- Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext)
+- HTTP API: link sessions, Connect stub, grants exchange/list/revoke, message list/get, health
+- Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
+- Optional Redis/BullMQ **queue placeholder** (history sync not implemented)
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. Both open the vaulted refresh token, refresh Gmail access, and return the normalized message shape. CI uses a local Gmail HTTP stand-in and does not call Google. History sync, Microsoft/IMAP, and npm publish are not implemented.
 
-Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
+Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
 
-On Vercel, set `DATABASE_URL` to a Postgres database the functions can reach. The server creates the tables and the `default` tenant on startup. Without `DATABASE_URL`, sessions and grants stay in process memory and a callback on another instance returns Unknown OAuth state.
+## Architecture overview
 
-A real Gmail connect needs these **user-held** values in the environment (never commit them):
+```text
+Host app                         InboxLink                         Provider
+────────                         ─────────                         ────────
+SDK / curl
+  │  POST /v1/link/sessions
+  │◄──── sessionId, connectUrl
+  │
+User browser ──► GET /v1/connect/:linkToken (stub HTML)
+                      │
+                      ▼
+                 Gmail OAuth ──────────────────────────► Google
+                      │  callback + code
+                      ▼
+                 Vault seals refresh token
+                 Store saves grant (memory or Postgres)
+                      │
+Host ── POST /v1/grants/exchange (one-time public_token) ──► grantId
+Host ── GET  /v1/grants/:id/messages ── open vault → refresh → Gmail list
+Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
+```
 
-- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from a Google Cloud OAuth client (not `GOOGLE_APPLICATION_CREDENTIALS_JSON`)
-- `GOOGLE_REDIRECT_URI` exactly matching the callback, for production `https://inboxlink-two.vercel.app/v1/oauth/gmail/callback`
-- `PUBLIC_BASE_URL` set to that same origin
-- `INBOXLINK_MASTER_KEY` (16+ characters) and `INBOXLINK_API_SECRET`
-- The Gmail account added as a test user on the OAuth consent screen
+| Layer | Location | Role |
+|-------|----------|------|
+| HTTP API | `@inboxlink/server` (Hono) | Sessions, OAuth callback, grants, messages, health |
+| Core | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
+| Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL, token exchange/refresh, list + normalize |
+| Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
+| Connect UI | stub HTML in server; `packages/connect-ui` placeholder | Browser Connect page |
+| SDK | `@inboxlink/sdk` | Thin host HTTP client (not published to npm yet) |
+| Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
-With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and shared by every instance. `GET /health` then reports `"store":"postgres"`. Without that variable, storage stays in process memory (`"store":"memory"`).
+**Standing rules:** no Production secrets in git; MIT only; no career-workspace imports, shared DB, or shared types.
 
 ## Packages
 
 | Package | Role |
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
-| `@inboxlink/adapters-gmail` | Gmail OAuth adapter (URL + token exchange) |
+| `@inboxlink/adapters-gmail` | Gmail OAuth + message list/normalize |
 | `@inboxlink/sdk` | Host-app HTTP client |
 | `@inboxlink/server` | Hono HTTP service |
 | `@inboxlink/connect-ui` | Stub (server ships minimal Connect HTML for now) |
@@ -60,39 +83,94 @@ pnpm build
 pnpm --filter @inboxlink/server dev
 ```
 
-Health check: [http://localhost:8787/health](http://localhost:8787/health). `GET /` and `GET /health/` return the same JSON.
+Health check: [http://localhost:8787/health](http://localhost:8787/health). `GET /` and `GET /health/` return the same JSON. When the store is not Postgres, the body includes `warning: "ephemeral_store"` and operator `guidance`.
 
-### Vercel
+Ops: structured JSON logs (secrets redacted), [docs/ops-runbook.md](docs/ops-runbook.md), and `pnpm smoke:health -- <base-url>` (requires `store: "postgres"` unless you pass `--allow-memory`).
 
-`vercel.json` routes all traffic to a Node serverless entry (`api/index.ts`) wrapping `@inboxlink/server` (Hono). After deploy, `GET /health` should return JSON.
+### Local Postgres (Compose)
 
-Set `DATABASE_URL` on the Vercel project (Production, Secret) before a live connect. `GET /health` includes `"store":"postgres"` when that database is in use. The server applies `GET /v1/schema.sql` itself on startup.
-
-Set Project → Environment Variables from `.env.example` (placeholders only; no production secrets in git).
-
-Create a Link session:
+For durable sessions/grants/vault (recommended once you leave the in-memory smoke path):
 
 ```bash
-curl -s -X POST http://localhost:8787/v1/link/sessions \
+docker compose up -d
+# .env.example already points DATABASE_URL at Compose Postgres:
+# postgres://inboxlink:inboxlink@localhost:5432/inboxlink
+pnpm --filter @inboxlink/server dev
+curl -sS http://localhost:8787/health
+# Expect: "store":"postgres"
+```
+
+The server applies schema on startup. Optional manual dump:
+
+```bash
+curl -sS http://localhost:8787/v1/schema.sql | psql "$DATABASE_URL"
+```
+
+Redis (`REDIS_URL`) is optional; leave unset so health reports `"queue":"disabled"`.
+
+### Env checklist (names only)
+
+Never commit real values. Set placeholders in `.env` locally and secrets only in Vercel / your secret store.
+
+| Name | Required? | Notes |
+|------|-----------|--------|
+| `DATABASE_URL` | **Yes (Production / multi-instance)** | Shared Postgres. Unset → in-memory store (`"store":"memory"`). |
+| `INBOXLINK_MASTER_KEY` | **Yes** for real vault | ≥16 characters |
+| `PUBLIC_BASE_URL` | **Yes** | Local: `http://localhost:8787`. Prod: `https://inboxlink-two.vercel.app` |
+| `GOOGLE_CLIENT_ID` | **Yes** for live Gmail | OAuth **web** client |
+| `GOOGLE_CLIENT_SECRET` | **Yes** for live Gmail | Matching secret |
+| `GOOGLE_REDIRECT_URI` | Strongly recommended | Must match Console exactly (local or prod callback URL) |
+| `INBOXLINK_MODE` | Optional | Default `single` (no Bearer). `multi` needs API secret. |
+| `INBOXLINK_API_SECRET` | If `multi` | Bearer for `/v1/*` except oauth/connect |
+| `GMAIL_SCOPES` | Optional | Default readonly + openid email |
+| `PORT` / `HOST` | Local only | Not used on Vercel |
+| `REDIS_URL` | Optional | Queue stub |
+| `INBOXLINK_WEBHOOK_SECRET` | Optional | Not required for Slice 1 / messages proof |
+
+See [`.env.example`](.env.example) for placeholder shapes only.
+
+### Proof curl script
+
+Reproduce health → session → (browser Connect) → exchange → list grants → messages → optional revoke:
+
+```bash
+# Local (server already running):
+./scripts/proof-curl.sh
+
+# Production smoke (health + session create only until you Connect in a browser):
+BASE_URL=https://inboxlink-two.vercel.app ./scripts/proof-curl.sh
+
+# After Connect redirect, continue with tokens from your private notes:
+PUBLIC_TOKEN=… ./scripts/proof-curl.sh exchange
+GRANT_ID=grant_… EXTERNAL_USER_ID=proof-user-1 ./scripts/proof-curl.sh messages
+GRANT_ID=grant_… ./scripts/proof-curl.sh revoke   # optional
+```
+
+Do **not** paste refresh tokens, Bearer secrets, or `public_token` values into git, PRs, or shared docs. Full Production runbook: keep a private copy of the 4-hour proof plan; this script covers the curl surface.
+
+### Create a Link session (manual)
+
+```bash
+curl -sS -X POST http://localhost:8787/v1/link/sessions \
   -H 'content-type: application/json' \
   -d '{"externalUserId":"user-1","redirectUri":"http://localhost:9999/done"}'
 ```
 
-Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange** (no real Google call). Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
+Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange**. Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
 
-List messages for a grant (single mode needs no API key):
+List messages for a grant (`single` mode needs no API key):
 
 ```bash
-curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
+curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
 ```
 
 Get one message with attachment metadata:
 
 ```bash
-curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
+curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
 ```
 
-`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `body`). It never includes the refresh token.
+`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `attachments` / `body`). It never includes the refresh token.
 
 Demo host client:
 
@@ -100,31 +178,27 @@ Demo host client:
 pnpm --filter @inboxlink/demo start
 ```
 
-## Docker (optional Postgres + Redis)
+## Vercel
 
-```bash
-docker compose up -d
-# server still runs via pnpm for v0; DATABASE_URL / REDIS_URL point at Compose services
-```
+`vercel.json` routes all traffic to `api/index.ts` wrapping `@inboxlink/server`. After deploy, `GET /health` should return JSON with `"store":"postgres"` when `DATABASE_URL` is set.
 
-Apply schema stub (when using Postgres):
+Set Project → Environment Variables from the checklist above (never commit Production secrets).
 
-```bash
-curl -s http://localhost:8787/v1/schema.sql | psql "$DATABASE_URL"
-```
+## Deferred (not in v0)
 
-## Environment
+| Item | Notes |
+|------|--------|
+| Microsoft Graph adapter | Separate OAuth console + `MICROSOFT_*` env |
+| IMAP adapter | App-password / password vaulting; security review first |
+| Gmail history sync | `history.list` + cursors; sync POST is a stub today |
+| Connect UI package | Replace stub HTML in `packages/connect-ui` |
+| npm publish (`@inboxlink/sdk` et al.) | Docs/SDK usage only until publish path is chosen |
+| Multi-tenant production hardening | Mode can be `multi`; rate limits / audits still light |
+| career-workspace host wiring | Optional **last**; core must stay independent |
 
-See [`.env.example`](.env.example). Placeholders only — never commit real secrets.
+## Contributing
 
-| Variable | Purpose |
-|----------|---------|
-| `INBOXLINK_MODE` | `single` (default) or `multi` |
-| `INBOXLINK_MASTER_KEY` | Envelope encryption key for the vault |
-| `INBOXLINK_API_SECRET` | Bearer secret for host APIs in `multi` mode |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail OAuth client |
-| `DATABASE_URL` | Postgres for sessions, grants, and vault ciphertext. Unset uses in-memory storage |
-| `REDIS_URL` | Optional BullMQ placeholder |
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks, PR expectations, and scope rules.
 
 ## Independence from career-workspace
 

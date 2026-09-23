@@ -268,8 +268,9 @@ describe("Gmail message list", () => {
     refreshStatus = 400;
     const rejected = await app.request(`/v1/grants/${live.id}/messages`);
     assert.equal(rejected.status, 409);
-    const rejectedBody = (await rejected.json()) as { error: string };
+    const rejectedBody = (await rejected.json()) as { error: string; guidance?: string };
     assert.equal(rejectedBody.error, "needs_reauth");
+    assert.match(rejectedBody.guidance ?? "", /Connect/);
     assert.equal((await store.getGrant(live.id))?.status, "needs_reauth");
     assert.equal(JSON.stringify(rejectedBody).includes(REFRESH), false);
 
