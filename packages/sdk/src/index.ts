@@ -41,12 +41,26 @@ export type ListMessagesOptions = {
   limit?: number;
   /** Opaque pagination cursor from a previous `nextCursor`. */
   cursor?: string;
+  /**
+   * Gmail search query (`q`), e.g. `is:unread newer_than:7d`.
+   * Combined (AND) with structured `from` / `to` / `subject` when those are set.
+   */
+  q?: string;
+  /** Gmail label id(s), e.g. `INBOX`, `UNREAD` → Gmail `labelIds`. */
+  label?: string | string[];
+  /** Match From header (Gmail `from:`). */
+  from?: string;
+  /** Match To header (Gmail `to:`). */
+  to?: string;
+  /** Match Subject (Gmail `subject:`). */
+  subject?: string;
+  /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). */
+  includeSpamTrash?: boolean;
 };
 
-export type IterateMessagesOptions = {
-  /** Skip messages with `receivedAt` earlier than this ISO timestamp. */
+export type IterateMessagesOptions = ListMessagesOptions & {
+  /** Skip messages with `receivedAt` earlier than this ISO timestamp (client-side). */
   since?: string;
-  limit?: number;
 };
 
 export type LinkSessionResult = {
@@ -327,6 +341,17 @@ class MessagesApi {
     const q = new URLSearchParams();
     if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
     if (opts?.cursor) q.set("cursor", opts.cursor);
+    if (opts?.q) q.set("q", opts.q);
+    if (opts?.from) q.set("from", opts.from);
+    if (opts?.to) q.set("to", opts.to);
+    if (opts?.subject) q.set("subject", opts.subject);
+    if (opts?.includeSpamTrash !== undefined) {
+      q.set("includeSpamTrash", opts.includeSpamTrash ? "true" : "false");
+    }
+    const labels = opts?.label === undefined ? [] : Array.isArray(opts.label) ? opts.label : [opts.label];
+    for (const label of labels) {
+      if (label) q.append("label", label);
+    }
     const qs = q.toString();
     return this.http.request(
       "GET",
@@ -346,16 +371,21 @@ class MessagesApi {
     );
   }
 
-  /** Walk list pages until exhausted (or filtered by `since`). */
+  /** Walk list pages until exhausted (or filtered by `since` client-side). */
   async *iterate(
     grantId: string,
     opts?: IterateMessagesOptions,
   ): AsyncGenerator<Message> {
     let cursor: string | undefined;
+    const { since, ...listOpts } = opts ?? {};
     for (;;) {
-      const page = await this.list(grantId, { limit: opts?.limit ?? 20, cursor });
+      const page = await this.list(grantId, {
+        ...listOpts,
+        limit: listOpts.limit ?? 20,
+        cursor,
+      });
       for (const msg of page.messages) {
-        if (opts?.since && msg.receivedAt < opts.since) continue;
+        if (since && msg.receivedAt < since) continue;
         yield msg;
       }
       if (!page.nextCursor) break;

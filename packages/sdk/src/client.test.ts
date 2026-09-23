@@ -144,6 +144,35 @@ describe("InboxLink SDK", () => {
     assert.match(calls[0]!, /\/v1\/grants\/grant_1\/messages\?limit=10&cursor=abc$/);
   });
 
+  it("lists messages with Gmail filter query params", async () => {
+    const calls: string[] = [];
+    const fetchMock: typeof fetch = async (input) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ messages: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      fetch: fetchMock,
+    });
+    await il.messages.list("grant_1", {
+      limit: 5,
+      q: "is:unread",
+      from: "ada@example.com",
+      label: ["INBOX", "UNREAD"],
+      includeSpamTrash: true,
+    });
+    const url = new URL(calls[0]!);
+    assert.equal(url.searchParams.get("limit"), "5");
+    assert.equal(url.searchParams.get("q"), "is:unread");
+    assert.equal(url.searchParams.get("from"), "ada@example.com");
+    assert.deepEqual(url.searchParams.getAll("label"), ["INBOX", "UNREAD"]);
+    assert.equal(url.searchParams.get("includeSpamTrash"), "true");
+  });
+
   it("gets a message by id with attachment metadata wrapper", async () => {
     const calls: string[] = [];
     const fetchMock: typeof fetch = async (input) => {
