@@ -16,7 +16,9 @@ Working TypeScript monorepo with:
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-Not yet: a live Gmail test-user connect (needs the secrets below), Gmail history sync, Microsoft/IMAP adapters, npm publish.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+
+Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
 
 On Vercel, set `DATABASE_URL` to a Postgres database the functions can reach. The server creates the tables and the `default` tenant on startup. Without `DATABASE_URL`, sessions and grants stay in process memory and a callback on another instance returns Unknown OAuth state.
 
@@ -77,6 +79,14 @@ curl -s -X POST http://localhost:8787/v1/link/sessions \
 ```
 
 Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange** (no real Google call). Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
+
+List messages for a grant (single mode needs no API key):
+
+```bash
+curl -s "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
+```
+
+`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `body`). It never includes the refresh token.
 
 Demo host client:
 
