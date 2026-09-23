@@ -36,7 +36,12 @@ const session = await il.createConnectSession({
 
 // On your redirect handler:
 const { grantId } = await il.completeConnect({ redirectUrl: request.url });
-const page = await il.messages.list(grantId, { limit: 20 });
+const page = await il.messages.list(grantId, {
+  limit: 20,
+  q: "is:unread",
+  label: "INBOX",
+  from: "ada@example.com",
+});
 ```
 
 ### Local / multi-mode overrides
@@ -59,7 +64,7 @@ const il = new InboxLink({
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
 | Webhooks | `webhooks.verify` | local HMAC check |
 
-- `messages.list` → live Gmail list
+- `messages.list` → live Gmail list (optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
 - `messages.get` → `{ message }` including optional attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
 - `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`)
 

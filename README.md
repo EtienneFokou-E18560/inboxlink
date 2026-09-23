@@ -16,7 +16,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are not implemented. The `@inboxlink/sdk` publish path is ready ([docs/publishing.md](docs/publishing.md)); no live npm release until a maintainer runs the manual workflow with credentials.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail), with optional filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are not implemented. The `@inboxlink/sdk` publish path is ready ([docs/publishing.md](docs/publishing.md)); no live npm release until a maintainer runs the manual workflow with credentials.
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
 
@@ -167,13 +167,26 @@ List messages for a grant (`single` mode needs no API key):
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
 ```
 
+Filter the live Gmail list (optional query params):
+
+```bash
+curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?q=is:unread&from=ada@example.com&label=INBOX&limit=20"
+```
+
+| Param | Maps to Gmail | Notes |
+|-------|---------------|--------|
+| `q` | `q` | Full Gmail search syntax |
+| `from` / `to` / `subject` | composed into `q` | AND-merged with `q` when both set |
+| `label` (repeatable) | `labelIds` | e.g. `INBOX`, `UNREAD` |
+| `includeSpamTrash` | `includeSpamTrash` | `true` / `false` |
+
 Get one message with attachment metadata:
 
 ```bash
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
 ```
 
-`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `attachments` / `body`). It never includes the refresh token.
+`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. Optional filters (`q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`) are forwarded to Gmail `users.messages.list`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `attachments` / `body`). It never includes the refresh token.
 
 ### Host SDK (`@inboxlink/sdk`)
 
@@ -190,7 +203,12 @@ const session = await il.createConnectSession({
   redirectUri: "http://127.0.0.1:9999/done", // your host callback
 });
 const { grantId } = await il.completeConnect({ publicToken });
-const { messages } = await il.messages.list(grantId, { limit: 20 });
+const { messages } = await il.messages.list(grantId, {
+  limit: 20,
+  q: "is:unread",
+  from: "ada@example.com",
+  label: "INBOX",
+});
 const { message } = await il.messages.get(grantId, messages[0]!.id);
 await il.grants.sync(grantId); // history watermark sync
 ```
