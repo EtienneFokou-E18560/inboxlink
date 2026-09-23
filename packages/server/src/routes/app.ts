@@ -12,6 +12,7 @@ import {
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
+import { syncGmailGrant } from "../sync/gmail-sync.js";
 import {
   DATABASE_UNAVAILABLE_GUIDANCE,
   MEMORY_STORE_GUIDANCE,
@@ -391,17 +392,67 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
+    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+
+    let forceBootstrap = false;
+    const contentType = c.req.header("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        const body = (await c.req.json()) as { mode?: string };
+        forceBootstrap = body.mode === "full" || body.mode === "bootstrap";
+      } catch {
+        /* empty body is fine */
+      }
+    }
+
+    // Inline sync (no Redis). Optional queue enqueue is fire-and-forget only.
     if (opts.queue) {
       await opts.queue.enqueue({
         grantId,
         tenantId: grant.tenantId,
-        kind: "incremental",
+        kind: forceBootstrap ? "bootstrap" : "incremental",
       });
     }
+
+    const result = await syncGmailGrant({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      grant,
+      forceBootstrap,
+    });
+
+    if (result.status === "needs_reauth") {
+      return c.json(
+        {
+          grantId,
+          status: "needs_reauth",
+          mode: result.mode,
+          error: result.error ?? "needs_reauth",
+        },
+        409,
+      );
+    }
+    if (result.status === "gmail_unavailable") {
+      return c.json(
+        {
+          grantId,
+          status: "error",
+          mode: result.mode,
+          error: "gmail_unavailable",
+        },
+        502,
+      );
+    }
+
     return c.json({
       grantId,
-      status: "accepted",
-      note: "Read messages with GET /v1/grants/:grantId/messages. History sync is not implemented.",
+      status: "ok",
+      mode: result.mode,
+      historyId: result.historyId,
+      upserted: result.upserted,
+      deleted: result.deleted,
     });
   });
 

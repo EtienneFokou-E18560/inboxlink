@@ -1,4 +1,12 @@
-import type { Grant, GrantStatus, Message, Provider, TokenVault } from "@inboxlink/core";
+import type {
+  Grant,
+  GrantStatus,
+  Message,
+  Provider,
+  SyncCursor,
+  SyncCursorKind,
+  TokenVault,
+} from "@inboxlink/core";
 import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
 import type { GrantStore, StoredSession } from "../store.js";
 import { SCHEMA_SQL } from "./schema.js";
@@ -246,9 +254,78 @@ export class PostgresStore implements GrantStore {
     return messages;
   }
 
+  async upsertMessages(messages: Message[]): Promise<void> {
+    if (!messages.length) return;
+    await this.db.ensure();
+    for (const message of messages) {
+      await this.db.sql.query(
+        `INSERT INTO messages (
+           id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+         ON CONFLICT (grant_id, provider_message_id) DO UPDATE SET
+           id = EXCLUDED.id,
+           thread_id = EXCLUDED.thread_id,
+           subject = EXCLUDED.subject,
+           snippet = EXCLUDED.snippet,
+           payload = EXCLUDED.payload,
+           received_at = EXCLUDED.received_at`,
+        [
+          message.id,
+          message.grantId,
+          message.providerMessageId,
+          message.threadId ?? null,
+          message.subject,
+          message.snippet,
+          JSON.stringify(message),
+          message.receivedAt,
+        ],
+      );
+    }
+  }
+
   async deleteMessages(grantId: string): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(`DELETE FROM messages WHERE grant_id = $1`, [grantId]);
+  }
+
+  async deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void> {
+    if (!providerMessageIds.length) return;
+    await this.db.ensure();
+    await this.db.sql.query(
+      `DELETE FROM messages WHERE grant_id = $1 AND provider_message_id = ANY($2::text[])`,
+      [grantId, providerMessageIds],
+    );
+  }
+
+  async getSyncCursor(grantId: string): Promise<SyncCursor | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<{
+      grant_id: string;
+      kind: string;
+      value: string;
+      updated_at: Date | string;
+    }>(`SELECT grant_id, kind, value, updated_at FROM sync_cursors WHERE grant_id = $1`, [grantId]);
+    const row = rows[0];
+    if (!row) return undefined;
+    return {
+      grantId: row.grant_id,
+      kind: asSyncCursorKind(row.kind),
+      value: row.value,
+      updatedAt: asIso(row.updated_at),
+    };
+  }
+
+  async putSyncCursor(cursor: SyncCursor): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(
+      `INSERT INTO sync_cursors (grant_id, kind, value, updated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (grant_id) DO UPDATE SET
+         kind = EXCLUDED.kind,
+         value = EXCLUDED.value,
+         updated_at = EXCLUDED.updated_at`,
+      [cursor.grantId, cursor.kind, cursor.value, cursor.updatedAt],
+    );
   }
 }
 
@@ -359,6 +436,11 @@ function asGrantStatus(value: string): GrantStatus {
 function asProvider(value: string): Provider {
   if (value === "gmail" || value === "microsoft" || value === "imap") return value;
   throw new Error("Unknown grant provider");
+}
+
+function asSyncCursorKind(value: string): SyncCursorKind {
+  if (value === "gmail_history" || value === "graph_delta" || value === "imap_uid") return value;
+  return "gmail_history";
 }
 
 function asStringArray(value: unknown): string[] {

@@ -1,4 +1,4 @@
-import type { Grant, LinkSession, Message } from "@inboxlink/core";
+import type { Grant, LinkSession, Message, SyncCursor } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
 
 export type StoredSession = LinkSession & {
@@ -34,7 +34,11 @@ export interface GrantStore {
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
   consumePublicToken(publicToken: string): Promise<string | undefined>;
   listMessages(grantId: string): Promise<Message[]>;
+  upsertMessages(messages: Message[]): Promise<void>;
   deleteMessages(grantId: string): Promise<void>;
+  deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void>;
+  getSyncCursor(grantId: string): Promise<SyncCursor | undefined>;
+  putSyncCursor(cursor: SyncCursor): Promise<void>;
 }
 
 /** Ephemeral store for local demos and tests without Postgres. */
@@ -44,6 +48,7 @@ export class MemoryStore implements GrantStore {
   readonly grants = new Map<string, Grant>();
   readonly publicTokens = new Map<string, string>();
   readonly messages = new Map<string, Message[]>();
+  readonly syncCursors = new Map<string, SyncCursor>();
 
   async ready(): Promise<void> {}
 
@@ -135,7 +140,37 @@ export class MemoryStore implements GrantStore {
     return this.messages.get(grantId) ?? [];
   }
 
+  async upsertMessages(messages: Message[]): Promise<void> {
+    for (const message of messages) {
+      const existing = this.messages.get(message.grantId) ?? [];
+      const index = existing.findIndex(
+        (row) => row.providerMessageId === message.providerMessageId,
+      );
+      if (index >= 0) existing[index] = message;
+      else existing.push(message);
+      this.messages.set(message.grantId, existing);
+    }
+  }
+
   async deleteMessages(grantId: string): Promise<void> {
     this.messages.delete(grantId);
+  }
+
+  async deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void> {
+    if (!providerMessageIds.length) return;
+    const remove = new Set(providerMessageIds);
+    const existing = this.messages.get(grantId) ?? [];
+    this.messages.set(
+      grantId,
+      existing.filter((message) => !remove.has(message.providerMessageId)),
+    );
+  }
+
+  async getSyncCursor(grantId: string): Promise<SyncCursor | undefined> {
+    return this.syncCursors.get(grantId);
+  }
+
+  async putSyncCursor(cursor: SyncCursor): Promise<void> {
+    this.syncCursors.set(cursor.grantId, cursor);
   }
 }

@@ -118,3 +118,4 @@ export {
   redactFields,
   redactString,
 };
+export { syncGmailGrant } from "./sync/gmail-sync.js";

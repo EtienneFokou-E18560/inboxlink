@@ -14,9 +14,9 @@ Working TypeScript monorepo with:
 - Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext)
 - HTTP API: link sessions, Connect stub, grants exchange/list/revoke, message list/get, health
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
-- Optional Redis/BullMQ **queue placeholder** (history sync not implemented)
+- Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. Both open the vaulted refresh token, refresh Gmail access, and return the normalized message shape. CI uses a local Gmail HTTP stand-in and does not call Google. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP and npm publish are not implemented.
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
 

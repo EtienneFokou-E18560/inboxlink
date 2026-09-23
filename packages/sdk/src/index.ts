@@ -86,6 +86,22 @@ class GrantsApi {
   revoke(grantId: string): Promise<void> {
     return this.http.request("DELETE", `v1/grants/${encodeURIComponent(grantId)}`);
   }
+
+  sync(
+    grantId: string,
+    opts?: { mode?: "full" | "bootstrap" | "incremental" },
+  ): Promise<{
+    grantId: string;
+    status: string;
+    mode: string;
+    historyId?: string;
+    upserted?: number;
+    deleted?: number;
+  }> {
+    const body =
+      opts?.mode && opts.mode !== "incremental" ? { mode: opts.mode } : undefined;
+    return this.http.request("POST", `v1/grants/${encodeURIComponent(grantId)}/sync`, body);
+  }
 }
 
 class MessagesApi {
