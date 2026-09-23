@@ -1,4 +1,9 @@
-/** Normalized mailbox models and adapter contracts (provider-agnostic). */
+/**
+ * Normalized mailbox models and adapter contracts (provider-agnostic).
+ *
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Etienne Fokou
+ */
 
 export type Provider = "gmail" | "microsoft" | "imap";
 

@@ -73,7 +73,7 @@ Details and diagram: [README.md](README.md#architecture-overview).
 
 ## Deferred work (do not assume in-scope)
 
-Microsoft Graph, IMAP, Gmail history sync, polished Connect UI, npm publish, and career-workspace integration are **deferred**. Document stub vs production behavior in the PR when you touch OAuth, vault, or sync.
+Microsoft Graph, IMAP, a live npm release (publish path is prepared), and career-workspace integration are **deferred**. Document stub vs production behavior in the PR when you touch OAuth, vault, or sync.
 
 ## Pull requests
 
@@ -81,3 +81,10 @@ Microsoft Graph, IMAP, Gmail history sync, polished Connect UI, npm publish, and
 - Keep changes focused; one concern per PR when practical.
 - Mark PRs **draft** until CI is green and any secret / product gate in the approval hierarchy is cleared.
 - Do not put Production URLs with live tokens, grant IDs tied to real mailboxes, or secret values in the PR body.
+- Document stub vs production behavior in the PR body when touching OAuth or vault code.
+
+## npm packages
+
+- Publishable packages: `@inboxlink/core`, `@inboxlink/sdk` (see [docs/publishing.md](docs/publishing.md)).
+- Do **not** publish from a laptop casually and never commit npm tokens.
+- CI publish is **workflow_dispatch only** (`.github/workflows/publish-npm.yml`), dry-run by default.
