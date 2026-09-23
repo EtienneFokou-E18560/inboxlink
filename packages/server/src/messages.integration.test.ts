@@ -170,6 +170,7 @@ function appFor(store: MemoryStore | PostgresStore, vault: MemoryTokenVault | Po
     mode,
     gmailScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
     queue: null,
+    rateLimiter: null,
   });
 }
 

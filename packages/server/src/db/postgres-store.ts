@@ -229,13 +229,13 @@ export class PostgresStore implements GrantStore {
     return rows.map(mapGrant);
   }
 
-  async consumePublicToken(publicToken: string): Promise<string | undefined> {
+  async consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined> {
     await this.db.ensure();
     const rows = await this.db.sql.query<{ grant_id: string | null }>(
       `UPDATE link_sessions SET public_token = NULL
-       WHERE public_token = $1
+       WHERE public_token = $1 AND tenant_id = $2
        RETURNING grant_id`,
-      [publicToken],
+      [publicToken, tenantId],
     );
     return rows[0]?.grant_id ?? undefined;
   }
