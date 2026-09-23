@@ -7,6 +7,13 @@ import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
+import {
+  DATABASE_UNAVAILABLE_GUIDANCE,
+  MEMORY_STORE_GUIDANCE,
+  NEEDS_REAUTH_GUIDANCE,
+  isHealthPath,
+  log,
+} from "../log.js";
 
 export type AppEnv = {
   Variables: {
@@ -35,6 +42,20 @@ export function createApp(opts: CreateAppOptions) {
   const app = new Hono<AppEnv>();
 
   app.use("*", cors());
+  app.use("*", async (c, next) => {
+    const started = Date.now();
+    await next();
+    const path = c.req.path;
+    const status = c.res.status;
+    if (isHealthPath(path) && status < 400) return;
+    log.info("http_request", {
+      method: c.req.method,
+      path,
+      status,
+      durationMs: Date.now() - started,
+      store: opts.storeKind ?? "memory",
+    });
+  });
 
   // `/` is what the production URL opens. `/health/` is the same check with a trailing slash.
   const health = async (c: { json: (body: unknown, status?: number) => Response }) => {
@@ -42,18 +63,31 @@ export function createApp(opts: CreateAppOptions) {
     try {
       await opts.store.ready();
     } catch {
+      log.error("health_database_unavailable", { store: storeKind });
       return c.json(
-        { ok: false, service: "inboxlink", mode: opts.mode, store: storeKind, error: "database_unavailable" },
+        {
+          ok: false,
+          service: "inboxlink",
+          mode: opts.mode,
+          store: storeKind,
+          error: "database_unavailable",
+          guidance: DATABASE_UNAVAILABLE_GUIDANCE,
+        },
         503,
       );
     }
-    return c.json({
+    const body: Record<string, unknown> = {
       ok: true,
       service: "inboxlink",
       mode: opts.mode,
       queue: opts.queue ? "stub" : "disabled",
       store: storeKind,
-    });
+    };
+    if (storeKind !== "postgres") {
+      body.warning = "ephemeral_store";
+      body.guidance = MEMORY_STORE_GUIDANCE;
+    }
+    return c.json(body);
   };
   app.get("/", health);
   app.get("/health", health);
@@ -162,13 +196,19 @@ export function createApp(opts: CreateAppOptions) {
     const state = c.req.query("state");
     const error = c.req.query("error");
     if (error) {
+      log.warn("oauth_callback_failed", { reason: error, store: opts.storeKind ?? "memory" });
       return c.html(`<h1>OAuth error</h1><pre>${escapeHtml(error)}</pre>`, 400);
     }
     if (!code || !state) {
+      log.warn("oauth_callback_failed", { reason: "missing_code_or_state" });
       return c.html("<h1>Missing code/state</h1>", 400);
     }
     const session = await opts.store.findSessionByOAuthState(state);
     if (!session || isExpired(session.expiresAt)) {
+      log.warn("oauth_callback_failed", {
+        reason: "unknown_oauth_state",
+        store: opts.storeKind ?? "memory",
+      });
       return c.html("<h1>Unknown OAuth state</h1>", 400);
     }
     const redirectUri = oauthRedirectUri(opts);
@@ -177,6 +217,7 @@ export function createApp(opts: CreateAppOptions) {
       tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
     } catch (err) {
       const reason = googleErrorCode(err);
+      log.warn("oauth_callback_failed", { reason, store: opts.storeKind ?? "memory" });
       return c.html(
         `<h1>Google token exchange failed</h1><p>${escapeHtml(oauthExchangeHint(reason, redirectUri))}</p>`,
         400,
@@ -205,6 +246,7 @@ export function createApp(opts: CreateAppOptions) {
       }
     } catch {
       await opts.store.deleteGrant(grantId, session.tenantId);
+      log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });
       return c.html(
         "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
         500,
@@ -216,6 +258,12 @@ export function createApp(opts: CreateAppOptions) {
     session.grantId = grantId;
     session.publicToken = publicToken;
     await opts.store.saveSession(session);
+    log.info("oauth_callback_ok", {
+      grantId,
+      tenantId: session.tenantId,
+      provider: "gmail",
+      store: opts.storeKind ?? "memory",
+    });
 
     if (opts.queue) {
       await opts.queue.enqueue({
@@ -285,7 +333,8 @@ export function createApp(opts: CreateAppOptions) {
       accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
     } catch {
       await markNeedsReauth(opts.store, grant);
-      return c.json({ error: "needs_reauth" }, 409);
+      log.warn("grant_needs_reauth", { grantId, tenantId, reason: "refresh_rejected" });
+      return c.json({ error: "needs_reauth", guidance: NEEDS_REAUTH_GUIDANCE }, 409);
     }
 
     try {
@@ -299,8 +348,19 @@ export function createApp(opts: CreateAppOptions) {
     } catch (err) {
       if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
         await markNeedsReauth(opts.store, grant);
-        return c.json({ error: "needs_reauth" }, 409);
+        log.warn("grant_needs_reauth", {
+          grantId,
+          tenantId,
+          reason: "gmail_unauthorized",
+          gmailStatus: err.status,
+        });
+        return c.json({ error: "needs_reauth", guidance: NEEDS_REAUTH_GUIDANCE }, 409);
       }
+      log.warn("gmail_unavailable", {
+        grantId,
+        tenantId,
+        gmailStatus: err instanceof GmailApiError ? err.status : undefined,
+      });
       return c.json({ error: "gmail_unavailable" }, 502);
     }
   });

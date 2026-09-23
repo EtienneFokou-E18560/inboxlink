@@ -2,6 +2,8 @@
  * Optional BullMQ / Redis placeholders.
  * Importing bullmq is deferred so the server starts without Redis installed.
  */
+import { log } from "../log.js";
+
 export type SyncJob = {
   grantId: string;
   tenantId: string;
@@ -18,10 +20,14 @@ export async function createSyncQueue(redisUrl?: string): Promise<QueueHandle | 
     return null;
   }
   // Placeholder: real BullMQ wiring lands with Slice 2 workers.
-  console.info("[inboxlink] REDIS_URL set — sync queue stub active (no workers yet)");
+  log.info("sync_queue_stub_active");
   return {
     async enqueue(job: SyncJob) {
-      console.info("[inboxlink] enqueue stub", job);
+      log.info("sync_queue_enqueue_stub", {
+        grantId: job.grantId,
+        tenantId: job.tenantId,
+        kind: job.kind,
+      });
     },
     async close() {
       /* no-op */

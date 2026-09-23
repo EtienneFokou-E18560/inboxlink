@@ -69,6 +69,7 @@ Details and diagram: [README.md](README.md#architecture-overview).
 - Prefer least-privilege Gmail scopes (`gmail.readonly`) unless a feature explicitly needs more.
 - Never commit real OAuth client secrets, refresh tokens, or master keys. Use `.env.example` placeholders only.
 - Prefer MIT/Apache dependencies only.
+- Prefer structured logs via `@inboxlink/server` `log` helpers (secrets are redacted). See [docs/ops-runbook.md](docs/ops-runbook.md).
 
 ## Deferred work (do not assume in-scope)
 

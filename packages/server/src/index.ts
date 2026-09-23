@@ -3,6 +3,7 @@ import { handle as handleNode } from "@hono/node-server/vercel";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { loadConfig } from "./config.js";
+import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
 import { createSyncQueue } from "./queue/sync-queue.js";
@@ -88,16 +89,32 @@ export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
   const config = loadConfig(env);
   const queue = await createSyncQueue(config.redisUrl);
-  const { app } = createAppFromEnv(env, queue);
+  const { app, storeKind } = createAppFromEnv(env, queue);
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, () => {
-    console.info(
-      `[inboxlink] listening on http://${config.host}:${config.port} (mode=${config.mode})`,
-    );
-    console.info(`[inboxlink] health: ${config.publicBaseUrl}/health`);
+    log.info("server_listening", {
+      host: config.host,
+      port: config.port,
+      mode: config.mode,
+      store: storeKind,
+      health: `${config.publicBaseUrl}/health`,
+    });
+    if (storeKind !== "postgres") {
+      log.warn("ephemeral_store", { guidance: MEMORY_STORE_GUIDANCE });
+    }
   });
 
   return { app, server, config, queue };
 }
 
-export { createApp, loadConfig, MemoryStore, MemoryTokenVault, PostgresStore, PostgresTokenVault };
+export {
+  createApp,
+  loadConfig,
+  MemoryStore,
+  MemoryTokenVault,
+  PostgresStore,
+  PostgresTokenVault,
+  log,
+  redactFields,
+  redactString,
+};
