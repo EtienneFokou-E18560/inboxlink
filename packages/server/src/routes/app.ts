@@ -7,6 +7,7 @@ import {
   connectErrorStatus,
   renderConnectErrorPage,
   renderConnectPage,
+  renderLandingPage,
 } from "@inboxlink/connect-ui";
 import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
 import { toPublicGrant, validateExternalUserId, validateRedirectUri } from "../grants-public.js";
@@ -131,6 +132,10 @@ export function createApp(opts: CreateAppOptions) {
   app.get("/", health);
   app.get("/health", health);
   app.get("/health/", health);
+
+  /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
+  app.get("/home", (c) => c.html(renderLandingPage()));
+  app.get("/home/", (c) => c.html(renderLandingPage()));
 
   app.get("/v1/schema.sql", (c) =>
     c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
