@@ -18,7 +18,7 @@ async function main() {
   console.log("Open this Connect URL in a browser:");
   console.log(session.connectUrl);
   console.log(
-    "\nAfter OAuth (or stub exchange), exchange public_token via il.grants.exchange().",
+    "\nAfter OAuth (or stub exchange): il.grants.exchange({ publicToken }) → il.messages.list / get, il.grants.sync.",
   );
 }
 

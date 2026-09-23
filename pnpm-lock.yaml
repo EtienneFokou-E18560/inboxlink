@@ -34,7 +34,11 @@ importers:
         specifier: workspace:*
         version: link:../core
 
-  packages/connect-ui: {}
+  packages/connect-ui:
+    devDependencies:
+      tsx:
+        specifier: ^4.19.3
+        version: 4.23.15
 
   packages/core: {}
 
@@ -43,6 +47,10 @@ importers:
       '@inboxlink/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      tsx:
+        specifier: ^4.19.3
+        version: 4.23.15
 
   packages/server:
     dependencies:
@@ -52,6 +60,9 @@ importers:
       '@inboxlink/adapters-gmail':
         specifier: workspace:*
         version: link:../adapters-gmail
+      '@inboxlink/connect-ui':
+        specifier: workspace:*
+        version: link:../connect-ui
       '@inboxlink/core':
         specifier: workspace:*
         version: link:../core
