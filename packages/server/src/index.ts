@@ -101,3 +101,4 @@ export async function startServer(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export { createApp, loadConfig, MemoryStore, MemoryTokenVault, PostgresStore, PostgresTokenVault };
+export { syncGmailGrant } from "./sync/gmail-sync.js";

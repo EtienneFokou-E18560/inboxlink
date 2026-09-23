@@ -164,6 +164,32 @@ export class GmailAdapter implements MailboxAdapter {
     };
   }
 
+  private apiBase(): string {
+    return (this.config.gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
+  }
+
+  /** Current mailbox profile — `historyId` seeds or advances the sync watermark. */
+  async getProfile(accessToken: string): Promise<{ emailAddress?: string; historyId: string }> {
+    const url = new URL(`${this.apiBase()}/users/me/profile`);
+    const json = await gmailJson<{ emailAddress?: string; historyId?: string }>(url, accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return { emailAddress: json.emailAddress, historyId: json.historyId };
+  }
+
+  /** Fetch one message as a normalized InboxLink record. */
+  async getMessage(input: {
+    accessToken: string;
+    grantId: string;
+    messageId: string;
+  }): Promise<Message | undefined> {
+    const getUrl = new URL(
+      `${this.apiBase()}/users/me/messages/${encodeURIComponent(input.messageId)}`,
+    );
+    getUrl.searchParams.set("format", "full");
+    const raw = await gmailJson<GmailMessageResource>(getUrl, input.accessToken);
+    return normalizeGmailMessage(raw, input.grantId);
+  }
+
   /**
    * List mailbox messages and normalize each `format=full` resource.
    * Callers pass a short-lived access token. This method does not see the refresh token.
@@ -174,8 +200,7 @@ export class GmailAdapter implements MailboxAdapter {
     maxResults?: number;
     pageToken?: string;
   }): Promise<{ messages: Message[]; nextCursor?: string }> {
-    const base = (this.config.gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
-    const listUrl = new URL(`${base}/users/me/messages`);
+    const listUrl = new URL(`${this.apiBase()}/users/me/messages`);
     listUrl.searchParams.set("maxResults", String(input.maxResults ?? 20));
     if (input.pageToken) listUrl.searchParams.set("pageToken", input.pageToken);
     const listed = await gmailJson<{ messages?: { id: string }[]; nextPageToken?: string }>(
@@ -184,15 +209,58 @@ export class GmailAdapter implements MailboxAdapter {
     );
     const messages: Message[] = [];
     for (const item of listed.messages ?? []) {
-      const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(item.id)}`);
-      getUrl.searchParams.set("format", "full");
-      const raw = await gmailJson<GmailMessageResource>(getUrl, input.accessToken);
-      const message = normalizeGmailMessage(raw, input.grantId);
+      const message = await this.getMessage({
+        accessToken: input.accessToken,
+        grantId: input.grantId,
+        messageId: item.id,
+      });
       if (message) messages.push(message);
     }
     return { messages, nextCursor: listed.nextPageToken };
   }
+
+  /**
+   * Incremental mailbox changes after `startHistoryId` (Gmail `users.history.list`).
+   * A 404 means the watermark is too old — callers should bootstrap with a full sync.
+   */
+  async listHistory(input: {
+    accessToken: string;
+    startHistoryId: string;
+    pageToken?: string;
+    maxResults?: number;
+  }): Promise<GmailHistoryPage> {
+    const url = new URL(`${this.apiBase()}/users/me/history`);
+    url.searchParams.set("startHistoryId", input.startHistoryId);
+    url.searchParams.set("maxResults", String(input.maxResults ?? 100));
+    if (input.pageToken) url.searchParams.set("pageToken", input.pageToken);
+    const json = await gmailJson<{
+      history?: GmailHistoryRecord[];
+      nextPageToken?: string;
+      historyId?: string;
+    }>(url, input.accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return {
+      history: json.history ?? [],
+      nextPageToken: json.nextPageToken,
+      historyId: json.historyId,
+    };
+  }
 }
+
+export type GmailHistoryPage = {
+  history: GmailHistoryRecord[];
+  nextPageToken?: string;
+  historyId: string;
+};
+
+export type GmailHistoryRecord = {
+  id?: string;
+  messages?: { id?: string; threadId?: string }[];
+  messagesAdded?: { message?: { id?: string; threadId?: string } }[];
+  messagesDeleted?: { message?: { id?: string; threadId?: string } }[];
+  labelsAdded?: { message?: { id?: string }; labelIds?: string[] }[];
+  labelsRemoved?: { message?: { id?: string }; labelIds?: string[] }[];
+};
 
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });

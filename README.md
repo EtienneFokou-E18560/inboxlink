@@ -16,7 +16,7 @@ Working TypeScript monorepo with:
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail). `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. Microsoft/IMAP and npm publish are not implemented.
 
 Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
 
