@@ -1,4 +1,6 @@
 import { serve } from "@hono/node-server";
+import { handle as handleNode } from "@hono/node-server/vercel";
+import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { loadConfig } from "./config.js";
 import { createApp } from "./routes/app.js";
@@ -38,6 +40,27 @@ export function createAppFromEnv(
     queue,
   });
   return { app, config, store, vault };
+}
+
+/**
+ * Vercel Node invokes the default export with either a Web Request or the
+ * Node (req, res) pair. `hono/vercel` only returns a Response, which the
+ * Node listener ignores, so the request hangs. Write the Node response when
+ * that is the runtime shape.
+ */
+export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
+  const { app } = createAppFromEnv(env);
+  const web = handleWeb(app);
+  const node = handleNode(app);
+  return (incoming: unknown, outgoing?: unknown) => {
+    if (typeof Request !== "undefined" && incoming instanceof Request) {
+      return web(incoming);
+    }
+    return node(
+      incoming as Parameters<typeof node>[0],
+      outgoing as Parameters<typeof node>[1],
+    );
+  };
 }
 
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
