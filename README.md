@@ -58,7 +58,7 @@ pnpm build
 pnpm --filter @inboxlink/server dev
 ```
 
-Health check: [http://localhost:8787/health](http://localhost:8787/health)
+Health check: [http://localhost:8787/health](http://localhost:8787/health). `GET /` and `GET /health/` return the same JSON.
 
 ### Vercel
 

@@ -90,11 +90,13 @@ describe("grants, vault, and Gmail OAuth", () => {
       headers: { authorization: "Bearer not-the-tenant-key" },
     });
     assert.equal(wrongKey.status, 401);
-    const health = await app.request("/health");
-    assert.equal(health.status, 200);
-    const body = (await health.json()) as { ok: boolean; service: string };
-    assert.equal(body.ok, true);
-    assert.equal(body.service, "inboxlink");
+    for (const path of ["/", "/health", "/health/"]) {
+      const health = await app.request(path);
+      assert.equal(health.status, 200, path);
+      const body = (await health.json()) as { ok: boolean; service: string };
+      assert.equal(body.ok, true);
+      assert.equal(body.service, "inboxlink");
+    }
   });
 
   it("connects, lists the grant, and revoke clears ciphertext", async () => {
