@@ -21,6 +21,16 @@ export type Grant = {
   updatedAt: string;
 };
 
+/** Attachment metadata from the message MIME tree — no bytes. */
+export type MessageAttachment = {
+  /** Provider attachment id (Gmail `body.attachmentId`). */
+  id: string;
+  filename: string;
+  mimeType: string;
+  /** Decoded byte length from the provider (`body.size`). */
+  size: number;
+};
+
 export type Message = {
   id: string;
   grantId: string;
@@ -36,6 +46,8 @@ export type Message = {
   folderIds: string[];
   labels?: string[];
   hasAttachments: boolean;
+  /** Present when the MIME tree has one or more downloadable attachments. */
+  attachments?: MessageAttachment[];
   body?: { text?: string; html?: string };
 };
 
