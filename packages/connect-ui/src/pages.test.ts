@@ -48,7 +48,7 @@ describe("renderConnectErrorPage", () => {
       kind: "oauth_denied",
       providerError: '<script>alert(1)</script>',
     });
-    assert.doesNotMatch(html, /<script>alert/);
-    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.doesNotMatch(html, /<script>alert/i);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/i);
   });
 });
