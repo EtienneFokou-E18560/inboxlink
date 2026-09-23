@@ -48,6 +48,14 @@ pnpm --filter @inboxlink/server dev
 
 Health check: [http://localhost:8787/health](http://localhost:8787/health)
 
+### Vercel
+
+`vercel.json` routes all traffic to a Node serverless entry (`api/index.ts`) wrapping `@inboxlink/server` (Hono). After deploy, `GET /health` should return JSON.
+
+Note: v0 uses an **in-memory** store on Vercel — grants reset on cold starts. Use the long-running server + Postgres for anything real.
+
+Set Project → Environment Variables from `.env.example` (placeholders only; no production secrets in git).
+
 Create a Link session:
 
 ```bash
