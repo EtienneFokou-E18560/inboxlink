@@ -22,7 +22,8 @@
     "typecheck": "tsc -b tsconfig.json",
     "lint": "tsc -b tsconfig.json",
     "dev": "tsx watch src/cli.ts",
-    "start": "node dist/cli.js"
+    "start": "node dist/cli.js",
+    "test": "node --import tsx --test src/grants.integration.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",

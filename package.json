@@ -14,6 +14,7 @@
     "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.vercel.json --noEmit",
     "lint": "pnpm -r run lint && tsc -p tsconfig.vercel.json --noEmit",
     "dev:server": "pnpm --filter @inboxlink/server dev",
+    "test": "pnpm -r --if-present run test",
     "clean": "pnpm -r exec rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
