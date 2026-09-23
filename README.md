@@ -16,7 +16,9 @@ Working TypeScript monorepo with:
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-Not yet: a live Gmail test-user connect (needs the secrets below), durable grants across Vercel instances, Gmail history sync, Microsoft/IMAP adapters, npm publish.
+Not yet: a live Gmail test-user connect (needs the secrets below), Gmail history sync, Microsoft/IMAP adapters, npm publish.
+
+On Vercel, set `DATABASE_URL` to a Postgres database the functions can reach. The server creates the tables and the `default` tenant on startup. Without `DATABASE_URL`, sessions and grants stay in process memory and a callback on another instance returns Unknown OAuth state.
 
 A real Gmail connect needs these **user-held** values in the environment (never commit them):
 
@@ -26,7 +28,7 @@ A real Gmail connect needs these **user-held** values in the environment (never 
 - `INBOXLINK_MASTER_KEY` (16+ characters) and `INBOXLINK_API_SECRET`
 - The Gmail account added as a test user on the OAuth consent screen
 
-Grants and vault ciphertext live in process memory. On Vercel a cold start drops them, so list/revoke after connect is reliable on the long-running server (`pnpm dev:server`), not across serverless instances.
+With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and shared by every instance. `GET /health` then reports `"store":"postgres"`. Without that variable, storage stays in process memory (`"store":"memory"`).
 
 ## Packages
 
@@ -62,7 +64,7 @@ Health check: [http://localhost:8787/health](http://localhost:8787/health)
 
 `vercel.json` routes all traffic to a Node serverless entry (`api/index.ts`) wrapping `@inboxlink/server` (Hono). After deploy, `GET /health` should return JSON.
 
-Note: v0 uses an **in-memory** store on Vercel — grants reset on cold starts. Use the long-running server + Postgres for anything real.
+Set `DATABASE_URL` on the Vercel project (Production, Secret) before a live connect. `GET /health` includes `"store":"postgres"` when that database is in use. The server applies `GET /v1/schema.sql` itself on startup.
 
 Set Project → Environment Variables from `.env.example` (placeholders only; no production secrets in git).
 
@@ -105,7 +107,7 @@ See [`.env.example`](.env.example). Placeholders only — never commit real secr
 | `INBOXLINK_MASTER_KEY` | Envelope encryption key for the vault |
 | `INBOXLINK_API_SECRET` | Bearer secret for host APIs in `multi` mode |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail OAuth client |
-| `DATABASE_URL` | Postgres (schema ready; store still in-memory in v0) |
+| `DATABASE_URL` | Postgres for sessions, grants, and vault ciphertext. Unset uses in-memory storage |
 | `REDIS_URL` | Optional BullMQ placeholder |
 
 ## Independence from career-workspace

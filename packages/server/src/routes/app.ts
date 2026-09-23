@@ -1,11 +1,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Grant, Message } from "@inboxlink/core";
+import type { Grant, Message, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
-import { DEFAULT_GMAIL_SCOPES, GmailAdapter } from "@inboxlink/adapters-gmail";
-import type { MemoryStore } from "../store.js";
-import type { MemoryTokenVault } from "../vault/memory-vault.js";
+import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 
@@ -16,8 +15,8 @@ export type AppEnv = {
 };
 
 export type CreateAppOptions = {
-  store: MemoryStore;
-  vault: MemoryTokenVault;
+  store: GrantStore;
+  vault: TokenVault;
   gmail: GmailAdapter;
   publicBaseUrl: string;
   apiSecret: string;
@@ -25,6 +24,8 @@ export type CreateAppOptions = {
   gmailScopes: string[];
   /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
   oauthRedirectUri?: string;
+  /** `postgres` when DATABASE_URL is set; otherwise process memory. */
+  storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
 };
 
@@ -33,14 +34,24 @@ export function createApp(opts: CreateAppOptions) {
 
   app.use("*", cors());
 
-  app.get("/health", (c) =>
-    c.json({
+  app.get("/health", async (c) => {
+    const storeKind = opts.storeKind ?? "memory";
+    try {
+      await opts.store.ready();
+    } catch {
+      return c.json(
+        { ok: false, service: "inboxlink", mode: opts.mode, store: storeKind, error: "database_unavailable" },
+        503,
+      );
+    }
+    return c.json({
       ok: true,
       service: "inboxlink",
       mode: opts.mode,
       queue: opts.queue ? "stub" : "disabled",
-    }),
-  );
+      store: storeKind,
+    });
+  });
 
   app.get("/v1/schema.sql", (c) =>
     c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
@@ -77,7 +88,7 @@ export function createApp(opts: CreateAppOptions) {
       return c.json({ error: "externalUserId and redirectUri are required" }, 400);
     }
     const tenantId = c.get("tenantId");
-    const session = opts.store.createSession({
+    const session = await opts.store.createSession({
       tenantId,
       externalUserId: body.externalUserId,
       redirectUri: body.redirectUri,
@@ -95,8 +106,8 @@ export function createApp(opts: CreateAppOptions) {
     });
   });
 
-  app.get("/v1/link/sessions/:id", (c) => {
-    const session = opts.store.getSession(c.req.param("id"));
+  app.get("/v1/link/sessions/:id", async (c) => {
+    const session = await opts.store.getSession(c.req.param("id"));
     if (!session) return c.json({ error: "not_found" }, 404);
     return c.json({
       id: session.id,
@@ -107,8 +118,8 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   /** Minimal Connect stub page — redirects into Gmail OAuth. */
-  app.get("/v1/connect/:linkToken", (c) => {
-    const session = opts.store.getSessionByToken(c.req.param("linkToken"));
+  app.get("/v1/connect/:linkToken", async (c) => {
+    const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
     if (!session || isExpired(session.expiresAt)) {
       return c.html("<h1>Invalid or expired link</h1>", 404);
     }
@@ -117,6 +128,7 @@ export function createApp(opts: CreateAppOptions) {
     }
     const state = randomToken(16);
     session.oauthState = state;
+    await opts.store.saveSession(session);
     const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
@@ -149,7 +161,7 @@ export function createApp(opts: CreateAppOptions) {
     if (!code || !state) {
       return c.html("<h1>Missing code/state</h1>", 400);
     }
-    const session = [...opts.store.sessions.values()].find((s) => s.oauthState === state);
+    const session = await opts.store.findSessionByOAuthState(state);
     if (!session || isExpired(session.expiresAt)) {
       return c.html("<h1>Unknown OAuth state</h1>", 400);
     }
@@ -177,7 +189,7 @@ export function createApp(opts: CreateAppOptions) {
       createdAt: now,
       updatedAt: now,
     };
-    opts.store.grants.set(grantId, grant);
+    await opts.store.putGrant(grant);
     try {
       if (tokens.refreshToken) {
         await opts.vault.seal(tokens.refreshToken, {
@@ -186,7 +198,7 @@ export function createApp(opts: CreateAppOptions) {
         });
       }
     } catch {
-      opts.store.grants.delete(grantId);
+      await opts.store.deleteGrant(grantId, session.tenantId);
       return c.html(
         "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
         500,
@@ -197,8 +209,7 @@ export function createApp(opts: CreateAppOptions) {
     session.status = "completed";
     session.grantId = grantId;
     session.publicToken = publicToken;
-    opts.store.publicTokens.set(publicToken, grantId);
-    opts.store.messages.set(grantId, []);
+    await opts.store.saveSession(session);
 
     if (opts.queue) {
       await opts.queue.enqueue({
@@ -217,44 +228,40 @@ export function createApp(opts: CreateAppOptions) {
   app.post("/v1/grants/exchange", async (c) => {
     const body = (await c.req.json()) as { publicToken?: string };
     if (!body.publicToken) return c.json({ error: "publicToken required" }, 400);
-    const grantId = opts.store.publicTokens.get(body.publicToken);
+    const grantId = await opts.store.consumePublicToken(body.publicToken);
     if (!grantId) return c.json({ error: "invalid_public_token" }, 400);
-    // one-time exchange
-    opts.store.publicTokens.delete(body.publicToken);
     return c.json({ grantId });
   });
 
-  app.get("/v1/grants", (c) => {
+  app.get("/v1/grants", async (c) => {
     const externalUserId = c.req.query("externalUserId");
     if (!externalUserId) return c.json({ error: "externalUserId required" }, 400);
     const tenantId = c.get("tenantId");
-    const grants = [...opts.store.grants.values()].filter(
-      (g) => g.tenantId === tenantId && g.externalUserId === externalUserId,
-    );
+    const grants = await opts.store.listGrants(tenantId, externalUserId);
     return c.json({ grants });
   });
 
   app.delete("/v1/grants/:grantId", async (c) => {
     const grantId = c.req.param("grantId");
-    const grant = opts.store.grants.get(grantId);
     const tenantId = c.get("tenantId");
+    const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     await opts.vault.destroy(grantId);
-    opts.store.grants.delete(grantId);
-    opts.store.messages.delete(grantId);
+    await opts.store.deleteGrant(grantId, tenantId);
+    await opts.store.deleteMessages(grantId);
     return c.body(null, 204);
   });
 
-  app.get("/v1/grants/:grantId/messages", (c) => {
+  app.get("/v1/grants/:grantId/messages", async (c) => {
     const grantId = c.req.param("grantId");
-    if (!opts.store.grants.has(grantId)) return c.json({ error: "not_found" }, 404);
-    const messages: Message[] = opts.store.messages.get(grantId) ?? [];
+    if (!(await opts.store.getGrant(grantId))) return c.json({ error: "not_found" }, 404);
+    const messages: Message[] = await opts.store.listMessages(grantId);
     return c.json({ messages, nextCursor: undefined });
   });
 
   app.post("/v1/grants/:grantId/sync", async (c) => {
     const grantId = c.req.param("grantId");
-    const grant = opts.store.grants.get(grantId);
+    const grant = await opts.store.getGrant(grantId);
     if (!grant) return c.json({ error: "not_found" }, 404);
     // Slice 2 will call Gmail history.list; v0 returns empty watermark.
     if (opts.queue) {
