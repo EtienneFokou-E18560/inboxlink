@@ -1,4 +1,4 @@
-import type { EmailAddress, Message } from "@inboxlink/core";
+import type { EmailAddress, Message, MessageAttachment } from "@inboxlink/core";
 
 export type GmailMessageResource = {
   id?: string;
@@ -13,7 +13,7 @@ type GmailPart = {
   mimeType?: string;
   filename?: string;
   headers?: { name?: string; value?: string }[];
-  body?: { data?: string; attachmentId?: string };
+  body?: { data?: string; attachmentId?: string; size?: number };
   parts?: GmailPart[];
 };
 
@@ -39,6 +39,7 @@ export function normalizeGmailMessage(raw: GmailMessageResource, grantId: string
   const receivedAt = fromInternalDate(raw.internalDate) ?? fromHttpDate(headers.get("date"));
   const sentAt = fromHttpDate(headers.get("date")) ?? receivedAt;
   const body = collectBody(raw.payload);
+  const attachments = collectAttachments(raw.payload);
   const message: Message = {
     id: `msg_${raw.id}`,
     grantId,
@@ -51,17 +52,40 @@ export function normalizeGmailMessage(raw: GmailMessageResource, grantId: string
     receivedAt: receivedAt ?? new Date(0).toISOString(),
     folderIds: labels.filter((label) => FOLDER_LABELS.has(label) || label.startsWith("CATEGORY_")),
     labels,
-    hasAttachments: body.hasAttachments,
+    hasAttachments: body.hasAttachments || attachments.length > 0,
   };
   if (raw.threadId) message.threadId = raw.threadId;
   const cc = parseAddressList(headers.get("cc"));
   if (cc.length) message.cc = cc;
+  if (attachments.length) message.attachments = attachments;
   if (body.text || body.html) {
     message.body = {};
     if (body.text) message.body.text = body.text;
     if (body.html) message.body.html = body.html;
   }
   return message;
+}
+
+/** Walk the MIME tree for parts with a Gmail `attachmentId` (metadata only). */
+export function collectAttachments(part: GmailPart | undefined): MessageAttachment[] {
+  const attachments: MessageAttachment[] = [];
+  walkAttachments(part, attachments);
+  return attachments;
+}
+
+function walkAttachments(part: GmailPart | undefined, out: MessageAttachment[]): void {
+  if (!part) return;
+  const attachmentId = part.body?.attachmentId?.trim();
+  if (attachmentId) {
+    const size = part.body?.size;
+    out.push({
+      id: attachmentId,
+      filename: part.filename?.trim() ?? "",
+      mimeType: part.mimeType?.trim() || "application/octet-stream",
+      size: typeof size === "number" && Number.isFinite(size) && size >= 0 ? size : 0,
+    });
+  }
+  for (const child of part.parts ?? []) walkAttachments(child, out);
 }
 
 function headerMap(headers: GmailPart["headers"]): Map<string, string> {

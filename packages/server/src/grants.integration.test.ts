@@ -93,9 +93,18 @@ describe("grants, vault, and Gmail OAuth", () => {
     for (const path of ["/", "/health", "/health/"]) {
       const health = await app.request(path);
       assert.equal(health.status, 200, path);
-      const body = (await health.json()) as { ok: boolean; service: string };
+      const body = (await health.json()) as {
+        ok: boolean;
+        service: string;
+        store: string;
+        warning?: string;
+        guidance?: string;
+      };
       assert.equal(body.ok, true);
       assert.equal(body.service, "inboxlink");
+      assert.equal(body.store, "memory");
+      assert.equal(body.warning, "ephemeral_store");
+      assert.match(body.guidance ?? "", /DATABASE_URL/);
     }
   });
 
