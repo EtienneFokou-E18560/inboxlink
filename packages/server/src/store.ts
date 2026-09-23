@@ -32,7 +32,11 @@ export interface GrantStore {
   getGrant(id: string): Promise<Grant | undefined>;
   deleteGrant(id: string, tenantId: string): Promise<void>;
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
-  consumePublicToken(publicToken: string): Promise<string | undefined>;
+  /**
+   * Consume a one-time public token only when the owning session belongs to
+   * `tenantId`. Returns undefined when missing or cross-tenant.
+   */
+  consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined>;
   listMessages(grantId: string): Promise<Message[]>;
   upsertMessages(messages: Message[]): Promise<void>;
   deleteMessages(grantId: string): Promise<void>;
@@ -126,13 +130,13 @@ export class MemoryStore implements GrantStore {
     );
   }
 
-  async consumePublicToken(publicToken: string): Promise<string | undefined> {
+  async consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined> {
     const grantId = this.publicTokens.get(publicToken);
     if (!grantId) return undefined;
+    const owner = [...this.sessions.values()].find((s) => s.publicToken === publicToken);
+    if (!owner || owner.tenantId !== tenantId) return undefined;
     this.publicTokens.delete(publicToken);
-    for (const session of this.sessions.values()) {
-      if (session.publicToken === publicToken) session.publicToken = undefined;
-    }
+    owner.publicToken = undefined;
     return grantId;
   }
 
