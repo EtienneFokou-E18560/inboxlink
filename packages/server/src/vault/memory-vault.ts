@@ -17,16 +17,16 @@ export class MemoryTokenVault implements TokenVault {
     plaintext: string,
     context: { grantId: string; tenantId: string },
   ): Promise<Uint8Array> {
-    const ciphertext = sealSecret(this.masterKey, plaintext);
+    const ciphertext = sealSecret(this.masterKey, plaintext, aadFor(context));
     this.store.set(context.grantId, ciphertext);
     return ciphertext;
   }
 
   async open(
     ciphertext: Uint8Array,
-    _context: { grantId: string; tenantId: string },
+    context: { grantId: string; tenantId: string },
   ): Promise<string> {
-    return openSecret(this.masterKey, ciphertext);
+    return openSecret(this.masterKey, ciphertext, aadFor(context));
   }
 
   async destroy(grantId: string): Promise<void> {
@@ -36,4 +36,8 @@ export class MemoryTokenVault implements TokenVault {
   getCiphertext(grantId: string): Uint8Array | undefined {
     return this.store.get(grantId);
   }
+}
+
+function aadFor(context: { grantId: string; tenantId: string }): string {
+  return `${context.tenantId}\0${context.grantId}`;
 }

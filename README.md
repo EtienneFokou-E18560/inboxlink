@@ -10,13 +10,23 @@ It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18
 
 Working TypeScript monorepo with:
 
-- Gmail OAuth **authorization URL + callback** stubs
-- Encrypted **token vault** interface (in-memory AES-GCM for local demos)
+- Gmail OAuth **authorization URL + callback** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
+- Encrypted **token vault** (in-memory AES-256-GCM; revoke deletes the ciphertext)
 - HTTP API skeleton (`/v1/link/sessions`, grants exchange, health)
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-Not yet: production Google OAuth against real secrets, Gmail history sync, Microsoft/IMAP adapters, npm publish.
+Not yet: a live Gmail test-user connect (needs the secrets below), durable grants across Vercel instances, Gmail history sync, Microsoft/IMAP adapters, npm publish.
+
+A real Gmail connect needs these **user-held** values in the environment (never commit them):
+
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` from a Google Cloud OAuth client (not `GOOGLE_APPLICATION_CREDENTIALS_JSON`)
+- `GOOGLE_REDIRECT_URI` exactly matching the callback, for production `https://inboxlink-two.vercel.app/v1/oauth/gmail/callback`
+- `PUBLIC_BASE_URL` set to that same origin
+- `INBOXLINK_MASTER_KEY` (16+ characters) and `INBOXLINK_API_SECRET`
+- The Gmail account added as a test user on the OAuth consent screen
+
+Grants and vault ciphertext live in process memory. On Vercel a cold start drops them, so list/revoke after connect is reliable on the long-running server (`pnpm dev:server`), not across serverless instances.
 
 ## Packages
 
