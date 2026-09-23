@@ -16,7 +16,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) including attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are not implemented. The `@inboxlink/sdk` publish path is ready ([docs/publishing.md](docs/publishing.md)); no live npm release until a maintainer runs the manual workflow with credentials.
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
 
@@ -50,7 +50,7 @@ Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
 | Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL, token exchange/refresh, list + normalize |
 | Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
 | Connect UI | stub HTML in server; `packages/connect-ui` placeholder | Browser Connect page |
-| SDK | `@inboxlink/sdk` | Thin host HTTP client (not published to npm yet) |
+| SDK | `@inboxlink/sdk` | Host HTTP client (Gmail list/get/sync); npm path ready, not published yet |
 | Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
 **Standing rules:** no Production secrets in git; MIT only; no career-workspace imports, shared DB, or shared types.
@@ -61,7 +61,7 @@ Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
 | `@inboxlink/adapters-gmail` | Gmail OAuth + message list/normalize |
-| `@inboxlink/sdk` | Host-app HTTP client |
+| `@inboxlink/sdk` | Host-app HTTP client ([usage](packages/sdk/README.md); [npm publish path](docs/publishing.md)) |
 | `@inboxlink/server` | Hono HTTP service |
 | `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors) |
 | `@inboxlink/demo` | Tiny SDK demo (`apps/demo`) |
@@ -175,6 +175,28 @@ curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE
 
 `limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. The JSON uses the normalized message fields (`providerMessageId`, `from`, `subject`, `snippet`, `receivedAt`, `folderIds`, `labels`, `hasAttachments`, optional `attachments` / `body`). It never includes the refresh token.
 
+### Host SDK (`@inboxlink/sdk`)
+
+```ts
+import { InboxLink } from "@inboxlink/sdk";
+
+const il = new InboxLink({
+  baseUrl: process.env.PUBLIC_BASE_URL ?? "http://localhost:8787",
+  apiSecret: process.env.INBOXLINK_API_SECRET ?? "dev-api-secret-change-me",
+});
+
+const session = await il.link.createSession({
+  externalUserId: "user-1",
+  redirectUri: "https://your-app.example/done",
+});
+const { grantId } = await il.grants.exchange({ publicToken });
+const { messages } = await il.messages.list(grantId, { limit: 20 });
+const { message } = await il.messages.get(grantId, messages[0]!.id);
+await il.grants.sync(grantId); // history watermark sync
+```
+
+Until the first npm release, use the workspace package. Publishing is **manual / opt-in** only ([docs/publishing.md](docs/publishing.md)) — no token, no publish.
+
 Demo host client:
 
 ```bash
@@ -193,7 +215,7 @@ Set Project → Environment Variables from the checklist above (never commit Pro
 |------|--------|
 | Microsoft Graph adapter | Separate OAuth console + `MICROSOFT_*` env |
 | IMAP adapter | App-password / password vaulting; security review first |
-| npm publish (`@inboxlink/sdk` et al.) | Docs/SDK usage only until publish path is chosen |
+| npm publish (`@inboxlink/sdk` et al.) | Path ready ([docs/publishing.md](docs/publishing.md)); no live release yet |
 | career-workspace host wiring | Optional **last**; core must stay independent |
 
 ## Contributing
