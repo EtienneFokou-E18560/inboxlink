@@ -1,5 +1,6 @@
 {
-  "framework": "hono",
   "installCommand": "pnpm install",
-  "buildCommand": "pnpm build"
+  "buildCommand": "pnpm build",
+  "framework": null,
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }
