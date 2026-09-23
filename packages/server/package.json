@@ -28,7 +28,7 @@
     "test": "node --import tsx --test src/grants.integration.test.ts src/grants-public.test.ts src/config.test.ts src/durable-store.integration.test.ts src/messages.integration.test.ts src/message-filters.test.ts src/log.test.ts src/sync.integration.test.ts src/multi.integration.test.ts src/home.integration.test.ts src/public/status-page.test.ts src/docs-hub/docs.integration.test.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.14.1",
+    "@hono/node-server": "^2.1.1",
     "@inboxlink/adapters-gmail": "workspace:*",
     "@inboxlink/connect-ui": "workspace:*",
     "@inboxlink/core": "workspace:*",
