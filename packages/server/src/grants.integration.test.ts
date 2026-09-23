@@ -86,6 +86,10 @@ describe("grants, vault, and Gmail OAuth", () => {
     const { app } = buildApp();
     const denied = await app.request("/v1/grants?externalUserId=user-1");
     assert.equal(denied.status, 401);
+    const wrongKey = await app.request("/v1/grants?externalUserId=user-1", {
+      headers: { authorization: "Bearer not-the-tenant-key" },
+    });
+    assert.equal(wrongKey.status, 401);
     const health = await app.request("/health");
     assert.equal(health.status, 200);
     const body = (await health.json()) as { ok: boolean; service: string };
@@ -112,7 +116,16 @@ describe("grants, vault, and Gmail OAuth", () => {
     const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
     const html = await connect.text();
-    const state = new URL(html.match(/href="([^"]+)"/)?.[1] ?? "").searchParams.get("state");
+    const href = (html.match(/href="([^"]+)"/)?.[1] ?? "")
+      .replaceAll("&amp;", "&")
+      .replaceAll("&quot;", '"');
+    const authUrl = new URL(href);
+    assert.equal(authUrl.origin, "https://accounts.google.com");
+    assert.equal(
+      authUrl.searchParams.get("redirect_uri"),
+      "http://localhost:8787/v1/oauth/gmail/callback",
+    );
+    const state = authUrl.searchParams.get("state");
     assert.ok(state);
 
     const callback = await app.request(

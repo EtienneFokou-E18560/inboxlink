@@ -15,7 +15,7 @@ export type ServerConfig = {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
-  const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${port}`).replace(/\/$/, "");
+  const publicBaseUrl = resolvePublicBaseUrl(env, port);
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
     env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
@@ -43,4 +43,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       env.GOOGLE_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/gmail/callback`,
     gmailScopes: scopes,
   };
+}
+
+/** Prefer an explicit public URL, then the stable Vercel production host. */
+export function resolvePublicBaseUrl(env: NodeJS.ProcessEnv, port: number): string {
+  const explicit = env.PUBLIC_BASE_URL?.trim();
+  if (explicit) return explicit.replace(/\/$/, "");
+  const production = env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  if (production) return `https://${production.replace(/^https?:\/\//, "").replace(/\/$/, "")}`;
+  const vercel = env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/^https?:\/\//, "").replace(/\/$/, "")}`;
+  return `http://localhost:${port}`;
 }
