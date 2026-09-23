@@ -3,6 +3,6 @@
   "installCommand": "pnpm install",
   "buildCommand": "pnpm build",
   "framework": null,
-  "outputDirectory": null,
+  "outputDirectory": "public",
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }
