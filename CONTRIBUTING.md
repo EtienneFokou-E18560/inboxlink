@@ -23,3 +23,7 @@ Node **22+** and **pnpm** are required.
 
 - Run `pnpm lint`, `pnpm typecheck`, and `pnpm build` before opening a PR.
 - Keep changes focused; document stub vs production behavior in the PR body when touching OAuth or vault code.
+
+## Suggested merge hierarchy (optional slices)
+
+Core connect + messages land first. Host-integration docs/examples ([docs/host-integration.md](docs/host-integration.md), Slice J) are **optional and last** — merge only when you want a host product path. They must not introduce a dependency on career-workspace or any other host app.
