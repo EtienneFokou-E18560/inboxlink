@@ -4,6 +4,12 @@ import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
+import {
+  ImapAdapter,
+  ImapAuthError,
+  ImapCredentialsError,
+  ImapUnavailableError,
+} from "@inboxlink/adapters-imap";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
@@ -20,6 +26,8 @@ export type CreateAppOptions = {
     getCiphertext(grantId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
   };
   gmail: GmailAdapter;
+  /** Optional; defaults to a real imapflow-backed adapter when omitted. */
+  imap?: ImapAdapter;
   publicBaseUrl: string;
   apiSecret: string;
   mode: "single" | "multi";
@@ -33,6 +41,7 @@ export type CreateAppOptions = {
 
 export function createApp(opts: CreateAppOptions) {
   const app = new Hono<AppEnv>();
+  const imap = opts.imap ?? new ImapAdapter();
 
   app.use("*", cors());
 
@@ -123,7 +132,7 @@ export function createApp(opts: CreateAppOptions) {
     });
   });
 
-  /** Minimal Connect stub page — redirects into Gmail OAuth. */
+  /** Minimal Connect stub — Gmail OAuth + IMAP password/app-password form. */
   app.get("/v1/connect/:linkToken", async (c) => {
     const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
     if (!session || isExpired(session.expiresAt)) {
@@ -141,20 +150,142 @@ export function createApp(opts: CreateAppOptions) {
       redirectUri,
       scopes: opts.gmailScopes,
     });
+    const linkToken = encodeURIComponent(session.linkToken);
     return c.html(`<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><title>InboxLink Connect</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-  a.button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none}
+  a.button,button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none;border:0;cursor:pointer;font:inherit}
+  label{display:block;margin:.75rem 0 .25rem;font-size:.9rem}
+  input{width:100%;padding:.5rem;box-sizing:border-box}
   .muted{color:#555;font-size:.9rem}
+  hr{border:0;border-top:1px solid #ddd;margin:2rem 0}
 </style></head>
 <body>
   <h1>Connect inbox</h1>
   <p>InboxLink will request <strong>read-only</strong> Gmail access. Your host app never sees the refresh token.</p>
   <p><a class="button" href="${escapeHtml(authUrl)}">Continue with Google</a></p>
+  <hr/>
+  <h2>IMAP (password / app-password)</h2>
+  <p class="muted">Credentials are sealed in the vault. Prefer an app-password. INBOX list only in v0.</p>
+  <form method="post" action="/v1/connect/${linkToken}/imap">
+    <label for="host">IMAP host</label>
+    <input id="host" name="host" required placeholder="imap.example.com" autocomplete="off"/>
+    <label for="port">Port</label>
+    <input id="port" name="port" type="number" value="993" min="1" max="65535"/>
+    <label for="secure"><input id="secure" name="secure" type="checkbox" value="true" checked/> Use TLS (IMAPS)</label>
+    <label for="user">Username</label>
+    <input id="user" name="user" required autocomplete="username"/>
+    <label for="password">Password / app-password</label>
+    <input id="password" name="password" type="password" required autocomplete="current-password"/>
+    <p style="margin-top:1.25rem"><button type="submit">Connect IMAP</button></p>
+  </form>
   <p class="muted">Stub Connect UI — replace with packages/connect-ui.</p>
 </body></html>`);
+  });
+
+  /** IMAP connect — verifies login, seals credentials, completes the link session. */
+  app.post("/v1/connect/:linkToken/imap", async (c) => {
+    const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
+    if (!session || isExpired(session.expiresAt)) {
+      return c.html("<h1>Invalid or expired link</h1>", 404);
+    }
+    if (session.status !== "pending") {
+      return c.html(`<h1>Session ${session.status}</h1>`, 400);
+    }
+
+    const contentType = c.req.header("content-type") ?? "";
+    let body: unknown;
+    try {
+      if (contentType.includes("application/json")) {
+        body = await c.req.json();
+      } else {
+        const form = await c.req.parseBody();
+        body = {
+          host: form.host,
+          port: form.port,
+          secure: form.secure === "true" || form.secure === "on" ? true : form.secure === "false" ? false : undefined,
+          user: form.user,
+          password: form.password,
+        };
+      }
+    } catch {
+      return c.html("<h1>Invalid IMAP form</h1>", 400);
+    }
+
+    let prepared: ReturnType<ImapAdapter["prepareSecret"]>;
+    try {
+      prepared = imap.prepareSecret(body);
+    } catch (err) {
+      if (err instanceof ImapCredentialsError) {
+        return c.html(`<h1>Invalid IMAP credentials</h1><p>${escapeHtml(err.message)}</p>`, 400);
+      }
+      return c.html("<h1>Invalid IMAP credentials</h1>", 400);
+    }
+
+    let email: string;
+    try {
+      email = (await imap.verifyConnection(prepared.credentials)).email;
+    } catch (err) {
+      if (err instanceof ImapAuthError) {
+        return c.html(
+          "<h1>IMAP login failed</h1><p>Check the host, username, and password or app-password.</p>",
+          401,
+        );
+      }
+      return c.html(
+        "<h1>IMAP unavailable</h1><p>Could not reach the mailbox. Check host, port, and TLS.</p>",
+        502,
+      );
+    }
+
+    const grantId = newId("grant");
+    const now = new Date().toISOString();
+    const grant: Grant = {
+      id: grantId,
+      tenantId: session.tenantId,
+      externalUserId: session.externalUserId,
+      provider: "imap",
+      email,
+      status: "active",
+      scopes: ["imap.read"],
+      createdAt: now,
+      updatedAt: now,
+    };
+    await opts.store.putGrant(grant);
+    try {
+      await opts.vault.seal(prepared.secret, {
+        grantId,
+        tenantId: session.tenantId,
+      });
+    } catch {
+      await opts.store.deleteGrant(grantId, session.tenantId);
+      return c.html(
+        "<h1>Could not store IMAP credentials</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
+        500,
+      );
+    }
+
+    session.oauthState = undefined;
+    const publicToken = randomToken(24);
+    session.status = "completed";
+    session.grantId = grantId;
+    session.publicToken = publicToken;
+    await opts.store.saveSession(session);
+
+    if (opts.queue) {
+      await opts.queue.enqueue({
+        grantId,
+        tenantId: session.tenantId,
+        kind: "bootstrap",
+      });
+    }
+
+    const redirect = new URL(session.redirectUri);
+    redirect.searchParams.set("public_token", publicToken);
+    redirect.searchParams.set("link_token", session.linkToken);
+    return c.redirect(redirect.toString(), 302);
   });
 
   app.get("/v1/oauth/gmail/callback", async (c) => {
@@ -263,13 +394,19 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
-    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
+    if (grant.provider !== "gmail" && grant.provider !== "imap") {
+      return c.json({ error: "unsupported_provider" }, 400);
+    }
     if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
 
     const limit = parseLimit(c.req.query("limit"));
     if (limit === null) return c.json({ error: "invalid_limit" }, 400);
     const cursor = c.req.query("cursor")?.trim() || undefined;
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
+
+    if (grant.provider === "imap") {
+      return listImapMessages(c, opts, imap, grant, limit, cursor);
+    }
 
     const ciphertext = await opts.vault.getCiphertext(grantId);
     if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
@@ -325,6 +462,51 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   return app;
+}
+
+async function listImapMessages(
+  c: { json: (body: unknown, status?: number) => Response },
+  opts: CreateAppOptions,
+  imap: ImapAdapter,
+  grant: Grant,
+  limit: number,
+  cursor: string | undefined,
+): Promise<Response> {
+  const ciphertext = await opts.vault.getCiphertext(grant.id);
+  if (!ciphertext) return c.json({ error: "missing_imap_secret" }, 409);
+  let secret: string;
+  try {
+    secret = await opts.vault.open(ciphertext, { grantId: grant.id, tenantId: grant.tenantId });
+  } catch {
+    return c.json({ error: "missing_imap_secret" }, 409);
+  }
+
+  let credentials;
+  try {
+    credentials = imap.openSecret(secret);
+  } catch {
+    await markNeedsReauth(opts.store, grant);
+    return c.json({ error: "needs_reauth" }, 409);
+  }
+
+  try {
+    const page = await imap.listMessages({
+      credentials,
+      grantId: grant.id,
+      maxResults: limit,
+      cursor,
+    });
+    return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+  } catch (err) {
+    if (err instanceof ImapAuthError) {
+      await markNeedsReauth(opts.store, grant);
+      return c.json({ error: "needs_reauth" }, 409);
+    }
+    if (err instanceof ImapUnavailableError && err.message === "invalid_cursor") {
+      return c.json({ error: "invalid_cursor" }, 400);
+    }
+    return c.json({ error: "imap_unavailable" }, 502);
+  }
 }
 
 function googleErrorCode(err: unknown): string {

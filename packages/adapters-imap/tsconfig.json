@@ -5,9 +5,7 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  "include": [
-    "src/**/*"
-  ],
+  "include": ["src/**/*"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [{ "path": "../core" }, { "path": "../adapters-gmail" }, { "path": "../adapters-imap" }]
+  "references": [{ "path": "../core" }]
 }

@@ -16,7 +16,9 @@ Working TypeScript monorepo with:
 - Postgres **Drizzle schema stubs** + raw SQL export
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant. The server opens the vaulted refresh token, exchanges it for an access token, and returns the normalized message shape. History sync, Microsoft/IMAP, and npm publish are not implemented.
+`GET /v1/grants/:grantId/messages` lists Gmail or IMAP messages for an active grant. Gmail opens the vaulted refresh token; IMAP opens the vaulted password/app-password secret. History sync, Microsoft Graph, and npm publish are not implemented.
+
+**IMAP (Slice E, scoped):** Connect form + `POST /v1/connect/:linkToken/imap` seals credentials in the vault; list is **INBOX** via [imapflow](https://github.com/postalsys/imapflow) (**MIT**). CI uses a mock transport — no live IMAP. Limitations: password/app-password only (no XOAUTH2), INBOX only, best-effort MIME, no IDLE/UID sync. Do **not** fork EmailEngine or RustMailer (commercial licenses).
 
 Live acceptance needs a connected Gmail grant (the Slice 1 revoke removed the previous one). No extra secrets beyond the OAuth client, `INBOXLINK_MASTER_KEY`, and `DATABASE_URL` on Vercel. CI uses a local Gmail HTTP stand-in and does not call Google.
 
@@ -37,7 +39,8 @@ With `DATABASE_URL` set, grants and vault ciphertext are stored in Postgres and 
 | Package | Role |
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
-| `@inboxlink/adapters-gmail` | Gmail OAuth adapter (URL + token exchange) |
+| `@inboxlink/adapters-gmail` | Gmail OAuth adapter (URL + token exchange + message list) |
+| `@inboxlink/adapters-imap` | IMAP password/app-password adapter (connect + INBOX list; MIT imapflow) |
 | `@inboxlink/sdk` | Host-app HTTP client |
 | `@inboxlink/server` | Hono HTTP service |
 | `@inboxlink/connect-ui` | Stub (server ships minimal Connect HTML for now) |

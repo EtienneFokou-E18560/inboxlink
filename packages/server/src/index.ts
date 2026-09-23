@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { handle as handleNode } from "@hono/node-server/vercel";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { ImapAdapter } from "@inboxlink/adapters-imap";
 import { loadConfig } from "./config.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
@@ -40,10 +41,12 @@ export function createAppFromEnv(
     clientSecret: config.googleClientSecret,
     redirectUri: config.googleRedirectUri,
   });
+  const imap = new ImapAdapter();
   const app = createApp({
     store,
     vault,
     gmail,
+    imap,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
     mode: config.mode,
