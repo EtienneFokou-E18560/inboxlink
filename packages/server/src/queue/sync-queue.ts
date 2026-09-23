@@ -1,6 +1,7 @@
 /**
  * Optional BullMQ / Redis placeholders.
  * Importing bullmq is deferred so the server starts without Redis installed.
+ * Slice B runs sync inline on POST /v1/grants/:id/sync; Redis remains optional.
  */
 import { log } from "../log.js";
 

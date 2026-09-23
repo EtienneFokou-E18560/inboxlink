@@ -168,6 +168,14 @@ export class GmailAdapter implements MailboxAdapter {
     };
   }
 
+  /** Current mailbox profile — `historyId` seeds or advances the sync watermark. */
+  async getProfile(accessToken: string): Promise<{ emailAddress?: string; historyId: string }> {
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/profile`);
+    const json = await gmailJson<{ emailAddress?: string; historyId?: string }>(url, accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return { emailAddress: json.emailAddress, historyId: json.historyId };
+  }
+
   /**
    * List mailbox messages and normalize each `format=full` resource.
    * Callers pass a short-lived access token. This method does not see the refresh token.
@@ -188,7 +196,12 @@ export class GmailAdapter implements MailboxAdapter {
     );
     const messages: Message[] = [];
     for (const item of listed.messages ?? []) {
-      const message = await this.fetchNormalizedMessage(base, input.accessToken, input.grantId, item.id);
+      const message = await this.fetchNormalizedMessage(
+        base,
+        input.accessToken,
+        input.grantId,
+        item.id,
+      );
       if (message) messages.push(message);
     }
     return { messages, nextCursor: listed.nextPageToken };
@@ -208,6 +221,33 @@ export class GmailAdapter implements MailboxAdapter {
     return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId);
   }
 
+  /**
+   * Incremental mailbox changes after `startHistoryId` (Gmail `users.history.list`).
+   * A 404 means the watermark is too old — callers should bootstrap with a full sync.
+   */
+  async listHistory(input: {
+    accessToken: string;
+    startHistoryId: string;
+    pageToken?: string;
+    maxResults?: number;
+  }): Promise<GmailHistoryPage> {
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/history`);
+    url.searchParams.set("startHistoryId", input.startHistoryId);
+    url.searchParams.set("maxResults", String(input.maxResults ?? 100));
+    if (input.pageToken) url.searchParams.set("pageToken", input.pageToken);
+    const json = await gmailJson<{
+      history?: GmailHistoryRecord[];
+      nextPageToken?: string;
+      historyId?: string;
+    }>(url, input.accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return {
+      history: json.history ?? [],
+      nextPageToken: json.nextPageToken,
+      historyId: json.historyId,
+    };
+  }
+
   private async fetchNormalizedMessage(
     base: string,
     accessToken: string,
@@ -224,6 +264,21 @@ export class GmailAdapter implements MailboxAdapter {
 function gmailBase(configured: string | undefined): string {
   return (configured ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
 }
+
+export type GmailHistoryPage = {
+  history: GmailHistoryRecord[];
+  nextPageToken?: string;
+  historyId: string;
+};
+
+export type GmailHistoryRecord = {
+  id?: string;
+  messages?: { id?: string; threadId?: string }[];
+  messagesAdded?: { message?: { id?: string; threadId?: string } }[];
+  messagesDeleted?: { message?: { id?: string; threadId?: string } }[];
+  labelsAdded?: { message?: { id?: string }; labelIds?: string[] }[];
+  labelsRemoved?: { message?: { id?: string }; labelIds?: string[] }[];
+};
 
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
