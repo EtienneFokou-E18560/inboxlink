@@ -1,5 +1,9 @@
 import type { MailboxAdapter, Message } from "@inboxlink/core";
-import { normalizeGmailMessage, type GmailMessageResource } from "./normalize.js";
+import {
+  collectAttachments,
+  normalizeGmailMessage,
+  type GmailMessageResource,
+} from "./normalize.js";
 
 export type GmailAdapterConfig = {
   clientId: string;
@@ -20,7 +24,7 @@ export class GmailApiError extends Error {
   }
 }
 
-export { normalizeGmailMessage, type GmailMessageResource };
+export { collectAttachments, normalizeGmailMessage, type GmailMessageResource };
 
 const DEFAULT_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_TOKEN = "https://oauth2.googleapis.com/token";
@@ -164,30 +168,12 @@ export class GmailAdapter implements MailboxAdapter {
     };
   }
 
-  private apiBase(): string {
-    return (this.config.gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
-  }
-
   /** Current mailbox profile — `historyId` seeds or advances the sync watermark. */
   async getProfile(accessToken: string): Promise<{ emailAddress?: string; historyId: string }> {
-    const url = new URL(`${this.apiBase()}/users/me/profile`);
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/profile`);
     const json = await gmailJson<{ emailAddress?: string; historyId?: string }>(url, accessToken);
     if (!json.historyId) throw new GmailApiError(502);
     return { emailAddress: json.emailAddress, historyId: json.historyId };
-  }
-
-  /** Fetch one message as a normalized InboxLink record. */
-  async getMessage(input: {
-    accessToken: string;
-    grantId: string;
-    messageId: string;
-  }): Promise<Message | undefined> {
-    const getUrl = new URL(
-      `${this.apiBase()}/users/me/messages/${encodeURIComponent(input.messageId)}`,
-    );
-    getUrl.searchParams.set("format", "full");
-    const raw = await gmailJson<GmailMessageResource>(getUrl, input.accessToken);
-    return normalizeGmailMessage(raw, input.grantId);
   }
 
   /**
@@ -200,7 +186,8 @@ export class GmailAdapter implements MailboxAdapter {
     maxResults?: number;
     pageToken?: string;
   }): Promise<{ messages: Message[]; nextCursor?: string }> {
-    const listUrl = new URL(`${this.apiBase()}/users/me/messages`);
+    const base = gmailBase(this.config.gmailApiBaseUrl);
+    const listUrl = new URL(`${base}/users/me/messages`);
     listUrl.searchParams.set("maxResults", String(input.maxResults ?? 20));
     if (input.pageToken) listUrl.searchParams.set("pageToken", input.pageToken);
     const listed = await gmailJson<{ messages?: { id: string }[]; nextPageToken?: string }>(
@@ -209,14 +196,29 @@ export class GmailAdapter implements MailboxAdapter {
     );
     const messages: Message[] = [];
     for (const item of listed.messages ?? []) {
-      const message = await this.getMessage({
-        accessToken: input.accessToken,
-        grantId: input.grantId,
-        messageId: item.id,
-      });
+      const message = await this.fetchNormalizedMessage(
+        base,
+        input.accessToken,
+        input.grantId,
+        item.id,
+      );
       if (message) messages.push(message);
     }
     return { messages, nextCursor: listed.nextPageToken };
+  }
+
+  /**
+   * Fetch one message by Gmail id (`format=full`), including attachment metadata.
+   * Does not download attachment bytes.
+   */
+  async getMessage(input: {
+    accessToken: string;
+    grantId: string;
+    /** Gmail `users.messages` id (not the InboxLink `msg_` prefix). */
+    messageId: string;
+  }): Promise<Message | undefined> {
+    const base = gmailBase(this.config.gmailApiBaseUrl);
+    return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId);
   }
 
   /**
@@ -229,7 +231,7 @@ export class GmailAdapter implements MailboxAdapter {
     pageToken?: string;
     maxResults?: number;
   }): Promise<GmailHistoryPage> {
-    const url = new URL(`${this.apiBase()}/users/me/history`);
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/history`);
     url.searchParams.set("startHistoryId", input.startHistoryId);
     url.searchParams.set("maxResults", String(input.maxResults ?? 100));
     if (input.pageToken) url.searchParams.set("pageToken", input.pageToken);
@@ -245,6 +247,22 @@ export class GmailAdapter implements MailboxAdapter {
       historyId: json.historyId,
     };
   }
+
+  private async fetchNormalizedMessage(
+    base: string,
+    accessToken: string,
+    grantId: string,
+    messageId: string,
+  ): Promise<Message | undefined> {
+    const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(messageId)}`);
+    getUrl.searchParams.set("format", "full");
+    const raw = await gmailJson<GmailMessageResource>(getUrl, accessToken);
+    return normalizeGmailMessage(raw, grantId);
+  }
+}
+
+function gmailBase(configured: string | undefined): string {
+  return (configured ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
 }
 
 export type GmailHistoryPage = {

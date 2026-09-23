@@ -44,7 +44,12 @@ function gmailResource() {
         {
           mimeType: "application/pdf",
           filename: "notes.pdf",
-          body: { attachmentId: "att-1" },
+          body: { attachmentId: "att-1", size: 2048 },
+        },
+        {
+          mimeType: "image/png",
+          filename: "diagram.png",
+          body: { attachmentId: "att-2", size: 512 },
         },
       ],
     },
@@ -56,6 +61,7 @@ type Hit = { method: string; url: string; body: string };
 let hits: Hit[] = [];
 let refreshStatus = 200;
 let listStatus = 200;
+let getStatus = 200;
 let google: Server;
 let tokenUrl = "";
 let gmailApiBaseUrl = "";
@@ -84,6 +90,17 @@ before(async () => {
       return;
     }
     if (url.startsWith("/gmail/v1/users/me/messages/")) {
+      const pathId = decodeURIComponent(url.split("?")[0]?.split("/").pop() ?? "");
+      if (getStatus !== 200) {
+        res.writeHead(getStatus, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: getStatus } }));
+        return;
+      }
+      if (pathId !== "18c1abc") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: 404 } }));
+        return;
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(gmailResource()));
       return;
@@ -169,6 +186,7 @@ describe("Gmail message list", () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
+    getStatus = 200;
     const store = new MemoryStore();
     const vault = new MemoryTokenVault(MASTER);
     const grant = activeGrant();
@@ -197,6 +215,10 @@ describe("Gmail message list", () => {
     assert.deepEqual(message.cc, [{ name: "Grace Hopper", email: "grace@example.com" }]);
     assert.equal(message.receivedAt, new Date(1_710_000_000_000).toISOString());
     assert.equal(message.hasAttachments, true);
+    assert.deepEqual(message.attachments, [
+      { id: "att-1", filename: "notes.pdf", mimeType: "application/pdf", size: 2048 },
+      { id: "att-2", filename: "diagram.png", mimeType: "image/png", size: 512 },
+    ]);
     assert.deepEqual(message.folderIds, ["INBOX", "CATEGORY_PERSONAL"]);
     assert.deepEqual(message.labels, ["INBOX", "UNREAD", "CATEGORY_PERSONAL"]);
     assert.equal(message.body?.text, "Hello from Ada");
@@ -246,8 +268,9 @@ describe("Gmail message list", () => {
     refreshStatus = 400;
     const rejected = await app.request(`/v1/grants/${live.id}/messages`);
     assert.equal(rejected.status, 409);
-    const rejectedBody = (await rejected.json()) as { error: string };
+    const rejectedBody = (await rejected.json()) as { error: string; guidance?: string };
     assert.equal(rejectedBody.error, "needs_reauth");
+    assert.match(rejectedBody.guidance ?? "", /Connect/);
     assert.equal((await store.getGrant(live.id))?.status, "needs_reauth");
     assert.equal(JSON.stringify(rejectedBody).includes(REFRESH), false);
 
@@ -267,6 +290,7 @@ describe("Gmail message list", () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
+    getStatus = 200;
     const pg = new PGlite();
     const db = new PgDatabase(new PgliteExecutor(pg));
     const storeA = new PostgresStore(db);
@@ -284,6 +308,82 @@ describe("Gmail message list", () => {
     assert.equal(JSON.stringify(body).includes(REFRESH), false);
     assert.ok(await vaultB.getCiphertext(grant.id));
     await pg.close();
+  });
+});
+
+describe("Gmail message get-by-id", () => {
+  it("returns one normalized message with attachment metadata", async () => {
+    hits = [];
+    refreshStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_get");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const byInboxId = await app.request(`/v1/grants/${grant.id}/messages/msg_18c1abc`);
+    assert.equal(byInboxId.status, 200);
+    const wrapped = (await byInboxId.json()) as { message: Message };
+    const message = wrapped.message;
+    assert.equal(message.id, "msg_18c1abc");
+    assert.equal(message.providerMessageId, "18c1abc");
+    assert.equal(message.subject, "Normalized hello");
+    assert.equal(message.hasAttachments, true);
+    assert.deepEqual(message.attachments, [
+      { id: "att-1", filename: "notes.pdf", mimeType: "application/pdf", size: 2048 },
+      { id: "att-2", filename: "diagram.png", mimeType: "image/png", size: 512 },
+    ]);
+    assert.equal(message.body?.text, "Hello from Ada");
+    assert.equal(JSON.stringify(wrapped).includes(REFRESH), false);
+    assert.equal(JSON.stringify(wrapped).includes(ACCESS), false);
+
+    const byProviderId = await app.request(`/v1/grants/${grant.id}/messages/18c1abc`);
+    assert.equal(byProviderId.status, 200);
+    assert.equal(((await byProviderId.json()) as { message: Message }).message.id, "msg_18c1abc");
+
+    const getHit = hits.find((hit) => hit.url.includes("/messages/18c1abc"));
+    assert.ok(getHit);
+    assert.equal(new URL(getHit.url, "http://gmail.local").searchParams.get("format"), "full");
+    assert.equal(hits.some((hit) => hit.url.includes("/attachments/")), false);
+  });
+
+  it("maps missing messages and inactive grants without leaking tokens", async () => {
+    hits = [];
+    refreshStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_get_errors");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const missing = await app.request(`/v1/grants/${grant.id}/messages/msg_does-not-exist`);
+    assert.equal(missing.status, 404);
+    assert.equal(((await missing.json()) as { error: string }).error, "not_found");
+
+    getStatus = 404;
+    const gmail404 = await app.request(`/v1/grants/${grant.id}/messages/18c1abc`);
+    assert.equal(gmail404.status, 404);
+
+    const badId = await app.request(`/v1/grants/${grant.id}/messages/msg_`);
+    assert.equal(badId.status, 400);
+    assert.equal(((await badId.json()) as { error: string }).error, "invalid_message_id");
+
+    const inactive = activeGrant("grant_get_inactive");
+    inactive.status = "needs_reauth";
+    await store.putGrant(inactive);
+    await vault.seal(REFRESH, { grantId: inactive.id, tenantId: inactive.tenantId });
+    const before = hits.length;
+    const blocked = await app.request(`/v1/grants/${inactive.id}/messages/msg_18c1abc`);
+    assert.equal(blocked.status, 409);
+    assert.equal(((await blocked.json()) as { error: string }).error, "grant_inactive");
+    assert.equal(hits.length, before);
+
+    const unknownGrant = await app.request("/v1/grants/grant_missing/messages/msg_18c1abc");
+    assert.equal(unknownGrant.status, 404);
   });
 });
 

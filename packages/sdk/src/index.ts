@@ -121,6 +121,13 @@ class MessagesApi {
     );
   }
 
+  get(grantId: string, messageId: string): Promise<{ message: Message }> {
+    return this.http.request(
+      "GET",
+      `v1/grants/${encodeURIComponent(grantId)}/messages/${encodeURIComponent(messageId)}`,
+    );
+  }
+
   async *iterate(
     grantId: string,
     opts?: { since?: string; limit?: number },
