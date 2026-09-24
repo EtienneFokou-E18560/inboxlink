@@ -17,9 +17,12 @@ describe("renderConnectPage", () => {
     assert.match(html, /data-testid="connect-cta"/);
     assert.match(html, /Continue with Google/);
     assert.match(html, /href="https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?state=abc&amp;x=&quot;y&quot;"/);
-    assert.match(html, /data-testid="connect-cta"/);
+    assert.match(html, /aria-describedby="connect-lead connect-expiry"/);
+    assert.match(html, /class="skip-link"/);
+    assert.match(html, /href="#connect-main"/);
     assert.match(html, /datetime="2099-01-15T12:00:00\.000Z"/);
     assert.match(html, /This link expires/);
+    assert.match(html, /host never holds your refresh token/);
     assert.doesNotMatch(html, /Stub Connect UI/);
   });
 });

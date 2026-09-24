@@ -24,16 +24,17 @@ export function renderShell(opts: ShellOptions): string {
   <style>${CONNECT_STYLES}</style>
 </head>
 <body>
+  <a class="skip-link" href="#connect-main">Skip to content</a>
   <div class="shell">
     <header>
-      <p class="brand">Inbox<span>Link</span></p>
+      <p class="brand" aria-label="InboxLink">Inbox<span>Link</span></p>
     </header>
-    <main class="main"${roleAttr}>
+    <main id="connect-main" class="main"${roleAttr} tabindex="-1">
       <div class="panel">
         ${opts.body}
       </div>
     </main>
-    <footer class="footer">Mailbox connection infrastructure · read-only access</footer>
+    <footer class="footer">Mailbox connection infrastructure · read-only access · host never holds your refresh token</footer>
   </div>
 </body>
 </html>`;
