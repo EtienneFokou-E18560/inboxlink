@@ -59,8 +59,8 @@ const il = new InboxLink({
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
 | Webhooks | `webhooks.verify` | local HMAC check |
 
-- `messages.list` → live Gmail list (optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
-- `messages.get` → `{ message }` including optional attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
+- `messages.list` → live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
+- `messages.get` → `{ message }` with `format=full`, including optional `body` and attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
 - `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`)
 
 ## Host env (few knobs)

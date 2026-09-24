@@ -33,6 +33,10 @@ importers:
       '@inboxlink/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      tsx:
+        specifier: ^4.19.3
+        version: 4.23.15
 
   packages/connect-ui:
     devDependencies:

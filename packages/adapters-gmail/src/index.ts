@@ -177,7 +177,8 @@ export class GmailAdapter implements MailboxAdapter {
   }
 
   /**
-   * List mailbox messages and normalize each `format=full` resource.
+   * List mailbox messages and normalize each with `format=metadata` (headers + snippet).
+   * Avoids N× `format=full` MIME fetches on the hot list path — use {@link getMessage} for body/attachments.
    * Callers pass a short-lived access token. This method does not see the refresh token.
    * Optional filters map to Gmail `users.messages.list` (`q`, `labelIds`, `includeSpamTrash`).
    */
@@ -207,21 +208,18 @@ export class GmailAdapter implements MailboxAdapter {
       listUrl,
       input.accessToken,
     );
-    const messages: Message[] = [];
-    for (const item of listed.messages ?? []) {
-      const message = await this.fetchNormalizedMessage(
-        base,
-        input.accessToken,
-        input.grantId,
-        item.id,
-      );
-      if (message) messages.push(message);
-    }
+    const ids = (listed.messages ?? []).map((item) => item.id).filter(Boolean);
+    const fetched = await Promise.all(
+      ids.map((id) =>
+        this.fetchNormalizedMessage(base, input.accessToken, input.grantId, id, "metadata"),
+      ),
+    );
+    const messages = fetched.filter((message): message is Message => message !== undefined);
     return { messages, nextCursor: listed.nextPageToken };
   }
 
   /**
-   * Fetch one message by Gmail id (`format=full`), including attachment metadata.
+   * Fetch one message by Gmail id (`format=full`), including body and attachment metadata.
    * Does not download attachment bytes.
    */
   async getMessage(input: {
@@ -231,7 +229,7 @@ export class GmailAdapter implements MailboxAdapter {
     messageId: string;
   }): Promise<Message | undefined> {
     const base = gmailBase(this.config.gmailApiBaseUrl);
-    return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId);
+    return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId, "full");
   }
 
   /**
@@ -266,13 +264,25 @@ export class GmailAdapter implements MailboxAdapter {
     accessToken: string,
     grantId: string,
     messageId: string,
+    format: GmailMessageFormat,
   ): Promise<Message | undefined> {
     const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(messageId)}`);
-    getUrl.searchParams.set("format", "full");
+    getUrl.searchParams.set("format", format);
+    if (format === "metadata") {
+      for (const header of LIST_METADATA_HEADERS) {
+        getUrl.searchParams.append("metadataHeaders", header);
+      }
+    }
     const raw = await gmailJson<GmailMessageResource>(getUrl, accessToken);
     return normalizeGmailMessage(raw, grantId);
   }
 }
+
+/** Gmail `users.messages.get` format — list uses metadata; get uses full. */
+export type GmailMessageFormat = "full" | "metadata";
+
+/** Headers required to normalize list rows without MIME body parts. */
+const LIST_METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"] as const;
 
 function gmailBase(configured: string | undefined): string {
   return (configured ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
