@@ -9,6 +9,21 @@ export const DEFAULT_DOCS_REPO_BASE =
 export const DEFAULT_DOCS_TREE_BASE =
   "https://github.com/EtienneFokou-E18560/inboxlink/tree/main";
 
+export const DEFAULT_WIKI_BASE =
+  "https://github.com/EtienneFokou-E18560/inboxlink/wiki";
+
+/** Live `@inboxlink/core` on npm. */
+export const LIVE_CORE_NPM_VERSION = "0.1.1";
+
+/** Latest `@inboxlink/sdk` on npm (filters not in this registry tarball yet). */
+export const LIVE_SDK_NPM_VERSION = "0.1.0";
+
+/** SDK version on main; npm publish tracked by PR #40. */
+export const SDK_MAIN_VERSION = "0.1.1";
+
+/** @deprecated Use LIVE_CORE_NPM_VERSION — was wrongly implying SDK was published. */
+export const PINNED_NPM_VERSION = LIVE_CORE_NPM_VERSION;
+
 export type DocsHubLink = {
   href: string;
   label: string;
@@ -48,6 +63,10 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
   const publishing = blob(blobBase, "docs/publishing.md");
   const coreReadme = blob(blobBase, "packages/core/README.md");
   const security = blob(blobBase, "SECURITY.md");
+  const wiki = DEFAULT_WIKI_BASE;
+  const sdkNpm = `https://www.npmjs.com/package/@inboxlink/sdk`;
+  const coreNpm = `https://www.npmjs.com/package/@inboxlink/core/v/${LIVE_CORE_NPM_VERSION}`;
+  const publishPr = "https://github.com/EtienneFokou-E18560/inboxlink/pull/40";
 
   return {
     steps: [
@@ -63,6 +82,11 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
         lead: "Create a Connect session from your backend. Hosts never set GOOGLE_* or hold refresh tokens.",
         links: [
           { href: hostGuide, label: "Host integration guide", hint: "docs/host-integration.md" },
+          {
+            href: `${wiki}/Quick-start`,
+            label: "Wiki — Quick start",
+            hint: "scannable host portal",
+          },
           {
             href: examples,
             label: "Host integration examples",
@@ -86,6 +110,11 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
             hint: "host-integration.md §2",
           },
           {
+            href: `${wiki}/Connect-flow`,
+            label: "Wiki — Connect flow",
+            hint: "Host → Connect → Grant → Messages",
+          },
+          {
             href: readme,
             label: "Architecture overview",
             hint: "README.md",
@@ -105,43 +134,59 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
           {
             href: sdkReadme,
             label: "SDK — completeConnect",
-            hint: "@inboxlink/sdk",
+            hint: `@inboxlink/sdk@${LIVE_SDK_NPM_VERSION} on npm`,
           },
         ],
       },
       {
         id: "messages",
         title: "Messages",
-        lead: "List and sync normalized messages with the grant. Revoke when the user disconnects.",
+        lead:
+          "List and sync normalized messages with the grant. Filters (q, from/to/subject, label, includeSpamTrash) are live on Production HTTP and main; SDK helpers land on npm as 0.1.1 after #40 publish. Revoke when the user disconnects.",
         links: [
           {
             href: `${hostGuide}#4-use-the-grant-messages`,
             label: "Messages API in the host guide",
-            hint: "list / get / sync",
+            hint: "list / get / sync · filters on Production",
+          },
+          {
+            href: `${wiki}/Messages-API`,
+            label: "Wiki — Messages API + filters",
+            hint: "q · from/to/subject · label",
           },
           {
             href: sdkReadme,
             label: "SDK — messages helpers",
-            hint: "packages/sdk/README.md",
+            hint: `main ${SDK_MAIN_VERSION}; npm ${LIVE_SDK_NPM_VERSION} today`,
           },
         ],
       },
     ],
     packages: [
       {
-        href: "https://www.npmjs.com/package/@inboxlink/sdk",
-        label: "@inboxlink/sdk",
-        hint: "Host HTTP client (npm)",
+        href: coreNpm,
+        label: `@inboxlink/core@${LIVE_CORE_NPM_VERSION}`,
+        hint: "live on npm",
       },
       {
-        href: "https://www.npmjs.com/package/@inboxlink/core",
-        label: "@inboxlink/core",
-        hint: "Types and crypto helpers (npm)",
+        href: sdkNpm,
+        label: `@inboxlink/sdk@${LIVE_SDK_NPM_VERSION}`,
+        hint: "latest on npm today",
+      },
+      {
+        href: publishPr,
+        label: `SDK ${SDK_MAIN_VERSION} on main / after #40 publish`,
+        hint: "filters in SDK client tarball",
+      },
+      {
+        href: `${wiki}/SDK`,
+        label: "Wiki — SDK",
+        hint: "install status + surface",
       },
       {
         href: sdkReadme,
         label: "SDK source README",
-        hint: "until / after publish",
+        hint: "packages/sdk/README.md",
       },
       {
         href: coreReadme,
@@ -158,6 +203,7 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
       { href: "/home", label: "Home" },
       { href: "/status", label: "Status" },
       { href: "/health", label: "Health JSON" },
+      { href: wiki, label: "Wiki" },
       { href: ops, label: "Ops runbook" },
       { href: security, label: "Security" },
       {
@@ -211,7 +257,7 @@ export function renderDocsHubPage(opts: DocsHubOptions = {}): string {
   const packages = `
     <section class="doc-section" id="packages">
       <h2>Packages</h2>
-      <p>Install the host SDK; open the READMEs for API shape. Prefer the docs above over copying long samples here.</p>
+      <p><code>@inboxlink/core@${escapeHtml(LIVE_CORE_NPM_VERSION)}</code> is live on npm. SDK latest on npm is <code>@inboxlink/sdk@${escapeHtml(LIVE_SDK_NPM_VERSION)}</code>. Message list filters are on Production HTTP and main; SDK client helpers land as <code>${escapeHtml(SDK_MAIN_VERSION)}</code> after <a href="https://github.com/EtienneFokou-E18560/inboxlink/pull/40">#40</a> publish. Prefer the wiki + guides above over copying long samples here.</p>
       ${renderLinkList(catalog.packages)}
     </section>`;
 
@@ -227,7 +273,7 @@ export function renderDocsHubPage(opts: DocsHubOptions = {}): string {
       <div class="docs-panel" data-testid="docs-hub">
         <p class="kicker">Host docs</p>
         <h1>Connect mailboxes without holding tokens</h1>
-        <p class="lead">Follow the same path your integration takes. Each step links the existing guides in the repository — this page does not rewrite them.</p>
+        <p class="lead">Follow the same path your integration takes. Each step links the wiki and in-repo guides — this page does not rewrite them.</p>
         <ol class="step-strip" data-testid="docs-step-strip" aria-label="Integration steps">
           ${stepItems}
         </ol>
