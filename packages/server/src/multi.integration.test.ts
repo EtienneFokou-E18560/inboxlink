@@ -249,4 +249,103 @@ describe("multi-tenant isolation", () => {
     assert.equal((await limited.json() as { error: string }).error, "rate_limited");
     assert.ok(limited.headers.get("retry-after"));
   });
+
+  it("rate-limits single-mode host and Connect routes", async () => {
+    const limiter = createRateLimiter({ windowMs: 60_000, maxRequests: 2 });
+    const app = createApp({
+      store: new MemoryStore(),
+      vault: new MemoryTokenVault("test-master-key-at-least-16"),
+      gmail,
+      publicBaseUrl: "http://localhost:8787",
+      apiSecret: "unused-in-single",
+      mode: "single",
+      gmailScopes: ["openid"],
+      queue: null,
+      rateLimiter: limiter,
+    });
+    const ip = { "x-forwarded-for": "203.0.113.10" };
+    assert.equal(
+      (await app.request("/v1/grants?externalUserId=u1", { headers: ip })).status,
+      200,
+    );
+    assert.equal(
+      (await app.request("/v1/grants?externalUserId=u1", { headers: ip })).status,
+      200,
+    );
+    const limitedHost = await app.request("/v1/grants?externalUserId=u1", { headers: ip });
+    assert.equal(limitedHost.status, 429);
+    assert.equal((await limitedHost.json() as { error: string }).error, "rate_limited");
+    assert.ok(limitedHost.headers.get("retry-after"));
+
+    const connectLimiter = createRateLimiter({ windowMs: 60_000, maxRequests: 1 });
+    const connectApp = createApp({
+      store: new MemoryStore(),
+      vault: new MemoryTokenVault("test-master-key-at-least-16"),
+      gmail,
+      publicBaseUrl: "http://localhost:8787",
+      apiSecret: "unused-in-single",
+      mode: "single",
+      gmailScopes: ["openid"],
+      queue: null,
+      rateLimiter: connectLimiter,
+    });
+    const connectIp = { "x-forwarded-for": "198.51.100.20" };
+    assert.equal(
+      (await connectApp.request("/v1/connect/missing-token", { headers: connectIp })).status,
+      404,
+    );
+    const limitedConnect = await connectApp.request("/v1/connect/missing-token", {
+      headers: connectIp,
+    });
+    assert.equal(limitedConnect.status, 429);
+    assert.equal((await limitedConnect.json() as { error: string }).error, "rate_limited");
+  });
+});
+
+describe("CORS allowlist", () => {
+  const gmail = new GmailAdapter({
+    clientId: "test-client-id.apps.googleusercontent.com",
+    clientSecret: "test-client-secret",
+    redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+  });
+
+  it("reflects allowlisted origins and omits unknown ones (never *)", async () => {
+    const app = createApp({
+      store: new MemoryStore(),
+      vault: new MemoryTokenVault("test-master-key-at-least-16"),
+      gmail,
+      publicBaseUrl: "https://inboxlink.example",
+      apiSecret: "unused-in-single",
+      mode: "single",
+      gmailScopes: ["openid"],
+      queue: null,
+      rateLimiter: null,
+      allowedRedirectOrigins: ["https://app.example.com"],
+    });
+
+    const allowed = await app.request("/health", {
+      headers: { origin: "https://app.example.com" },
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get("access-control-allow-origin"), "https://app.example.com");
+    assert.notEqual(allowed.headers.get("access-control-allow-origin"), "*");
+
+    const sameOrigin = await app.request("/health", {
+      headers: { origin: "https://inboxlink.example" },
+    });
+    assert.equal(
+      sameOrigin.headers.get("access-control-allow-origin"),
+      "https://inboxlink.example",
+    );
+
+    const denied = await app.request("/health", {
+      headers: { origin: "https://evil.example" },
+    });
+    assert.equal(denied.status, 200);
+    assert.equal(denied.headers.get("access-control-allow-origin"), null);
+
+    const noOrigin = await app.request("/health");
+    assert.equal(noOrigin.status, 200);
+    assert.equal(noOrigin.headers.get("access-control-allow-origin"), null);
+  });
 });

@@ -1,9 +1,33 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  buildCorsOriginAllowlist,
   parseAllowedRedirectOrigins,
   validateRedirectUri,
 } from "./grants-public.js";
+
+describe("CORS origin allowlist", () => {
+  it("includes publicBaseUrl origin and never uses a wildcard", () => {
+    assert.deepEqual(buildCorsOriginAllowlist(null, "https://inboxlink.example"), [
+      "https://inboxlink.example",
+    ]);
+    assert.deepEqual(
+      buildCorsOriginAllowlist(
+        ["https://app.example.com", "http://127.0.0.1:9999"],
+        "https://inboxlink.example/",
+      ),
+      ["https://inboxlink.example", "https://app.example.com", "http://127.0.0.1:9999"],
+    );
+    assert.ok(!buildCorsOriginAllowlist(null, "https://api.example").includes("*"));
+  });
+
+  it("omits invalid publicBaseUrl rather than opening CORS", () => {
+    assert.deepEqual(buildCorsOriginAllowlist(null, "not-a-url"), []);
+    assert.deepEqual(buildCorsOriginAllowlist(["https://app.example"], "not-a-url"), [
+      "https://app.example",
+    ]);
+  });
+});
 
 describe("redirect URI allowlist", () => {
   it("is permissive when ALLOWED_REDIRECT_ORIGINS is unset or empty", () => {

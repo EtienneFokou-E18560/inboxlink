@@ -27,7 +27,7 @@ export type ServerConfig = {
    * `null` = permissive (any http(s) URL) — default for single-tenant demo.
    */
   allowedRedirectOrigins: string[] | null;
-  /** Soft abuse guard for host APIs (multi mode). */
+  /** Soft abuse guard for Connect + host APIs (single and multi). */
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
 };

@@ -250,7 +250,7 @@ Default mode is **`single`** — demos and Production should not flip to `multi`
 4. `GET /v1/grants` returns a public grant shape (no `tenantId` / `externalUserId` in the JSON).
 5. **Rotate** `INBOXLINK_API_SECRET` (or a row in `INBOXLINK_TENANT_SECRETS`) by deploying the new value, updating host clients, then retiring the old secret — never commit the secret.
 
-Connect (`/v1/connect/...`) and the Gmail OAuth callback stay public (state-bound). Soft rate limits apply to connect and authenticated host routes in multi mode.
+Connect (`/v1/connect/...`) and the Gmail OAuth callback stay public (state-bound). Soft in-process rate limits apply to Connect and host APIs in both `single` and `multi`. Browser CORS is restricted to `ALLOWED_REDIRECT_ORIGINS` plus the API’s own `PUBLIC_BASE_URL` origin (never `*`).
 
 ## Independence from career-workspace
 
