@@ -64,6 +64,29 @@ export function parseAllowedRedirectOrigins(raw: string | undefined): string[] |
   return origins;
 }
 
+/**
+ * Browser CORS allowlist aligned with Connect redirect origins.
+ * Always includes `publicBaseUrl` origin when parseable. Never a wildcard —
+ * requests without an Origin header (curl, server SDKs) are unaffected.
+ */
+export function buildCorsOriginAllowlist(
+  allowedRedirectOrigins: string[] | null | undefined,
+  publicBaseUrl: string,
+): string[] {
+  const origins = new Set<string>();
+  try {
+    origins.add(new URL(publicBaseUrl).origin);
+  } catch {
+    // Invalid PUBLIC_BASE_URL — omit rather than open CORS.
+  }
+  if (allowedRedirectOrigins) {
+    for (const origin of allowedRedirectOrigins) {
+      if (origin) origins.add(origin);
+    }
+  }
+  return [...origins];
+}
+
 export function validateRedirectUri(
   value: string | undefined,
   allowedOrigins: string[] | null = null,

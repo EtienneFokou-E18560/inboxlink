@@ -44,7 +44,7 @@ export function createRateLimiter(opts: {
   };
 }
 
-/** No-op limiter for single-mode demos and tests that disable abuse guards. */
+/** No-op limiter for tests that disable abuse guards. */
 export function createPassthroughRateLimiter(): RateLimiter {
   return { check: () => ({ ok: true }) };
 }
