@@ -56,6 +56,22 @@ function gmailResource() {
   };
 }
 
+/** Gmail `format=metadata` — headers only, no MIME body parts. */
+function gmailMetadataResource() {
+  const full = gmailResource();
+  return {
+    id: full.id,
+    threadId: full.threadId,
+    labelIds: full.labelIds,
+    snippet: full.snippet,
+    internalDate: full.internalDate,
+    payload: {
+      mimeType: "multipart/mixed",
+      headers: full.payload.headers,
+    },
+  };
+}
+
 type Hit = { method: string; url: string; body: string };
 
 let hits: Hit[] = [];
@@ -101,8 +117,9 @@ before(async () => {
         res.end(JSON.stringify({ error: { code: 404 } }));
         return;
       }
+      const format = new URL(url, "http://gmail.local").searchParams.get("format") ?? "full";
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(gmailResource()));
+      res.end(JSON.stringify(format === "metadata" ? gmailMetadataResource() : gmailResource()));
       return;
     }
     if (url.startsWith("/gmail/v1/users/me/messages")) {
@@ -215,15 +232,12 @@ describe("Gmail message list", () => {
     assert.deepEqual(message.to, [{ email: "etiennefk@gmail.com" }]);
     assert.deepEqual(message.cc, [{ name: "Grace Hopper", email: "grace@example.com" }]);
     assert.equal(message.receivedAt, new Date(1_710_000_000_000).toISOString());
-    assert.equal(message.hasAttachments, true);
-    assert.deepEqual(message.attachments, [
-      { id: "att-1", filename: "notes.pdf", mimeType: "application/pdf", size: 2048 },
-      { id: "att-2", filename: "diagram.png", mimeType: "image/png", size: 512 },
-    ]);
+    assert.equal(message.hasAttachments, false);
+    assert.equal(message.attachments, undefined);
     assert.deepEqual(message.folderIds, ["INBOX", "CATEGORY_PERSONAL"]);
     assert.deepEqual(message.labels, ["INBOX", "UNREAD", "CATEGORY_PERSONAL"]);
-    assert.equal(message.body?.text, "Hello from Ada");
-    assert.equal(message.body?.html, "<p>Hello from Ada</p>");
+    // List uses metadata — body/attachments come from get-by-id (format=full).
+    assert.equal(message.body, undefined);
 
     const raw = JSON.stringify(body);
     assert.equal(raw.includes(REFRESH), false);
@@ -241,7 +255,19 @@ describe("Gmail message list", () => {
     assert.equal(listUrl.searchParams.get("pageToken"), "page-2");
     const fetched = hits.find((hit) => hit.url.includes("/messages/18c1abc"));
     assert.ok(fetched);
-    assert.equal(new URL(fetched.url, "http://gmail.local").searchParams.get("format"), "full");
+    const fetchedUrl = new URL(fetched.url, "http://gmail.local");
+    assert.equal(fetchedUrl.searchParams.get("format"), "metadata");
+    assert.deepEqual(fetchedUrl.searchParams.getAll("metadataHeaders").sort(), [
+      "Cc",
+      "Date",
+      "From",
+      "Subject",
+      "To",
+    ]);
+    assert.equal(
+      hits.some((hit) => new URL(hit.url, "http://gmail.local").searchParams.get("format") === "full"),
+      false,
+    );
 
     const again = await app.request(`/v1/grants/${grant.id}/messages`);
     const firstPage = (await again.json()) as { nextCursor?: string };
