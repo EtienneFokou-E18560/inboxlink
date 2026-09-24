@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DEFAULT_DOCS_REPO_BASE,
+  DEFAULT_WIKI_BASE,
+  PINNED_NPM_VERSION,
   docsHubCatalog,
   renderDocsHubPage,
 } from "./docs-hub.js";
@@ -21,8 +23,12 @@ describe("renderDocsHubPage", () => {
     assert.match(html, /docs\/host-integration\.md/);
     assert.match(html, /packages\/sdk\/README\.md/);
     assert.match(html, /examples\/host-integration/);
-    assert.match(html, /@inboxlink\/sdk/);
-    assert.match(html, /npmjs\.com\/package\/@inboxlink\/sdk/);
+    assert.match(html, /@inboxlink\/sdk@0\.1\.1/);
+    assert.match(html, /@inboxlink\/core@0\.1\.1/);
+    assert.match(html, /npmjs\.com\/package\/@inboxlink\/sdk\/v\/0\.1\.1/);
+    assert.match(html, /inboxlink\/wiki/);
+    assert.match(html, /Messages-API/);
+    assert.match(html, /filters/);
     assert.match(html, /Fraunces/);
     assert.match(html, /--accent:\s*#0f6e56/);
     assert.match(html, /class="shell docs-shell"/);
@@ -41,10 +47,12 @@ describe("renderDocsHubPage", () => {
     assert.doesNotMatch(html, /https:\/\/example\.test\/x\?"y"/);
   });
 
-  it("catalog points at the public GitHub blob base by default", () => {
+  it("catalog points at the public GitHub blob base and pinned npm by default", () => {
     const catalog = docsHubCatalog();
     assert.ok(
       catalog.sections[0]?.links[0]?.href.startsWith(DEFAULT_DOCS_REPO_BASE),
     );
+    assert.equal(PINNED_NPM_VERSION, "0.1.1");
+    assert.ok(catalog.footer.some((l) => l.href === DEFAULT_WIKI_BASE));
   });
 });

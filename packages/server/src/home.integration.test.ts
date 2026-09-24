@@ -44,7 +44,10 @@ describe("GET /home landing", () => {
       assert.match(html, /Connect mailboxes without holding tokens/);
       assert.match(html, /data-testid="landing-github"/);
       assert.match(html, /data-testid="landing-docs"/);
-      assert.match(html, /data-testid="landing-health"/);
+      assert.match(html, /data-testid="landing-wiki"/);
+      assert.match(html, /data-testid="landing-npm"/);
+      assert.match(html, /href="\/docs"/);
+      assert.match(html, /@inboxlink\/sdk@0\.1\.1/);
       assert.match(html, /href="\/health"/);
     }
 

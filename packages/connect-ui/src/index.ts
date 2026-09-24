@@ -18,6 +18,8 @@ export {
   docsHubCatalog,
   DEFAULT_DOCS_REPO_BASE,
   DEFAULT_DOCS_TREE_BASE,
+  DEFAULT_WIKI_BASE,
+  PINNED_NPM_VERSION,
   type PublicDocumentOptions,
   type LandingPageLinks,
   type DocsHubOptions,

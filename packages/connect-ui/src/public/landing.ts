@@ -4,25 +4,36 @@ import { LANDING_STYLES } from "./landing-styles.js";
 
 export type LandingPageLinks = {
   githubUrl?: string;
-  hostDocsUrl?: string;
+  /** Hosted docs hub (default `/docs`). */
+  docsHubUrl?: string;
+  wikiUrl?: string;
+  npmSdkUrl?: string;
   healthPath?: string;
+  /** @deprecated Prefer docsHubUrl; still accepted for tests/overrides. */
+  hostDocsUrl?: string;
 };
 
 const DEFAULT_GITHUB = "https://github.com/EtienneFokou-E18560/inboxlink";
-const DEFAULT_HOST_DOCS =
-  "https://github.com/EtienneFokou-E18560/inboxlink/blob/main/docs/host-integration.md";
+const DEFAULT_DOCS_HUB = "/docs";
+const DEFAULT_WIKI = "https://github.com/EtienneFokou-E18560/inboxlink/wiki";
+const DEFAULT_NPM_SDK = "https://www.npmjs.com/package/@inboxlink/sdk/v/0.1.1";
 const DEFAULT_HEALTH = "/health";
 
 /**
  * Developer-facing Vault door landing (`GET /home`).
- * Brand-first InboxLink, one promise, CTAs to GitHub + host docs + health.
+ * Brand-first InboxLink, one promise, CTAs to GitHub + docs + wiki + npm 0.1.1.
  */
 export function renderLandingPage(links: LandingPageLinks = {}): string {
   const githubUrl = escapeHtml(links.githubUrl ?? DEFAULT_GITHUB);
-  const hostDocsUrl = escapeHtml(links.hostDocsUrl ?? DEFAULT_HOST_DOCS);
+  const docsHubUrl = escapeHtml(
+    links.docsHubUrl ?? links.hostDocsUrl ?? DEFAULT_DOCS_HUB,
+  );
+  const wikiUrl = escapeHtml(links.wikiUrl ?? DEFAULT_WIKI);
+  const npmSdkUrl = escapeHtml(links.npmSdkUrl ?? DEFAULT_NPM_SDK);
   const healthPath = escapeHtml(links.healthPath ?? DEFAULT_HEALTH);
 
-  const flow = escapeHtml(`session → connect → grantId → messages
+  const flow = escapeHtml(`npm i @inboxlink/sdk@0.1.1
+session → connect → grantId → messages
 hosts never hold the refresh token`);
 
   const body = `
@@ -30,11 +41,12 @@ hosts never hold the refresh token`);
     <p class="promise">Connect mailboxes without holding tokens.</p>
     <div class="cta-row">
       <a class="cta" data-testid="landing-github" href="${githubUrl}">View on GitHub</a>
-      <a class="cta-secondary" data-testid="landing-docs" href="${hostDocsUrl}">Host docs</a>
-      <a class="cta-secondary" data-testid="landing-health" href="${healthPath}">Health / status</a>
+      <a class="cta-secondary" data-testid="landing-docs" href="${docsHubUrl}">Docs hub</a>
+      <a class="cta-secondary" data-testid="landing-wiki" href="${wikiUrl}">Wiki</a>
+      <a class="cta-secondary" data-testid="landing-npm" href="${npmSdkUrl}">npm @0.1.1</a>
     </div>
-    <pre class="flow" data-testid="landing-flow" aria-label="Product flow">${flow}</pre>
-    <p class="landing-footer">Open-source mailbox connection infrastructure · <a href="${healthPath}">JSON health</a> stays at <code>/health</code></p>
+    <pre class="flow" data-testid="landing-flow" aria-label="Install and product flow">${flow}</pre>
+    <p class="landing-footer">Open-source mailbox connection infrastructure · <a href="${healthPath}">JSON health</a> stays at <code>/health</code> · human <a href="/status">/status</a></p>
   `;
 
   return renderPublicDocument({

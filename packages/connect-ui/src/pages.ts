@@ -52,10 +52,10 @@ export function renderConnectPage(props: ConnectPageProps): string {
   const expires = escapeHtml(formatExpiry(props.expiresAt));
   const body = `
     <p class="kicker">Secure connect</p>
-    <h1>Connect your inbox</h1>
-    <p class="lead">InboxLink asks for <strong>read-only</strong> Gmail access so your host app can sync mail. The refresh token stays vaulted here — the host never sees it.</p>
-    <p><a class="cta" data-testid="connect-cta" href="${authUrl}">Continue with ${provider}</a></p>
-    <p class="meta">This link expires <time datetime="${escapeHtml(props.expiresAt)}">${expires}</time>. If it expires, return to the app that sent you here and start again.</p>
+    <h1 id="connect-heading">Connect your inbox</h1>
+    <p class="lead" id="connect-lead">InboxLink asks for <strong>read-only</strong> Gmail access so your host app can sync mail. The refresh token stays vaulted here — the host never sees it.</p>
+    <p><a class="cta" data-testid="connect-cta" href="${authUrl}" aria-describedby="connect-lead connect-expiry">Continue with ${provider}</a></p>
+    <p class="meta" id="connect-expiry">This link expires <time datetime="${escapeHtml(props.expiresAt)}">${expires}</time>. If it expires, return to the app that sent you here and start a new connect.</p>
   `;
   return renderShell({ title: "InboxLink Connect", body });
 }
