@@ -12,7 +12,12 @@ import {
 } from "@inboxlink/connect-ui";
 import { mountDocsHub } from "../docs-hub/mount.js";
 import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
-import { toPublicGrant, validateExternalUserId, validateRedirectUri } from "../grants-public.js";
+import {
+  buildCorsOriginAllowlist,
+  toPublicGrant,
+  validateExternalUserId,
+  validateRedirectUri,
+} from "../grants-public.js";
 import {
   createPassthroughRateLimiter,
   createRateLimiter,
@@ -52,11 +57,15 @@ export type CreateAppOptions = {
   /** `postgres` when DATABASE_URL is set; otherwise process memory. */
   storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
-  /** Soft abuse guard. Pass `null` to disable (tests). Multi mode enables a default limiter. */
+  /**
+   * Soft abuse guard for Connect + host APIs (single and multi).
+   * Pass `null` to disable (tests). Omit to use the default in-process limiter.
+   */
   rateLimiter?: RateLimiter | null;
   /**
    * Host Connect `redirectUri` origins allowlist (`null` / omit = permissive).
    * When set, session create rejects redirect URIs whose origin is not listed.
+   * Also drives browser CORS (never `*`) together with `publicBaseUrl`.
    */
   allowedRedirectOrigins?: string[] | null;
 };
@@ -74,11 +83,18 @@ export function createApp(opts: CreateAppOptions) {
     opts.rateLimiter === null
       ? createPassthroughRateLimiter()
       : (opts.rateLimiter ??
-        (opts.mode === "multi"
-          ? createRateLimiter({ windowMs: 60_000, maxRequests: 120 })
-          : createPassthroughRateLimiter()));
+        createRateLimiter({ windowMs: 60_000, maxRequests: 120 }));
 
-  app.use("*", cors());
+  const corsOrigins = buildCorsOriginAllowlist(
+    opts.allowedRedirectOrigins ?? null,
+    opts.publicBaseUrl,
+  );
+  app.use(
+    "*",
+    cors({
+      origin: corsOrigins.length > 0 ? corsOrigins : [],
+    }),
+  );
   app.use("*", async (c, next) => {
     const started = Date.now();
     await next();
@@ -155,6 +171,12 @@ export function createApp(opts: CreateAppOptions) {
       return next();
     }
     if (opts.mode === "single") {
+      const limited = rateLimiter.check(`single:${clientKey(c)}`);
+      if (!limited.ok) {
+        return c.json({ error: "rate_limited" }, 429, {
+          "retry-after": String(limited.retryAfterSec),
+        });
+      }
       c.set("tenantId", opts.tenantId?.trim() || "default");
       return next();
     }

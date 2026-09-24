@@ -54,13 +54,11 @@ export function createAppFromEnv(
     oauthRedirectUri: config.googleRedirectUri,
     storeKind,
     queue,
-    rateLimiter:
-      config.mode === "multi"
-        ? createRateLimiter({
-            windowMs: config.rateLimitWindowMs,
-            maxRequests: config.rateLimitMaxRequests,
-          })
-        : null,
+    // Soft abuse guard for Connect + host APIs in both single and multi.
+    rateLimiter: createRateLimiter({
+      windowMs: config.rateLimitWindowMs,
+      maxRequests: config.rateLimitMaxRequests,
+    }),
     allowedRedirectOrigins: config.allowedRedirectOrigins,
   });
   return { app, config, store, vault, storeKind };
