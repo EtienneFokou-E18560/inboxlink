@@ -19,8 +19,12 @@ describe("renderLandingPage", () => {
     assert.match(html, /data-testid="landing-wiki"/);
     assert.match(html, /inboxlink\/wiki/);
     assert.match(html, /data-testid="landing-npm"/);
-    assert.match(html, /@inboxlink\/sdk\/v\/0\.1\.1/);
-    assert.match(html, /npm i @inboxlink\/sdk@0\.1\.1/);
+    assert.match(html, /@inboxlink\/core\/v\/0\.1\.1/);
+    assert.match(html, /npm core@0\.1\.1/);
+    assert.match(html, /npm i @inboxlink\/core@0\.1\.1/);
+    assert.match(html, /0\.1\.0 today/);
+    assert.doesNotMatch(html, /npm i @inboxlink\/sdk@0\.1\.1/);
+    assert.doesNotMatch(html, /@inboxlink\/sdk\/v\/0\.1\.1/);
     assert.match(html, /session → connect → grantId → messages/);
     assert.match(html, /href="\/health"/);
     assert.match(html, /Fraunces/);
@@ -33,7 +37,7 @@ describe("renderLandingPage", () => {
       githubUrl: 'https://example.com/"onclick=alert(1)',
       docsHubUrl: "https://docs.example/<script>",
       wikiUrl: 'https://wiki.example/"x',
-      npmSdkUrl: "https://npm.example/<bad>",
+      npmCoreUrl: "https://npm.example/<bad>",
       healthPath: '/health?"x',
     });
     assert.doesNotMatch(html, /<script>/i);

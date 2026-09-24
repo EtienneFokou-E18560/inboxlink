@@ -12,8 +12,17 @@ export const DEFAULT_DOCS_TREE_BASE =
 export const DEFAULT_WIKI_BASE =
   "https://github.com/EtienneFokou-E18560/inboxlink/wiki";
 
-/** Pinned host SDK / core release for install CTAs. */
-export const PINNED_NPM_VERSION = "0.1.1";
+/** Live `@inboxlink/core` on npm. */
+export const LIVE_CORE_NPM_VERSION = "0.1.1";
+
+/** Latest `@inboxlink/sdk` on npm (filters not in this registry tarball yet). */
+export const LIVE_SDK_NPM_VERSION = "0.1.0";
+
+/** SDK version on main; npm publish tracked by PR #40. */
+export const SDK_MAIN_VERSION = "0.1.1";
+
+/** @deprecated Use LIVE_CORE_NPM_VERSION — was wrongly implying SDK was published. */
+export const PINNED_NPM_VERSION = LIVE_CORE_NPM_VERSION;
 
 export type DocsHubLink = {
   href: string;
@@ -55,8 +64,9 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
   const coreReadme = blob(blobBase, "packages/core/README.md");
   const security = blob(blobBase, "SECURITY.md");
   const wiki = DEFAULT_WIKI_BASE;
-  const sdkNpm = `https://www.npmjs.com/package/@inboxlink/sdk/v/${PINNED_NPM_VERSION}`;
-  const coreNpm = `https://www.npmjs.com/package/@inboxlink/core/v/${PINNED_NPM_VERSION}`;
+  const sdkNpm = `https://www.npmjs.com/package/@inboxlink/sdk`;
+  const coreNpm = `https://www.npmjs.com/package/@inboxlink/core/v/${LIVE_CORE_NPM_VERSION}`;
+  const publishPr = "https://github.com/EtienneFokou-E18560/inboxlink/pull/40";
 
   return {
     steps: [
@@ -124,7 +134,7 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
           {
             href: sdkReadme,
             label: "SDK — completeConnect",
-            hint: `@inboxlink/sdk@${PINNED_NPM_VERSION}`,
+            hint: `@inboxlink/sdk@${LIVE_SDK_NPM_VERSION} on npm`,
           },
         ],
       },
@@ -132,12 +142,12 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
         id: "messages",
         title: "Messages",
         lead:
-          "List and sync normalized messages with the grant. Filters (q, from/to/subject, label, includeSpamTrash) ship in @inboxlink/sdk@0.1.1. Revoke when the user disconnects.",
+          "List and sync normalized messages with the grant. Filters (q, from/to/subject, label, includeSpamTrash) are live on Production HTTP and main; SDK helpers land on npm as 0.1.1 after #40 publish. Revoke when the user disconnects.",
         links: [
           {
             href: `${hostGuide}#4-use-the-grant-messages`,
             label: "Messages API in the host guide",
-            hint: "list / get / sync",
+            hint: "list / get / sync · filters on Production",
           },
           {
             href: `${wiki}/Messages-API`,
@@ -147,26 +157,31 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
           {
             href: sdkReadme,
             label: "SDK — messages helpers",
-            hint: `packages/sdk · ${PINNED_NPM_VERSION}`,
+            hint: `main ${SDK_MAIN_VERSION}; npm ${LIVE_SDK_NPM_VERSION} today`,
           },
         ],
       },
     ],
     packages: [
       {
-        href: sdkNpm,
-        label: `@inboxlink/sdk@${PINNED_NPM_VERSION}`,
-        hint: "npm i @inboxlink/sdk@0.1.1 · filters included",
+        href: coreNpm,
+        label: `@inboxlink/core@${LIVE_CORE_NPM_VERSION}`,
+        hint: "live on npm",
       },
       {
-        href: coreNpm,
-        label: `@inboxlink/core@${PINNED_NPM_VERSION}`,
-        hint: "npm companion types / crypto",
+        href: sdkNpm,
+        label: `@inboxlink/sdk@${LIVE_SDK_NPM_VERSION}`,
+        hint: "latest on npm today",
+      },
+      {
+        href: publishPr,
+        label: `SDK ${SDK_MAIN_VERSION} on main / after #40 publish`,
+        hint: "filters in SDK client tarball",
       },
       {
         href: `${wiki}/SDK`,
         label: "Wiki — SDK",
-        hint: "install + surface for 0.1.1",
+        hint: "install status + surface",
       },
       {
         href: sdkReadme,
@@ -242,7 +257,7 @@ export function renderDocsHubPage(opts: DocsHubOptions = {}): string {
   const packages = `
     <section class="doc-section" id="packages">
       <h2>Packages</h2>
-      <p>Pin <code>@inboxlink/sdk@${escapeHtml(PINNED_NPM_VERSION)}</code> / <code>@inboxlink/core@${escapeHtml(PINNED_NPM_VERSION)}</code>. Message list filters landed in that release. Prefer the wiki + guides above over copying long samples here.</p>
+      <p><code>@inboxlink/core@${escapeHtml(LIVE_CORE_NPM_VERSION)}</code> is live on npm. SDK latest on npm is <code>@inboxlink/sdk@${escapeHtml(LIVE_SDK_NPM_VERSION)}</code>. Message list filters are on Production HTTP and main; SDK client helpers land as <code>${escapeHtml(SDK_MAIN_VERSION)}</code> after <a href="https://github.com/EtienneFokou-E18560/inboxlink/pull/40">#40</a> publish. Prefer the wiki + guides above over copying long samples here.</p>
       ${renderLinkList(catalog.packages)}
     </section>`;
 

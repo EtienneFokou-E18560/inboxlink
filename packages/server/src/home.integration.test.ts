@@ -47,7 +47,8 @@ describe("GET /home landing", () => {
       assert.match(html, /data-testid="landing-wiki"/);
       assert.match(html, /data-testid="landing-npm"/);
       assert.match(html, /href="\/docs"/);
-      assert.match(html, /@inboxlink\/sdk@0\.1\.1/);
+      assert.match(html, /@inboxlink\/core@0\.1\.1/);
+      assert.doesNotMatch(html, /npm i @inboxlink\/sdk@0\.1\.1/);
       assert.match(html, /href="\/health"/);
     }
 

@@ -37,7 +37,10 @@ describe("GET /docs", () => {
       assert.match(html, /Host docs/);
       assert.match(html, /class="shell docs-shell"/);
       assert.match(html, /href="\/status"/);
-      assert.match(html, /@inboxlink\/sdk@0\.1\.1/);
+      assert.match(html, /@inboxlink\/core@0\.1\.1/);
+      assert.match(html, /@inboxlink\/sdk@0\.1\.0/);
+      assert.match(html, /after #40 publish/);
+      assert.doesNotMatch(html, /npm i @inboxlink\/sdk@0\.1\.1/);
       assert.match(html, /inboxlink\/wiki/);
     }
 
