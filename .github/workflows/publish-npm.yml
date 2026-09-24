@@ -104,7 +104,16 @@ jobs:
 
           publish_one() {
             local filter="$1"
-            echo "::group::${filter} (dry_run=${DRY_RUN}, provenance=${NPM_CONFIG_PROVENANCE})"
+            local name version
+            name=$(pnpm --filter "$filter" exec node -p "require('./package.json').name")
+            version=$(pnpm --filter "$filter" exec node -p "require('./package.json').version")
+            echo "::group::${filter} (${name}@${version}, dry_run=${DRY_RUN}, provenance=${NPM_CONFIG_PROVENANCE})"
+            # Allow retries after a partial publish (e.g. core landed, sdk still missing).
+            if [ "${DRY_RUN}" != "true" ] && npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Already on registry: ${name}@${version} — skipping"
+              echo "::endgroup::"
+              return 0
+            fi
             if [ "${DRY_RUN}" = "true" ]; then
               pnpm --filter "$filter" exec npm pack --dry-run
               # shellcheck disable=SC2086 # intentional optional --provenance flag
@@ -120,7 +129,12 @@ jobs:
             core)
               publish_one "@inboxlink/core"
               ;;
-            sdk|both)
+            sdk)
+              # core at the matching version must already be on the registry
+              # (workspace:* rewrites to that version on publish).
+              publish_one "@inboxlink/sdk"
+              ;;
+            both)
               # Publish core first so the rewritten workspace dependency resolves on npm.
               publish_one "@inboxlink/core"
               publish_one "@inboxlink/sdk"
