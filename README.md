@@ -17,7 +17,9 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Durable **Postgres sync_jobs** queue (202 + status API; Redis unused)
 
-`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
+
+**IMAP (draft / parked):** `POST /v1/connect/:linkToken/imap` seals password/app-password credentials; list is **INBOX** via [imapflow](https://github.com/postalsys/imapflow) (**MIT**). CI uses a mock transport. Limitations: password/app-password only (no XOAUTH2), INBOX only, best-effort MIME, no IDLE/UID sync, Connect UI is Gmail-first (IMAP is API-only until unparked). Do **not** fork EmailEngine or RustMailer (commercial licenses). Microsoft Graph is not implemented.
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect. Scheduled [production health smoke](.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh`.
 
@@ -64,6 +66,7 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
 | `@inboxlink/adapters-gmail` | Gmail OAuth + message list/normalize |
+| `@inboxlink/adapters-imap` | IMAP password/app-password adapter (connect + INBOX list; MIT imapflow; parked) |
 | `@inboxlink/sdk` | Host-app HTTP client — **npm `@inboxlink/sdk@0.1.1`** ([usage](packages/sdk/README.md); [publish path](docs/publishing.md)) |
 | `@inboxlink/server` | Hono HTTP service |
 | `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors, CSP) |

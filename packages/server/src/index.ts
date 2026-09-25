@@ -1,6 +1,7 @@
 import { getRequestListener, serve } from "@hono/node-server";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { ImapAdapter } from "@inboxlink/adapters-imap";
 import { loadConfig } from "./config.js";
 import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
@@ -44,10 +45,12 @@ export function createAppFromEnv(
     clientSecret: config.googleClientSecret,
     redirectUri: config.googleRedirectUri,
   });
+  const imap = new ImapAdapter();
   const app = createApp({
     store,
     vault,
     gmail,
+    imap,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
     tenantId: config.tenantId,
