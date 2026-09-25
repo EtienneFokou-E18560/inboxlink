@@ -29,13 +29,16 @@ import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
 import { getAccessTokenCache } from "../access-token-cache.js";
 import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
-import { syncGmailGrant } from "../sync/gmail-sync.js";
+import { applyGmailPushNotification, parsePubSubPushBody } from "../sync/gmail-push.js";
+import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watch.js";
+import { drainSyncJobs } from "../queue/sync-queue.js";
 import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
 import {
   emitWebhookSafe,
   type WebhookBus,
 } from "../webhooks/deliver.js";
+import { timingSafeEqual } from "node:crypto";
 
 export type AppEnv = {
   Variables: {
@@ -79,6 +82,12 @@ export type CreateAppOptions = {
    * Failures must never fail Connect or sync HTTP responses.
    */
   webhooks?: WebhookBus | null;
+  /** Full Pub/Sub topic for Gmail users.watch (`GMAIL_PUBSUB_TOPIC`). */
+  gmailPubsubTopic?: string;
+  /** Shared secret for Pub/Sub push verification (`GMAIL_PUSH_SECRET`). */
+  gmailPushSecret?: string;
+  /** Bearer for internal cron routes (`CRON_SECRET`). */
+  cronSecret?: string;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -170,6 +179,13 @@ export function createApp(opts: CreateAppOptions) {
   app.use("/v1/*", async (c, next) => {
     // OAuth browser callback must remain public (state-bound).
     if (c.req.path.startsWith("/v1/oauth/")) {
+      return next();
+    }
+    // Pub/Sub push + cron use their own secrets (not tenant Bearer).
+    if (
+      c.req.path.startsWith("/v1/internal/gmail/push") ||
+      c.req.path.startsWith("/v1/internal/cron/")
+    ) {
       return next();
     }
     if (c.req.path.startsWith("/v1/connect/")) {
@@ -431,11 +447,34 @@ export function createApp(opts: CreateAppOptions) {
       email: grant.email,
     });
 
+    // Gmail push watch (best-effort; poll/sync remains the fallback).
+    await startOrRenewGmailWatch({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      grant,
+      topicName: opts.gmailPubsubTopic,
+    });
+
+    // Enqueue bootstrap sync job (drained by cron / deferred invoke).
     if (opts.queue) {
-      await opts.queue.enqueue({
+      const { jobId } = await opts.queue.enqueue({
         grantId,
         tenantId: session.tenantId,
         kind: "bootstrap",
+        forceBootstrap: true,
+      });
+      void drainSyncJobs({
+        store: opts.store,
+        vault: opts.vault,
+        gmail: opts.gmail,
+        webhooks: opts.webhooks,
+        limit: 1,
+      }).catch((err) => {
+        log.warn("sync_drain_after_connect_failed", {
+          jobId,
+          error: err instanceof Error ? err.message : "unknown",
+        });
       });
     }
 
@@ -600,76 +639,178 @@ export function createApp(opts: CreateAppOptions) {
       }
     }
 
-    // Inline sync (no Redis). Optional queue enqueue is fire-and-forget only.
-    if (opts.queue) {
-      await opts.queue.enqueue({
-        grantId,
-        tenantId: grant.tenantId,
-        kind: forceBootstrap ? "bootstrap" : "incremental",
-      });
-    }
+    const enqueued = opts.queue
+      ? await opts.queue.enqueue({
+          grantId,
+          tenantId: grant.tenantId,
+          kind: forceBootstrap ? "bootstrap" : "incremental",
+          forceBootstrap,
+        })
+      : {
+          jobId: (
+            await opts.store.enqueueSyncJob({
+              grantId,
+              tenantId: grant.tenantId,
+              kind: forceBootstrap ? "bootstrap" : "incremental",
+              forceBootstrap,
+            })
+          ).id,
+        };
 
-    const result = await syncGmailGrant({
+    // Best-effort deferred drain so local/demo don't wait solely on cron.
+    void drainSyncJobs({
       store: opts.store,
       vault: opts.vault,
       gmail: opts.gmail,
-      grant,
-      forceBootstrap,
-    });
-
-    if (result.status === "needs_reauth") {
-      await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
-        grantId: grant.id,
-        tenantId: grant.tenantId,
-        externalUserId: grant.externalUserId,
-        provider: grant.provider,
-        email: grant.email,
-        reason: "sync",
+      webhooks: opts.webhooks,
+      limit: 3,
+    }).catch((err) => {
+      log.warn("sync_drain_deferred_failed", {
+        jobId: enqueued.jobId,
+        error: err instanceof Error ? err.message : "unknown",
       });
-      return c.json(
-        {
-          grantId,
-          status: "needs_reauth",
-          mode: result.mode,
-          error: result.error ?? "needs_reauth",
-        },
-        409,
-      );
-    }
-    if (result.status === "gmail_unavailable") {
-      return c.json(
-        {
-          grantId,
-          status: "error",
-          mode: result.mode,
-          error: "gmail_unavailable",
-        },
-        502,
-      );
-    }
-
-    await emitWebhookSafe(opts.webhooks, "sync.completed", {
-      grantId: result.grantId,
-      tenantId: grant.tenantId,
-      externalUserId: grant.externalUserId,
-      provider: grant.provider,
-      mode: result.mode,
-      historyId: result.historyId,
-      upserted: result.upserted,
-      deleted: result.deleted,
     });
 
+    return c.json(
+      {
+        jobId: enqueued.jobId,
+        grantId,
+        status: "queued",
+      },
+      202,
+    );
+  });
+
+  app.get("/v1/grants/:grantId/sync/jobs/:jobId", async (c) => {
+    const grantId = c.req.param("grantId");
+    const jobId = c.req.param("jobId");
+    const tenantId = c.get("tenantId");
+    const grant = await opts.store.getGrant(grantId);
+    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    const job = await opts.store.getSyncJob(jobId);
+    if (!job || job.grantId !== grantId || job.tenantId !== tenantId) {
+      return c.json({ error: "not_found" }, 404);
+    }
     return c.json({
-      grantId,
-      status: "ok",
-      mode: result.mode,
-      historyId: result.historyId,
-      upserted: result.upserted,
-      deleted: result.deleted,
+      jobId: job.id,
+      grantId: job.grantId,
+      status: job.status,
+      kind: job.kind,
+      forceBootstrap: job.forceBootstrap,
+      result: job.result,
+      error: job.error,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
     });
   });
 
+  /**
+   * Gmail Pub/Sub push endpoint. Verify with `GMAIL_PUSH_SECRET` via
+   * `?token=` or `X-InboxLink-Push-Secret` (first-cut shared secret).
+   * Returns 204 quickly after accept; history apply runs in-request
+   * (keep Pub/Sub ack deadline generous / maxDuration ≥ 60s).
+   */
+  app.post("/v1/internal/gmail/push", async (c) => {
+    if (!verifyPushSecret(c.req.header("x-inboxlink-push-secret"), c.req.query("token"), opts.gmailPushSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+    const notification = parsePubSubPushBody(raw);
+    if (!notification) {
+      // Ack malformed payloads so Pub/Sub does not retry forever.
+      log.warn("gmail_push_parse_failed");
+      return c.body(null, 204);
+    }
+    try {
+      const applied = await applyGmailPushNotification({
+        store: opts.store,
+        vault: opts.vault,
+        gmail: opts.gmail,
+        webhooks: opts.webhooks,
+        notification,
+      });
+      log.info("gmail_push_applied", {
+        status: applied.status,
+        grantCount: applied.grantIds.length,
+      });
+    } catch (err) {
+      log.warn("gmail_push_apply_failed", {
+        error: err instanceof Error ? err.message : "unknown",
+      });
+      // Still 204 — avoid Pub/Sub retry storms; host can poll POST …/sync.
+    }
+    return c.body(null, 204);
+  });
+
+  /** Daily: renew Gmail users.watch (≤7 day expiry). */
+  const renewWatches = async (c: Context<AppEnv>) => {
+    if (!verifyCronSecret(c.req.header("authorization"), opts.cronSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const summary = await renewAllGmailWatches({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      topicName: opts.gmailPubsubTopic,
+    });
+    return c.json({ ok: true, ...summary });
+  };
+  app.post("/v1/internal/cron/renew-gmail-watches", renewWatches);
+  app.get("/v1/internal/cron/renew-gmail-watches", renewWatches);
+
+  /** Drain durable sync_jobs queue (Vercel cron every few minutes). */
+  const drainJobs = async (c: Context<AppEnv>) => {
+    if (!verifyCronSecret(c.req.header("authorization"), opts.cronSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const summary = await drainSyncJobs({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      webhooks: opts.webhooks,
+      limit: 10,
+    });
+    return c.json({ ok: true, ...summary });
+  };
+  app.post("/v1/internal/cron/drain-sync-jobs", drainJobs);
+  app.get("/v1/internal/cron/drain-sync-jobs", drainJobs);
+
   return app;
+}
+
+function verifyCronSecret(
+  authorization: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!expected?.trim()) return false;
+  const token = parseBearerToken(authorization);
+  return timingSafeStringEqual(token ?? undefined, expected);
+}
+
+function verifyPushSecret(
+  header: string | undefined,
+  queryToken: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!expected?.trim()) return false;
+  const provided = header?.trim() || queryToken?.trim();
+  return timingSafeStringEqual(provided, expected);
+}
+
+/** Constant-time string compare; false when either side missing. */
+function timingSafeStringEqual(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }
 
 function googleErrorCode(err: unknown): string {

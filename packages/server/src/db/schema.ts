@@ -91,7 +91,34 @@ export const syncCursors = pgTable("sync_cursors", {
   kind: text("kind").notNull(),
   value: text("value").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  /** Gmail users.watch expiration (Wave D). */
+  watchExpiration: timestamp("watch_expiration", { withTimezone: true }),
 });
+
+/** Durable sync job queue (Wave D2). MIT-only Postgres path — no Redis required. */
+export const syncJobs = pgTable(
+  "sync_jobs",
+  {
+    id: text("id").primaryKey(),
+    grantId: text("grant_id")
+      .notNull()
+      .references(() => grants.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    forceBootstrap: text("force_bootstrap").notNull().default("0"),
+    result: jsonb("result"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("sync_jobs_status_created_idx").on(t.status, t.createdAt),
+    index("sync_jobs_grant_idx").on(t.grantId),
+  ],
+);
 
 export const messages = pgTable(
   "messages",
@@ -166,8 +193,10 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   grant_id TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   value TEXT NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  watch_expiration TIMESTAMPTZ
 );
+ALTER TABLE sync_cursors ADD COLUMN IF NOT EXISTS watch_expiration TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
@@ -181,4 +210,21 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (grant_id, provider_message_id)
 );
+
+CREATE TABLE IF NOT EXISTS sync_jobs (
+  id TEXT PRIMARY KEY,
+  grant_id TEXT NOT NULL REFERENCES grants(id) ON DELETE CASCADE,
+  tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  force_bootstrap TEXT NOT NULL DEFAULT '0',
+  result JSONB,
+  error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS sync_jobs_status_created_idx ON sync_jobs (status, created_at);
+CREATE INDEX IF NOT EXISTS sync_jobs_grant_idx ON sync_jobs (grant_id);
 `;

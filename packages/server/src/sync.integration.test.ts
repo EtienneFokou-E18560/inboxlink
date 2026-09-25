@@ -8,6 +8,7 @@ import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createApp } from "./routes/app.js";
+import { createStoreSyncQueue, drainSyncJobs } from "./queue/sync-queue.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
 
@@ -165,8 +166,34 @@ function appFor(store: MemoryStore | PostgresStore, vault: MemoryTokenVault | Po
     apiSecret: "unused",
     mode: "single",
     gmailScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
-    queue: null,
+    queue: createStoreSyncQueue(store),
   });
+}
+
+/** POST …/sync → 202, then drain/poll until the job leaves queued/running. */
+async function syncAwaitJob(
+  store: MemoryStore | PostgresStore,
+  vault: MemoryTokenVault | PostgresTokenVault,
+  grantId: string,
+  init?: RequestInit,
+) {
+  const app = appFor(store, vault);
+  const res = await app.request(`/v1/grants/${grantId}/sync`, { method: "POST", ...init });
+  assert.equal(res.status, 202);
+  const body = (await res.json()) as { jobId: string; status: string; grantId: string };
+  assert.equal(body.status, "queued");
+  assert.ok(body.jobId);
+
+  let job = await store.getSyncJob(body.jobId);
+  for (let i = 0; i < 40; i++) {
+    if (job && (job.status === "completed" || job.status === "failed")) break;
+    await drainSyncJobs({ store, vault, gmail: gmail(), limit: 5 });
+    job = await store.getSyncJob(body.jobId);
+    if (job && (job.status === "completed" || job.status === "failed")) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(job);
+  return { app, jobId: body.jobId, job };
 }
 
 async function sealGrant(
@@ -206,20 +233,12 @@ describe("Gmail history sync watermark", () => {
     const vault = new MemoryTokenVault(MASTER);
     const grant = activeGrant("grant_bootstrap");
     await sealGrant(store, vault, grant);
-    const app = appFor(store, vault);
 
-    const res = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      status: string;
-      mode: string;
-      historyId: string;
-      upserted: number;
-    };
-    assert.equal(body.status, "ok");
-    assert.equal(body.mode, "bootstrap");
-    assert.equal(body.historyId, "10001");
-    assert.equal(body.upserted, 2);
+    const { job } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(job.status, "completed");
+    assert.equal(job.result?.mode, "bootstrap");
+    assert.equal(job.result?.historyId, "10001");
+    assert.equal(job.result?.upserted, 2);
 
     const cursor = await store.getSyncCursor(grant.id);
     assert.equal(cursor?.kind, "gmail_history");
@@ -253,9 +272,8 @@ describe("Gmail history sync watermark", () => {
         hasAttachments: false,
       },
     ]);
-    const app = appFor(store, vault);
-    const res = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(res.status, 200);
+    const { job } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(job.status, "completed");
     const cached = await store.listMessages(grant.id);
     assert.equal(cached.length, 2);
     assert.ok(cached.some((m) => m.providerMessageId === "prior"));
@@ -315,19 +333,12 @@ describe("Gmail history sync watermark", () => {
       },
     ];
 
-    const app = appFor(store, vault);
-    const first = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(first.status, 200);
-    const firstBody = (await first.json()) as {
-      mode: string;
-      historyId: string;
-      upserted: number;
-      deleted: number;
-    };
-    assert.equal(firstBody.mode, "incremental");
-    assert.equal(firstBody.historyId, "7000");
-    assert.equal(firstBody.upserted, 1);
-    assert.equal(firstBody.deleted, 1);
+    const { job: firstJob } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(firstJob.status, "completed");
+    assert.equal(firstJob.result?.mode, "incremental");
+    assert.equal(firstJob.result?.historyId, "7000");
+    assert.equal(firstJob.result?.upserted, 1);
+    assert.equal(firstJob.result?.deleted, 1);
 
     const after = await store.listMessages(grant.id);
     assert.equal(after.length, 2);
@@ -339,12 +350,11 @@ describe("Gmail history sync watermark", () => {
     // Second sync with empty history is idempotent.
     historyPages = [{ history: [], historyId: "7000" }];
     hits = [];
-    const second = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(second.status, 200);
-    const secondBody = (await second.json()) as { upserted: number; deleted: number; mode: string };
-    assert.equal(secondBody.mode, "incremental");
-    assert.equal(secondBody.upserted, 0);
-    assert.equal(secondBody.deleted, 0);
+    const { job: secondJob } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(secondJob.status, "completed");
+    assert.equal(secondJob.result?.mode, "incremental");
+    assert.equal(secondJob.result?.upserted, 0);
+    assert.equal(secondJob.result?.deleted, 0);
     assert.ok(hits.some((hit) => hit.url.includes("/history?")));
   });
 
@@ -379,13 +389,11 @@ describe("Gmail history sync watermark", () => {
       },
     ]);
 
-    const app = appFor(store, vault);
-    const res = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { mode: string; historyId: string; upserted: number };
-    assert.equal(body.mode, "bootstrap");
-    assert.equal(body.historyId, "12000");
-    assert.equal(body.upserted, 1);
+    const { job } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(job.status, "completed");
+    assert.equal(job.result?.mode, "bootstrap");
+    assert.equal(job.result?.historyId, "12000");
+    assert.equal(job.result?.upserted, 1);
     const cached = await store.listMessages(grant.id);
     assert.equal(cached.length, 2);
     assert.ok(cached.some((m) => m.providerMessageId === "stale"));
@@ -404,9 +412,8 @@ describe("Gmail history sync watermark", () => {
     const grant = activeGrant("grant_pg_sync");
     await sealGrant(storeA, vault, grant);
 
-    const app = appFor(storeA, vault);
-    const res = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
-    assert.equal(res.status, 200);
+    const { job } = await syncAwaitJob(storeA, vault, grant.id);
+    assert.equal(job.status, "completed");
 
     const cursor = await storeB.getSyncCursor(grant.id);
     assert.equal(cursor?.value, "33000");
@@ -417,5 +424,22 @@ describe("Gmail history sync watermark", () => {
     // Idempotent upsert of the same provider id.
     await storeB.upsertMessages(messages);
     assert.equal((await storeB.listMessages(grant.id)).length, 1);
+  });
+
+  it("exposes sync job status via GET …/sync/jobs/:jobId", async () => {
+    resetGmail();
+    listIds = ["status-1"];
+    profileHistoryId = "44000";
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_job_status");
+    await sealGrant(store, vault, grant);
+    const { app, jobId, job } = await syncAwaitJob(store, vault, grant.id);
+    assert.equal(job.status, "completed");
+    const statusRes = await app.request(`/v1/grants/${grant.id}/sync/jobs/${jobId}`);
+    assert.equal(statusRes.status, 200);
+    const body = (await statusRes.json()) as { status: string; result?: { historyId?: string } };
+    assert.equal(body.status, "completed");
+    assert.equal(body.result?.historyId, "44000");
   });
 });
