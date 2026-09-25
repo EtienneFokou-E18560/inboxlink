@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { unescapeHtml } from "@inboxlink/connect-ui";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createAppFromEnv } from "./index.js";
@@ -87,11 +88,11 @@ function pair(db: PgDatabase) {
 }
 
 function connectAuthUrl(html: string): URL {
-  const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1]
-    ?? html.match(/href="([^"]+)"[^>]*data-testid="connect-cta"/)?.[1]
-    ?? "")
-    .replaceAll("&amp;", "&")
-    .replaceAll("&quot;", '"');
+  const href = unescapeHtml(
+    html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1]
+      ?? html.match(/href="([^"]+)"[^>]*data-testid="connect-cta"/)?.[1]
+      ?? "",
+  );
   return new URL(href);
 }
 

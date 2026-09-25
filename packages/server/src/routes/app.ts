@@ -352,6 +352,17 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_exchange"),
       );
     }
+    const refreshToken = tokens.refreshToken;
+    if (!refreshToken) {
+      log.warn("oauth_callback_failed", {
+        reason: "missing_refresh_token",
+        store: opts.storeKind ?? "memory",
+      });
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_missing_refresh" }),
+        connectErrorStatus("oauth_missing_refresh"),
+      );
+    }
     const grantId = newId("grant");
     const now = new Date().toISOString();
     const grant: Grant = {
@@ -367,12 +378,10 @@ export function createApp(opts: CreateAppOptions) {
     };
     await opts.store.putGrant(grant);
     try {
-      if (tokens.refreshToken) {
-        await opts.vault.seal(tokens.refreshToken, {
-          grantId,
-          tenantId: session.tenantId,
-        });
-      }
+      await opts.vault.seal(refreshToken, {
+        grantId,
+        tenantId: session.tenantId,
+      });
     } catch {
       await opts.store.deleteGrant(grantId, session.tenantId);
       log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });

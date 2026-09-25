@@ -46,6 +46,15 @@ describe("renderConnectErrorPage", () => {
     assert.equal(connectErrorStatus("oauth_exchange"), 400);
   });
 
+  it("prompts re-consent when Google omits the refresh token", () => {
+    const html = renderConnectErrorPage({ kind: "oauth_missing_refresh" });
+    assert.match(html, /Google did not return a refresh token/);
+    assert.match(html, /approve Google access again/i);
+    assert.match(html, /No grant was created/);
+    assert.match(html, /role="alert"/);
+    assert.equal(connectErrorStatus("oauth_missing_refresh"), 400);
+  });
+
   it("escapes provider error text", () => {
     const html = renderConnectErrorPage({
       kind: "oauth_denied",
