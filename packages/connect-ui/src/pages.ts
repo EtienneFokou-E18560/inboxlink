@@ -20,6 +20,7 @@ export type ConnectErrorKind =
   | "oauth_missing"
   | "oauth_unknown_state"
   | "oauth_exchange"
+  | "oauth_missing_refresh"
   | "vault_failed";
 
 export type ConnectErrorPageProps = {
@@ -173,6 +174,16 @@ function errorCopy(props: ConnectErrorPageProps): {
         lead: "InboxLink could not exchange the code for tokens.",
         meta: "Fix the OAuth client or redirect URI, then start Connect again.",
         tone: "danger",
+      };
+    case "oauth_missing_refresh":
+      return {
+        kicker: "Re-consent required",
+        title: "Google did not return a refresh token",
+        lead: "Offline access was not granted, so InboxLink cannot keep the mailbox connected.",
+        notice:
+          "Return to the host app, open a fresh connect link, and approve Google access again when prompted. Do not skip the consent screen.",
+        meta: "No grant was created. Re-consent is required before Connect can finish.",
+        tone: "warn",
       };
     case "vault_failed":
       return {

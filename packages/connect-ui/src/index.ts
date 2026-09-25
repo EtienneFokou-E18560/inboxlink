@@ -1,4 +1,4 @@
-export { escapeHtml } from "./escape.js";
+export { escapeHtml, unescapeHtml } from "./escape.js";
 export { CONNECT_STYLES } from "./styles.js";
 export { renderShell } from "./shell.js";
 export {

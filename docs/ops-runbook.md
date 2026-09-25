@@ -85,6 +85,7 @@ Browser HTML pages (not JSON) on `/v1/oauth/gmail/callback`:
 | `invalid_client` | Bad `GOOGLE_CLIENT_*` | Replace web client id/secret in Vercel, redeploy |
 | `redirect_uri_mismatch` | Console URI ≠ env | Set exact `GOOGLE_REDIRECT_URI` in Google + Vercel |
 | `invalid_grant` | Code reused/expired | Restart Connect |
+| Google did not return a refresh token | Offline token omitted (repeat auth / skipped consent) | New connect link; approve Google access again (re-consent) |
 | Could not store refresh token | Short/missing master key | Set `INBOXLINK_MASTER_KEY` (≥16 chars), redeploy |
 | Unknown OAuth state | Memory store / wrong instance | Require `store: postgres` before Connect |
 

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { unescapeHtml } from "@inboxlink/connect-ui";
 import { createApp } from "./routes/app.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
@@ -145,9 +146,9 @@ describe("grants, vault, and Gmail OAuth", () => {
     assert.match(html, /data-testid="connect-cta"/);
     assert.match(html, /This link expires/);
     assert.doesNotMatch(html, /Stub Connect UI/);
-    const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
-      .replaceAll("&amp;", "&")
-      .replaceAll("&quot;", '"');
+    const href = unescapeHtml(
+      html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+    );
     const authUrl = new URL(href);
     assert.equal(authUrl.origin, "https://accounts.google.com");
     assert.equal(
@@ -268,9 +269,9 @@ describe("OAuth callback when Google rejects the code", () => {
       });
       const session = (await created.json()) as { linkToken: string };
       const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
-      const href = ((await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
-        .replaceAll("&amp;", "&")
-        .replaceAll("&quot;", '"');
+      const href = unescapeHtml(
+        (await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+      );
       const state = new URL(href).searchParams.get("state");
       assert.ok(state);
       const callback = await app.request(
@@ -284,6 +285,102 @@ describe("OAuth callback when Google rejects the code", () => {
       const listed = await app.request("/v1/grants?externalUserId=user-1");
       const { grants } = (await listed.json()) as { grants: unknown[] };
       assert.equal(grants.length, 0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        google.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
+});
+
+describe("OAuth callback when Google omits refresh_token", () => {
+  it("rejects the callback and leaves no grant", async () => {
+    const google = createServer((req, res) => {
+      if (req.url?.startsWith("/token")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: "ya29.no-refresh",
+            expires_in: 3600,
+            scope: "openid email https://www.googleapis.com/auth/gmail.readonly",
+          }),
+        );
+        return;
+      }
+      if (req.url?.startsWith("/userinfo")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ email: EMAIL }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => google.listen(0, "127.0.0.1", resolve));
+    const port = (google.address() as { port: number }).port;
+    try {
+      const store = new MemoryStore();
+      const vault = new MemoryTokenVault("test-master-key-at-least-16");
+      const gmail = new GmailAdapter({
+        clientId: "test-client-id.apps.googleusercontent.com",
+        clientSecret: "test-client-secret",
+        redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        tokenUrl: `http://127.0.0.1:${port}/token`,
+        userinfoUrl: `http://127.0.0.1:${port}/userinfo`,
+      });
+      const app = createApp({
+        store,
+        vault,
+        gmail,
+        publicBaseUrl: "http://localhost:8787",
+        apiSecret: API_SECRET,
+        mode: "single",
+        gmailScopes: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "openid",
+          "email",
+        ],
+        oauthRedirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        queue: null,
+      });
+      const created = await app.request("/v1/link/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          externalUserId: "user-no-refresh",
+          redirectUri: "http://localhost:9999/done",
+        }),
+      });
+      assert.equal(created.status, 200);
+      const session = (await created.json()) as { linkToken: string; sessionId: string };
+      const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
+      assert.equal(connect.status, 200);
+      const href = unescapeHtml(
+        (await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+      );
+      const state = new URL(href).searchParams.get("state");
+      assert.ok(state);
+
+      const callback = await app.request(
+        `/v1/oauth/gmail/callback?code=auth-code-no-refresh&state=${encodeURIComponent(state)}`,
+      );
+      assert.equal(callback.status, 400);
+      const html = await callback.text();
+      assert.match(html, /Google did not return a refresh token/);
+      assert.match(html, /approve Google access again/i);
+      assert.match(html, /No grant was created/);
+      assert.match(html, /Inbox<span>Link<\/span>/);
+      assert.equal(callback.headers.get("location"), null);
+
+      const listed = await app.request("/v1/grants?externalUserId=user-no-refresh");
+      assert.equal(listed.status, 200);
+      const { grants } = (await listed.json()) as { grants: unknown[] };
+      assert.equal(grants.length, 0);
+
+      const stored = await store.getSession(session.sessionId);
+      assert.ok(stored);
+      assert.equal(stored.status, "pending");
+      assert.equal(stored.grantId, undefined);
+      assert.equal(stored.publicToken, undefined);
     } finally {
       await new Promise<void>((resolve, reject) => {
         google.close((err) => (err ? reject(err) : resolve()));
