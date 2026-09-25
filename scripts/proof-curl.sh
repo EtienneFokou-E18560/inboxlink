@@ -22,13 +22,14 @@ Env:
   BASE_URL            API origin (default http://localhost:8787)
   EXTERNAL_USER_ID    Host user id (default proof-user-1)
   REDIRECT_URI        Post-Connect redirect (default https://example.com/oauth-done)
-  INBOXLINK_API_SECRET  Optional Bearer when INBOXLINK_MODE=multi
+  INBOXLINK_API_SECRET  Bearer when INBOXLINK_MODE=multi (required for Production)
   PUBLIC_TOKEN        Required for: exchange
   GRANT_ID            Required for: messages, revoke
 
 Examples:
   ./scripts/proof-curl.sh
   BASE_URL=https://inboxlink-two.vercel.app ./scripts/proof-curl.sh health
+  BASE_URL=https://inboxlink-two.vercel.app INBOXLINK_API_SECRET=… ./scripts/proof-curl.sh session
   PUBLIC_TOKEN=… ./scripts/proof-curl.sh exchange
   GRANT_ID=grant_… ./scripts/proof-curl.sh messages
 EOF

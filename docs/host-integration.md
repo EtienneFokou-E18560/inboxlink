@@ -20,7 +20,7 @@ Copyable curl and TypeScript sketches live under [`examples/host-integration/`](
 | Google OAuth (`GOOGLE_CLIENT_ID` / `SECRET` / redirect) | **InboxLink server only** | Hosts **never** register a Google client or set `GOOGLE_*`. |
 | Postgres / vault / `INBOXLINK_MASTER_KEY` | **InboxLink server only** | Production already has these. |
 | InboxLink base URL | Host (optional) | SDK defaults to Production `https://inboxlink-two.vercel.app`. Override for local/self-host. |
-| API secret | Host **only if** server is `multi` | Production is currently `single` — omit `apiSecret`. |
+| API secret | Host (Production / any `multi` server) | Production runs `INBOXLINK_MODE=multi`. Set `INBOXLINK_API_SECRET` and pass SDK `apiSecret`. Never ship the secret to browsers. |
 | Host redirect URI | Host | Your callback that receives `?public_token=…` (not the Google OAuth callback). |
 
 Minimal host env: [`examples/host-integration/host.env.example`](../examples/host-integration/host.env.example).
@@ -52,8 +52,10 @@ With `@inboxlink/sdk` (recommended):
 ```ts
 import { InboxLink } from "@inboxlink/sdk";
 
-// Production + single mode: zero config
-const il = new InboxLink();
+// Production is multi — apiSecret required (server-side only; never in browsers)
+const il = new InboxLink({
+  apiSecret: process.env.INBOXLINK_API_SECRET,
+});
 
 const session = await il.createConnectSession({
   externalUserId: user.id,
@@ -67,6 +69,7 @@ const session = await il.createConnectSession({
 ```http
 POST /v1/link/sessions HTTP/1.1
 Host: inboxlink-two.vercel.app
+Authorization: Bearer <INBOXLINK_API_SECRET>
 Content-Type: application/json
 
 {
@@ -76,7 +79,7 @@ Content-Type: application/json
 }
 ```
 
-In `multi` mode, also send `Authorization: Bearer <INBOXLINK_API_SECRET>`.
+Unauthenticated session create against Production returns `401`. `GET /health` stays public (expect `"mode":"multi"`, `"store":"postgres"`).
 
 Response (shape):
 
@@ -150,10 +153,10 @@ Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.
 
 | `INBOXLINK_MODE` | Host Bearer required? |
 |------------------|------------------------|
-| `single` (default / current Production) | No — omit `apiSecret` |
-| `multi` | Yes — `new InboxLink({ apiSecret: "…" })` |
+| `multi` (current Production) | Yes — `INBOXLINK_API_SECRET` + `new InboxLink({ apiSecret })` |
+| `single` (local / self-host default) | No — omit `apiSecret` |
 
-OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; they are bound by session state, not the API secret.
+OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; they are bound by session state, not the API secret. `GET /health` is public on every mode.
 
 ---
 
@@ -173,14 +176,14 @@ Until delivery lands, poll `GET /v1/grants` / rely on redirect + exchange. Do no
 
 ## Host checklist
 
-- [ ] Install SDK (npm when published; otherwise workspace / git dependency)  
-- [ ] `new InboxLink()` against Production, or pass `baseUrl` for local  
+- [ ] Install SDK (`npm i @inboxlink/sdk`, or workspace / git dependency)  
+- [ ] Against Production: `new InboxLink({ apiSecret })` with `INBOXLINK_API_SECRET` (or pass `baseUrl` + secret for local `multi`)  
 - [ ] Implement **one** host redirect route that calls `completeConnect`  
 - [ ] Store only `grantId` (+ your `externalUserId` mapping), never refresh tokens  
 - [ ] Exchange `public_token` server-side, once  
 - [ ] Handle missing/invalid token on the redirect route  
 - [ ] Handle `needs_reauth` / `grant_inactive` from messages by sending the user through Connect again  
-- [ ] Keep API secrets out of the browser bundle  
+- [ ] Never ship `INBOXLINK_API_SECRET` / `apiSecret` to browsers  
 - [ ] Do **not** set `GOOGLE_*`, Postgres, or vault keys in the host app  
 - [ ] Do **not** add a dependency from InboxLink → your host app (or career-workspace)
 
