@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { unescapeHtml } from "@inboxlink/connect-ui";
 import { createApp } from "./routes/app.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
@@ -132,9 +133,9 @@ describe("grants, vault, and Gmail OAuth", () => {
     assert.match(html, /data-testid="connect-cta"/);
     assert.match(html, /This link expires/);
     assert.doesNotMatch(html, /Stub Connect UI/);
-    const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
-      .replaceAll("&amp;", "&")
-      .replaceAll("&quot;", '"');
+    const href = unescapeHtml(
+      html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+    );
     const authUrl = new URL(href);
     assert.equal(authUrl.origin, "https://accounts.google.com");
     assert.equal(
@@ -238,9 +239,9 @@ describe("OAuth callback when Google rejects the code", () => {
       });
       const session = (await created.json()) as { linkToken: string };
       const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
-      const href = ((await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
-        .replaceAll("&amp;", "&")
-        .replaceAll("&quot;", '"');
+      const href = unescapeHtml(
+        (await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+      );
       const state = new URL(href).searchParams.get("state");
       assert.ok(state);
       const callback = await app.request(
@@ -323,9 +324,9 @@ describe("OAuth callback when Google omits refresh_token", () => {
       const session = (await created.json()) as { linkToken: string; sessionId: string };
       const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
       assert.equal(connect.status, 200);
-      const href = ((await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "")
-        .replaceAll("&amp;", "&")
-        .replaceAll("&quot;", '"');
+      const href = unescapeHtml(
+        (await connect.text()).match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "",
+      );
       const state = new URL(href).searchParams.get("state");
       assert.ok(state);
 
