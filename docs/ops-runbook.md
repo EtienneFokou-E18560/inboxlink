@@ -37,11 +37,12 @@ Healthy Production shape:
   "ok": true,
   "service": "inboxlink",
   "mode": "multi",
-  "queue": "disabled",
+  "queue": "jobs",
   "store": "postgres"
 }
 ```
 
+`queue: "jobs"` means the durable Postgres `sync_jobs` path is wired (Wave D2). Redis is unused.
 `GET /health` is public (no Bearer). Host APIs (`/v1/link/sessions`, grants, messages, **`/v1/schema.sql`**) require `Authorization: Bearer <INBOXLINK_API_SECRET>` in `multi`.
 
 **Automated smoke:** GitHub Actions workflow [`.github/workflows/production-health-smoke.yml`](../.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh` on a 6-hour schedule and via **Actions → Production health smoke → Run workflow**. It fails the job if `ok` is not `true` or `store` is not `postgres`. Optional repo variable `INBOXLINK_PRODUCTION_URL` overrides the default Production base URL; do not store Production secrets in git or workflow files (health is public). GitHub emails on workflow failure; Vercel’s own emails cover function crashes.
@@ -93,12 +94,68 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set, th
 | Event | Emit point |
 |-------|------------|
 | `grant.connected` | OAuth callback success |
-| `grant.needs_reauth` | Refresh / Gmail 401–403 / sync reauth |
-| `sync.completed` | Successful `POST …/sync` |
+| `grant.needs_reauth` | Refresh / Gmail 401–403 / sync reauth / push reauth |
+| `sync.completed` | Successful sync job (API drain, push apply, or cron) |
+| `message.created` | New message upserted via Gmail Pub/Sub push apply |
 
-Retries: 408 / 429 / 5xx (bounded). Hard 4xx → drop. Delivery failures are logged (`webhook_delivery_*`) and **never** fail Connect redirects or sync HTTP responses. `message.created` is not emitted yet.
+Retries: 408 / 429 / 5xx (bounded). Hard 4xx → drop. Delivery failures are logged (`webhook_delivery_*`) and **never** fail Connect redirects or sync HTTP responses.
 
 Unset either env → no outbound POSTs (hosts can still poll). See [host-integration.md](./host-integration.md#host-webhooks-signed-events).
+
+## Gmail push (Pub/Sub) + watch renewal (Wave D1)
+
+Optional. When unset, hosts rely on `POST /v1/grants/:id/sync` (poll) — that path remains supported.
+
+| Env | Purpose |
+|-----|---------|
+| `GMAIL_PUBSUB_TOPIC` | Full topic name `projects/PROJECT/topics/TOPIC` |
+| `GMAIL_PUSH_SECRET` | Shared secret for push endpoint (`?token=` or `X-InboxLink-Push-Secret`) |
+| `CRON_SECRET` | Bearer for `/v1/internal/cron/*` (Vercel Cron + GitHub Action) |
+
+**GCP setup (no secrets in git):**
+
+1. Create a Pub/Sub topic in the same GCP project as the Gmail OAuth client.
+2. Grant **Pub/Sub Publisher** on that topic to `gmail-api-push@system.gserviceaccount.com`.
+3. Create a **push** subscription whose endpoint is  
+   `https://<your-host>/v1/internal/gmail/push?token=<GMAIL_PUSH_SECRET>`.
+4. Set `GMAIL_PUBSUB_TOPIC` + `GMAIL_PUSH_SECRET` + `CRON_SECRET` in Vercel; redeploy.
+
+On Connect, InboxLink calls Gmail `users.watch` (best-effort). Watches expire within **≤7 days**; renew **daily**.
+
+| Route | Auth | Role |
+|-------|------|------|
+| `POST /v1/internal/gmail/push` | `GMAIL_PUSH_SECRET` | Decode Pub/Sub → `history.list` from cursor → upsert/delete → webhooks |
+| `GET\|POST /v1/internal/cron/renew-gmail-watches` | `CRON_SECRET` Bearer | Renew watches for all active Gmail grants |
+| `GET\|POST /v1/internal/cron/drain-sync-jobs` | `CRON_SECRET` Bearer | Process queued `sync_jobs` |
+
+Vercel `vercel.json` schedules drain every 5 minutes and renew at 06:00 UTC. Backup: [`.github/workflows/wave-d-cron.yml`](../.github/workflows/wave-d-cron.yml) (needs secrets `INBOXLINK_CRON_BASE_URL` + `CRON_SECRET`).
+
+**Fallback:** If push is silent, history returns **404**, or watch expired → `syncGmailGrant` re-bootstraps without crashing. Hosts can always `POST …/sync` (poll).
+
+## Async sync jobs (Wave D2)
+
+`POST /v1/grants/:id/sync` returns **202** + `{ jobId, status: "queued" }` (no longer waits for Gmail inline). Poll:
+
+```http
+GET /v1/grants/:id/sync/jobs/:jobId
+Authorization: Bearer <INBOXLINK_API_SECRET>
+```
+
+Jobs live in Postgres `sync_jobs` (MIT-only; Redis/BullMQ unused). Cron/`drain-sync-jobs` executes them and emits `sync.completed` / `grant.needs_reauth`. A best-effort deferred drain also runs after enqueue (may be cut short on cold serverless — cron is authoritative).
+
+## Gmail 429 and sync timeouts
+
+`POST /v1/grants/:grantId/sync` enqueues a job; Gmail work runs in cron drain / deferred invoke. Message list/get still talk to Google from the Vercel function. Typical failure modes:
+
+| Symptom | Likely cause | Mitigation |
+|---------|--------------|------------|
+| `502` `gmail_unavailable` with Gmail status **429** | Google quota / user-rate limit | Back off; reduce concurrent sync/list; retry later. Logs: `gmail_unavailable` + `gmailStatus: 429`. |
+| Job stuck `queued` | Cron not configured / `CRON_SECRET` mismatch | Set `CRON_SECRET`; confirm Vercel Cron or Actions hits drain route |
+| Function **timeout** during push/drain | Large mailbox / slow Gmail RTT vs Vercel `maxDuration` | `api/index.ts` / `vercel.json` set `maxDuration: 60`. Prefer incremental after bootstrap. |
+| Empty / stale list after Connect | Host listed before sync job completed, or expected live Gmail | Default `GET …/messages` is **store**; poll job status or wait for `sync.completed`, or use `?source=live`. |
+| Cold start + cache miss stampede | New isolate empty access-token cache | Expected; tokens re-refresh. Not a durability bug. |
+
+Do **not** raise Google quotas by embedding Production secrets in CI or this doc. If 429s persist under normal host load, investigate per-grant polling frequency on the host side first.
 
 ## OAuth callback failures
 
@@ -115,19 +172,6 @@ Browser HTML pages (not JSON) on `/v1/oauth/gmail/callback`:
 | Unknown OAuth state | Memory store / wrong instance / **state replay** | Require `store: postgres` before Connect; state is one-shot |
 
 Logs: look for `oauth_callback_failed` with a redacted `reason` code (never the authorization `code`).
-
-## Gmail 429 and sync timeouts
-
-Inline `POST /v1/grants/:grantId/sync` and message list/get talk to Google from the Vercel function. Typical failure modes:
-
-| Symptom | Likely cause | Mitigation |
-|---------|--------------|------------|
-| `502` `gmail_unavailable` with Gmail status **429** | Google quota / user-rate limit | Back off; reduce concurrent sync/list; retry later. Logs: `gmail_unavailable` + `gmailStatus: 429`. |
-| Function **timeout** during sync | Large mailbox / slow Gmail RTT vs Vercel `maxDuration` | Sync stays **inline**; `api/index.ts` / `vercel.json` set `maxDuration: 60`. Prefer incremental sync after bootstrap; avoid hammering `POST …/sync`. Bootstrap no longer wipe-then-caps the cache. |
-| Empty / stale list after Connect | Host listed before `POST …/sync`, or expected live Gmail | Default `GET …/messages` is **store**; run sync first, or use `?source=live`. Check `syncedAt` / `historyId` on store responses. |
-| Cold start + cache miss stampede | New isolate empty access-token cache | Expected; tokens re-refresh. Not a durability bug. |
-
-Do **not** raise Google quotas by embedding Production secrets in CI or this doc. If 429s persist under normal host load, investigate per-grant polling frequency on the host side first.
 
 ## Deploy smoke checklist
 

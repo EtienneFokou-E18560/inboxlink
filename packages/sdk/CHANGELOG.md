@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+### Async sync jobs (Wave D)
+
+`grants.sync` returns `202` `{ jobId, status: "queued" }`. Poll
+`grants.getSyncJob(grantId, jobId)` for `completed` / `failed`. Server emits
+`sync.completed` and (on Gmail push) `message.created`.
+
 ### Host webhook verify docs
 
 Documented server-delivered events (`grant.connected`, `grant.needs_reauth`,
-`sync.completed`) and how to use `webhooks.verify` against
+`sync.completed`, `message.created`) and how to use `webhooks.verify` against
 `X-InboxLink-Signature`. Delivery is configured on the InboxLink server via
 `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET`.
 

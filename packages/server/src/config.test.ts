@@ -61,4 +61,15 @@ describe("public URL and OAuth redirect", () => {
     assert.equal(off.webhookUrl, undefined);
     assert.equal(off.webhookSecret, undefined);
   });
+
+  it("loads Gmail Pub/Sub and cron secrets when set", () => {
+    const config = loadConfig({
+      GMAIL_PUBSUB_TOPIC: " projects/demo/topics/gmail-push ",
+      GMAIL_PUSH_SECRET: " push-secret ",
+      CRON_SECRET: " cron-secret ",
+    });
+    assert.equal(config.gmailPubsubTopic, "projects/demo/topics/gmail-push");
+    assert.equal(config.gmailPushSecret, "push-secret");
+    assert.equal(config.cronSecret, "cron-secret");
+  });
 });

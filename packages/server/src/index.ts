@@ -5,7 +5,7 @@ import { loadConfig } from "./config.js";
 import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
-import { createSyncQueue } from "./queue/sync-queue.js";
+import { createStoreSyncQueue } from "./queue/sync-queue.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import { createPostgresClient, PostgresJsExecutor } from "./db/sql.js";
 import { createRateLimiter } from "./rate-limit.js";
@@ -20,6 +20,7 @@ type AppBundle = {
   store: GrantStore;
   vault: MemoryTokenVault | PostgresTokenVault;
   storeKind: "memory" | "postgres";
+  queue: QueueHandle;
 };
 
 const postgresByUrl = new Map<string, { db: PgDatabase; store: PostgresStore }>();
@@ -27,7 +28,7 @@ const postgresByUrl = new Map<string, { db: PgDatabase; store: PostgresStore }>(
 /** Build the Hono app from env (no listen). Used by Node CLI and Vercel. */
 export function createAppFromEnv(
   env: NodeJS.ProcessEnv = process.env,
-  queue: QueueHandle | null = null,
+  queue?: QueueHandle | null,
 ): AppBundle {
   const config = loadConfig(env);
   const databaseUrl = config.databaseUrl?.trim();
@@ -37,6 +38,7 @@ export function createAppFromEnv(
     ? new PostgresTokenVault(opened.db, config.masterKey)
     : new MemoryTokenVault(config.masterKey);
   const storeKind = opened ? "postgres" : "memory";
+  const resolvedQueue = queue ?? createStoreSyncQueue(store);
   const gmail = new GmailAdapter({
     clientId: config.googleClientId,
     clientSecret: config.googleClientSecret,
@@ -54,7 +56,7 @@ export function createAppFromEnv(
     gmailScopes: config.gmailScopes,
     oauthRedirectUri: config.googleRedirectUri,
     storeKind,
-    queue,
+    queue: resolvedQueue,
     // Soft abuse guard for Connect + host APIs in both single and multi.
     rateLimiter: createRateLimiter({
       windowMs: config.rateLimitWindowMs,
@@ -65,10 +67,13 @@ export function createAppFromEnv(
       url: config.webhookUrl,
       secret: config.webhookSecret,
     }),
+    gmailPubsubTopic: config.gmailPubsubTopic,
+    gmailPushSecret: config.gmailPushSecret,
+    cronSecret: config.cronSecret,
   });
   // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).
   void store.deleteExpiredSessions().catch(() => {});
-  return { app, config, store, vault, storeKind };
+  return { app, config, store, vault, storeKind, queue: resolvedQueue };
 }
 
 function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresStore } {
@@ -103,9 +108,7 @@ export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
-  const config = loadConfig(env);
-  const queue = await createSyncQueue(config.redisUrl);
-  const { app, storeKind } = createAppFromEnv(env, queue);
+  const { app, config, storeKind, queue } = createAppFromEnv(env);
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, () => {
     log.info("server_listening", {
@@ -135,6 +138,7 @@ export {
   redactString,
 };
 export { syncGmailGrant } from "./sync/gmail-sync.js";
+export { createStoreSyncQueue, drainSyncJobs } from "./queue/sync-queue.js";
 export {
   createWebhookBus,
   deliverWebhookEvent,

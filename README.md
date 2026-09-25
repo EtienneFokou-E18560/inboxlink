@@ -17,7 +17,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap upserts via `messages.list` + profile `historyId` **without wiping** prior cache, then incremental `users.history.list` with bounded concurrent `getMessage` and a persisted watermark in `sync_cursors`. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect. Scheduled [production health smoke](.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh`.
 
@@ -114,7 +114,7 @@ curl -sS -H "Authorization: Bearer $INBOXLINK_API_SECRET" \
 ```
 
 Unauthenticated `GET /v1/schema.sql` on Production returns **401** — the DDL is not world-readable.
-Redis (`REDIS_URL`) is optional; leave unset so health reports `"queue":"disabled"`.
+Redis (`REDIS_URL`) is unused; durable sync uses Postgres `sync_jobs` (Wave D2). Health reports `"queue":"jobs"`.
 
 ### Env checklist (names only)
 
@@ -135,9 +135,12 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `INBOXLINK_RATE_LIMIT_WINDOW_MS` / `INBOXLINK_RATE_LIMIT_MAX` | Optional | Soft in-process abuse guard in multi (defaults 60000 / 120) |
 | `GMAIL_SCOPES` | Optional | Default readonly + openid email |
 | `PORT` / `HOST` | Local only | Not used on Vercel |
-| `REDIS_URL` | Optional | Queue stub |
+| `REDIS_URL` | Optional | Unused (Wave D2 uses Postgres `sync_jobs`) |
 | `INBOXLINK_WEBHOOK_URL` | Optional | Host callback for signed events; off unless secret also set |
 | `INBOXLINK_WEBHOOK_SECRET` | Optional | HMAC-SHA256 shared secret (`X-InboxLink-Signature: sha256=<hex>`) |
+| `GMAIL_PUBSUB_TOPIC` | Optional | Full Pub/Sub topic for Gmail `users.watch` (`projects/…/topics/…`) |
+| `GMAIL_PUSH_SECRET` | Optional | Shared secret for `/v1/internal/gmail/push` |
+| `CRON_SECRET` | Optional | Bearer for `/v1/internal/cron/*` (watch renew + job drain) |
 
 See [`.env.example`](.env.example) for placeholder shapes only.
 
@@ -216,7 +219,7 @@ const session = await il.createConnectSession({
   redirectUri: "http://127.0.0.1:9999/done", // your host callback
 });
 const { grantId } = await il.completeConnect({ publicToken });
-await il.grants.sync(grantId); // populate synced cache
+await il.grants.sync(grantId); // enqueue sync job (202); poll getSyncJob or webhook
 const { messages, syncedAt } = await il.messages.list(grantId, { limit: 20 });
 const { messages: live } = await il.messages.list(grantId, {
   source: "live",

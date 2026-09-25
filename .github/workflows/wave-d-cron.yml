@@ -1,0 +1,89 @@
+# Renew Gmail watches + drain sync jobs (Wave D)
+#
+# Requires repo secrets (never commit values):
+#   INBOXLINK_CRON_BASE_URL — Production origin (e.g. https://inboxlink-two.vercel.app)
+#   CRON_SECRET — same value as Vercel env CRON_SECRET
+#
+# Vercel Cron also hits these paths; this Action is a backup / non-Vercel deploy option.
+
+name: Wave D cron (watch renew + sync drain)
+
+on:
+  schedule:
+    # Daily watch renew (Google recommends renewing daily; watches expire ≤7 days)
+    - cron: "0 6 * * *"
+    # Drain sync jobs every 15 minutes as a backup to Vercel */5 cron
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which cron to run"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - renew-watches
+          - drain-sync-jobs
+
+jobs:
+  cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve targets
+        id: targets
+        run: |
+          set -euo pipefail
+          BASE="${{ secrets.INBOXLINK_CRON_BASE_URL }}"
+          SECRET="${{ secrets.CRON_SECRET }}"
+          if [ -z "${BASE}" ] || [ -z "${SECRET}" ]; then
+            echo "Skipping: set secrets INBOXLINK_CRON_BASE_URL and CRON_SECRET to enable."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "base=${BASE%/}" >> "$GITHUB_OUTPUT"
+
+          JOB="${{ github.event.inputs.job }}"
+          if [ -z "${JOB}" ]; then
+            # schedule: renew at 06:00 UTC, drain otherwise
+            HOUR=$(date -u +%H)
+            MIN=$(date -u +%M)
+            if [ "$HOUR" = "06" ] && [ "$MIN" = "00" ]; then
+              JOB=renew-watches
+            else
+              JOB=drain-sync-jobs
+            fi
+          fi
+          echo "job=${JOB}" >> "$GITHUB_OUTPUT"
+
+      - name: Call cron endpoints
+        if: steps.targets.outputs.skip != 'true'
+        env:
+          BASE: ${{ steps.targets.outputs.base }}
+          SECRET: ${{ secrets.CRON_SECRET }}
+          JOB: ${{ steps.targets.outputs.job }}
+        run: |
+          set -euo pipefail
+          call() {
+            local path="$1"
+            echo "POST ${BASE}${path}"
+            code=$(curl -sS -o /tmp/cron-body.json -w "%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer ${SECRET}" \
+              -H "Accept: application/json" \
+              "${BASE}${path}")
+            echo "HTTP ${code}"
+            head -c 500 /tmp/cron-body.json || true
+            echo
+            test "${code}" = "200"
+          }
+          case "${JOB}" in
+            renew-watches) call /v1/internal/cron/renew-gmail-watches ;;
+            drain-sync-jobs) call /v1/internal/cron/drain-sync-jobs ;;
+            both)
+              call /v1/internal/cron/renew-gmail-watches
+              call /v1/internal/cron/drain-sync-jobs
+              ;;
+            *) echo "unknown job ${JOB}"; exit 1 ;;
+          esac

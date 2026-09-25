@@ -51,13 +51,13 @@ describe("probeHealth", () => {
       store: new MemoryStore(),
       mode: "multi",
       storeKind: "postgres",
-      queue: { enqueue: async () => {}, close: async () => {} },
+      queue: { enqueue: async () => ({ jobId: "sjob_test" }), close: async () => {} },
     });
     assert.equal(result.status, 200);
     assert.equal(result.body.ok, true);
     assert.equal(result.body.store, "postgres");
     assert.equal(result.body.mode, "multi");
-    assert.equal(result.body.queue, "stub");
+    assert.equal(result.body.queue, "jobs");
     assert.equal(result.body.warning, undefined);
     assert.equal(result.body.guidance, undefined);
   });
