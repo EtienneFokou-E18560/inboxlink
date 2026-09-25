@@ -8,8 +8,8 @@
  *   pnpm --filter @inboxlink/core --filter @inboxlink/sdk build
  *   export INBOXLINK_BASE_URL=https://inboxlink-two.vercel.app
  *   export GRANT_ID=grant_…
- *   # Production is single-mode; any non-empty secret is fine for the SDK header:
- *   export INBOXLINK_API_SECRET=unused-in-single-mode
+ *   # Production is multi — Bearer / apiSecret required (never commit; never browsers):
+ *   export INBOXLINK_API_SECRET=…
  *   node examples/sdk-gmail-self-run.mjs
  *
  * Never log refresh tokens or public_tokens. This script prints body *lengths* only.
@@ -17,11 +17,18 @@
 import { InboxLink, InboxLinkApiError } from "../packages/sdk/dist/index.js";
 
 const baseUrl = process.env.INBOXLINK_BASE_URL ?? "https://inboxlink-two.vercel.app";
-const apiSecret = process.env.INBOXLINK_API_SECRET ?? "unused-in-single-mode";
+const apiSecret = process.env.INBOXLINK_API_SECRET?.trim();
 const grantId = process.env.GRANT_ID;
 
 if (!grantId?.trim()) {
   console.error("FAIL: set GRANT_ID to an active Gmail grant id");
+  process.exit(1);
+}
+
+if (!apiSecret) {
+  console.error(
+    "FAIL: set INBOXLINK_API_SECRET (Production is multi; required for host APIs)",
+  );
   process.exit(1);
 }
 

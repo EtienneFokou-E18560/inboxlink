@@ -29,8 +29,9 @@ export type InboxLinkClientOptions = {
   baseUrl?: string;
   /**
    * Bearer secret (`INBOXLINK_API_SECRET`).
-   * Required only when the server runs `INBOXLINK_MODE=multi`.
-   * Omit for Production / `single` mode — the Authorization header is not sent.
+   * Required when the server runs `INBOXLINK_MODE=multi` (including Production).
+   * Omit only for local/`single` servers — then no Authorization header is sent.
+   * Never ship this value to browsers.
    */
   apiSecret?: string;
   fetch?: typeof fetch;
@@ -42,19 +43,25 @@ export type ListMessagesOptions = {
   /** Opaque pagination cursor from a previous `nextCursor`. */
   cursor?: string;
   /**
+   * Read model source. Default (omit / `"store"`) lists the synced cache.
+   * Pass `"live"` to hit Gmail `users.messages.list` (filters apply only here).
+   */
+  source?: "store" | "live";
+  /**
    * Gmail search query (`q`), e.g. `is:unread newer_than:7d`.
    * Combined (AND) with structured `from` / `to` / `subject` when those are set.
+   * Only applied when `source: "live"`.
    */
   q?: string;
-  /** Gmail label id(s), e.g. `INBOX`, `UNREAD` → Gmail `labelIds`. */
+  /** Gmail label id(s), e.g. `INBOX`, `UNREAD` → Gmail `labelIds`. Live only. */
   label?: string | string[];
-  /** Match From header (Gmail `from:`). */
+  /** Match From header (Gmail `from:`). Live only. */
   from?: string;
-  /** Match To header (Gmail `to:`). */
+  /** Match To header (Gmail `to:`). Live only. */
   to?: string;
-  /** Match Subject (Gmail `subject:`). */
+  /** Match Subject (Gmail `subject:`). Live only. */
   subject?: string;
-  /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). */
+  /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). Live only. */
   includeSpamTrash?: boolean;
 };
 
@@ -73,15 +80,30 @@ export type LinkSessionResult = {
 export type ListMessagesResult = {
   messages: Message[];
   nextCursor?: string;
+  /** `"store"` (synced cache, default) or `"live"` (Gmail list). */
+  source?: "store" | "live";
+  /** When `source` is store: last sync cursor write time (`sync_cursors.updated_at`). */
+  syncedAt?: string;
+  /** When `source` is store: Gmail history watermark from the last successful sync. */
+  historyId?: string;
 };
 
 export type SyncResult = {
+  /** Present when the server returns 202 Accepted (async job). */
+  jobId?: string;
   grantId: string;
   status: string;
-  mode: string;
+  mode?: string;
   historyId?: string;
   upserted?: number;
   deleted?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  kind?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
 };
 
 export type SyncOptions = {
@@ -322,11 +344,23 @@ class GrantsApi {
     return this.http.request("DELETE", `v1/grants/${encodeURIComponent(grantId)}`);
   }
 
-  /** Run history sync (bootstrap / incremental / full). Maps to `POST /v1/grants/:grantId/sync`. */
+  /**
+   * Enqueue Gmail history sync. Maps to `POST /v1/grants/:grantId/sync`.
+   * Returns `202` body `{ jobId, grantId, status: "queued" }`. Poll
+   * {@link getSyncJob} (or wait for `sync.completed` webhook) for results.
+   */
   sync(grantId: string, opts?: SyncOptions): Promise<SyncResult> {
     const body =
       opts?.mode && opts.mode !== "incremental" ? { mode: opts.mode } : undefined;
     return this.http.request("POST", `v1/grants/${encodeURIComponent(grantId)}/sync`, body);
+  }
+
+  /** Poll async sync job status. Maps to `GET /v1/grants/:grantId/sync/jobs/:jobId`. */
+  getSyncJob(grantId: string, jobId: string): Promise<SyncResult> {
+    return this.http.request(
+      "GET",
+      `v1/grants/${encodeURIComponent(grantId)}/sync/jobs/${encodeURIComponent(jobId)}`,
+    );
   }
 }
 
@@ -336,11 +370,14 @@ class MessagesApi {
   /**
    * List normalized messages for a grant.
    * Maps to `GET /v1/grants/:grantId/messages`.
+   * Default `source` is the synced store cache; pass `source: "live"` for Gmail list + filters.
+   * Store responses may include `syncedAt` / `historyId` freshness fields.
    */
   list(grantId: string, opts?: ListMessagesOptions): Promise<ListMessagesResult> {
     const q = new URLSearchParams();
     if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
     if (opts?.cursor) q.set("cursor", opts.cursor);
+    if (opts?.source) q.set("source", opts.source);
     if (opts?.q) q.set("q", opts.q);
     if (opts?.from) q.set("from", opts.from);
     if (opts?.to) q.set("to", opts.to);

@@ -20,7 +20,7 @@ Copyable curl and TypeScript sketches live under [`examples/host-integration/`](
 | Google OAuth (`GOOGLE_CLIENT_ID` / `SECRET` / redirect) | **InboxLink server only** | Hosts **never** register a Google client or set `GOOGLE_*`. |
 | Postgres / vault / `INBOXLINK_MASTER_KEY` | **InboxLink server only** | Production already has these. |
 | InboxLink base URL | Host (optional) | SDK defaults to Production `https://inboxlink-two.vercel.app`. Override for local/self-host. |
-| API secret | Host **only if** server is `multi` | Production is currently `single` — omit `apiSecret`. |
+| API secret | Host (Production / any `multi` server) | Production runs `INBOXLINK_MODE=multi`. Set `INBOXLINK_API_SECRET` and pass SDK `apiSecret`. Never ship the secret to browsers. |
 | Host redirect URI | Host | Your callback that receives `?public_token=…` (not the Google OAuth callback). |
 
 Minimal host env: [`examples/host-integration/host.env.example`](../examples/host-integration/host.env.example).
@@ -52,8 +52,10 @@ With `@inboxlink/sdk` (recommended):
 ```ts
 import { InboxLink } from "@inboxlink/sdk";
 
-// Production + single mode: zero config
-const il = new InboxLink();
+// Production is multi — apiSecret required (server-side only; never in browsers)
+const il = new InboxLink({
+  apiSecret: process.env.INBOXLINK_API_SECRET,
+});
 
 const session = await il.createConnectSession({
   externalUserId: user.id,
@@ -67,6 +69,7 @@ const session = await il.createConnectSession({
 ```http
 POST /v1/link/sessions HTTP/1.1
 Host: inboxlink-two.vercel.app
+Authorization: Bearer <INBOXLINK_API_SECRET>
 Content-Type: application/json
 
 {
@@ -76,7 +79,7 @@ Content-Type: application/json
 }
 ```
 
-In `multi` mode, also send `Authorization: Bearer <INBOXLINK_API_SECRET>`.
+Unauthenticated session create against Production returns `401`. `GET /health` stays public (expect `"mode":"multi"`, `"store":"postgres"`).
 
 Response (shape):
 
@@ -130,19 +133,82 @@ The public token is **consumed once**. Persist `grantId` against your user. Late
 ### 4. Use the grant (messages)
 
 ```ts
-const page = await il.messages.list(grantId, {
+await il.grants.sync(grantId); // enqueue (202 + jobId); poll getSyncJob or wait for webhook
+const page = await il.messages.list(grantId, { limit: 25 });
+// page.syncedAt / page.historyId reflect last sync cursor when source=store
+const live = await il.messages.list(grantId, {
+  source: "live",
   limit: 25,
   q: "is:unread newer_than:7d",
   label: ["INBOX"],
   from: "ada@example.com",
 });
 const { message } = await il.messages.get(grantId, page.messages[0]!.id);
-await il.grants.sync(grantId);
+void live;
 ```
 
-List filters (all optional): `q` (Gmail search), `from` / `to` / `subject` (composed into `q`), `label` (→ Gmail `labelIds`), `includeSpamTrash`. Same params work on the HTTP API as query strings (`label` may be repeated). List returns metadata-normalized rows; call `messages.get` for body and attachment metadata.
+Default list reads the **synced store**. Pass `source: "live"` for live Gmail + filters: `q`, `from` / `to` / `subject`, `label`, `includeSpamTrash`. Same params work on the HTTP API as query strings (`label` may be repeated). Call `messages.get` for body and attachment metadata.
 
 Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.revoke(grantId)`.
+
+---
+
+## Host webhooks (signed events)
+
+When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set on the InboxLink server, the host receives POSTs for:
+
+| Event | When |
+|-------|------|
+| `grant.connected` | OAuth Connect succeeds and a grant is vaulted |
+| `grant.needs_reauth` | Refresh / Gmail auth fails and the grant is marked `needs_reauth` |
+| `sync.completed` | Sync job completes successfully (API drain, cron, or Gmail push apply) |
+| `message.created` | New message upserted from Gmail Pub/Sub push apply |
+
+Delivery is at-least-once with bounded retries (retry on 408/429/5xx; drop on hard 4xx). Failures never break Connect redirects or sync HTTP responses.
+
+### Async sync API
+
+`POST /v1/grants/:id/sync` returns **202** `{ jobId, status: "queued" }`. Poll `GET /v1/grants/:id/sync/jobs/:jobId` (or `il.grants.getSyncJob`) for `completed` / `failed`. See [ops-runbook](./ops-runbook.md#async-sync-jobs-wave-d2).
+
+### Payload + verify
+
+```http
+POST /your/webhook
+Content-Type: application/json
+X-InboxLink-Signature: sha256=<hex>
+X-InboxLink-Event: grant.connected
+```
+
+```json
+{
+  "id": "evt_…",
+  "type": "grant.connected",
+  "createdAt": "2026-09-25T00:00:00.000Z",
+  "data": {
+    "grantId": "grant_…",
+    "tenantId": "default",
+    "externalUserId": "user-1",
+    "provider": "gmail",
+    "email": "user@gmail.com"
+  }
+}
+```
+
+Host verification (same secret as `INBOXLINK_WEBHOOK_SECRET`):
+
+```ts
+import { InboxLink } from "@inboxlink/sdk";
+
+const il = new InboxLink({ apiSecret: process.env.INBOXLINK_API_SECRET });
+const rawBody = await request.text(); // must be the exact raw bytes
+const ok = il.webhooks.verify({
+  payload: rawBody,
+  signatureHeader: request.headers.get("x-inboxlink-signature") ?? "",
+  secret: process.env.INBOXLINK_WEBHOOK_SECRET!,
+});
+```
+
+Operators set URL + secret on the **InboxLink** service (see `.env.example`). Hosts only need the shared secret to verify — not Google / vault / Postgres env.
 
 ---
 
@@ -150,37 +216,24 @@ Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.
 
 | `INBOXLINK_MODE` | Host Bearer required? |
 |------------------|------------------------|
-| `single` (default / current Production) | No — omit `apiSecret` |
-| `multi` | Yes — `new InboxLink({ apiSecret: "…" })` |
+| `multi` (current Production) | Yes — `INBOXLINK_API_SECRET` + `new InboxLink({ apiSecret })` |
+| `single` (local / self-host default) | No — omit `apiSecret` |
 
-OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; they are bound by session state, not the API secret.
-
----
-
-## Optional: webhooks / events (not delivered yet)
-
-v0 prepares webhook **verification** but does **not** POST events to hosts yet.
-
-What exists today:
-
-- Env placeholder `INBOXLINK_WEBHOOK_SECRET` (server `.env.example`)
-- Tenant column `webhook_secret` in the schema stub
-- SDK helper `InboxLink.webhooks.verify({ payload, signatureHeader, secret })` — HMAC-SHA256 over the raw body; header form `sha256=<hex>`
-
-Until delivery lands, poll `GET /v1/grants` / rely on redirect + exchange. Do not invent a webhook receiver contract that this repo does not implement.
+OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; they are bound by session state, not the API secret. `GET /health` is public on every mode.
 
 ---
 
 ## Host checklist
 
-- [ ] Install SDK (npm when published; otherwise workspace / git dependency)  
-- [ ] `new InboxLink()` against Production, or pass `baseUrl` for local  
+- [ ] Install SDK (`npm i @inboxlink/sdk`, or workspace / git dependency)  
+- [ ] Against Production: `new InboxLink({ apiSecret })` with `INBOXLINK_API_SECRET` (or pass `baseUrl` + secret for local `multi`)  
 - [ ] Implement **one** host redirect route that calls `completeConnect`  
 - [ ] Store only `grantId` (+ your `externalUserId` mapping), never refresh tokens  
 - [ ] Exchange `public_token` server-side, once  
 - [ ] Handle missing/invalid token on the redirect route  
 - [ ] Handle `needs_reauth` / `grant_inactive` from messages by sending the user through Connect again  
-- [ ] Keep API secrets out of the browser bundle  
+- [ ] Optional: receive webhooks — set `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET` on InboxLink; verify with `webhooks.verify`  
+- [ ] Never ship `INBOXLINK_API_SECRET` / `apiSecret` to browsers  
 - [ ] Do **not** set `GOOGLE_*`, Postgres, or vault keys in the host app  
 - [ ] Do **not** add a dependency from InboxLink → your host app (or career-workspace)
 

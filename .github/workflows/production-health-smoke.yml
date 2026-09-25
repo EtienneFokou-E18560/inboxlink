@@ -1,0 +1,36 @@
+# Scheduled Production health smoke — fails if ok≠true or store≠postgres.
+# No Production secrets required (/health is public). Optional repo variable:
+#   INBOXLINK_PRODUCTION_URL  (defaults to https://inboxlink-two.vercel.app)
+name: Production health smoke
+
+on:
+  schedule:
+    # Every 6 hours, jittered off the hour
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-health-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Smoke Production health
+        env:
+          # Public URL only — never put DATABASE_URL / OAuth / master key here
+          BASE_URL: ${{ vars.INBOXLINK_PRODUCTION_URL }}
+        run: |
+          set -euo pipefail
+          BASE="${BASE_URL:-https://inboxlink-two.vercel.app}"
+          echo "Smoke target: ${BASE}"
+          bash scripts/smoke-health.sh "$BASE"

@@ -6,4 +6,4 @@
  */
 
 export type * from "./types.js";
-export { sealSecret, openSecret, randomToken, newId } from "./crypto.js";
+export { sealSecret, openSecret, randomToken, createPkcePair, newId } from "./crypto.js";

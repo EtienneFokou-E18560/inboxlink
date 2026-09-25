@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { unescapeHtml } from "@inboxlink/connect-ui";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createAppFromEnv } from "./index.js";
@@ -83,15 +84,15 @@ function pair(db: PgDatabase) {
     storeKind: "postgres",
     queue: null,
   });
-  return { app, vault };
+  return { app, vault, store };
 }
 
 function connectAuthUrl(html: string): URL {
-  const href = (html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1]
-    ?? html.match(/href="([^"]+)"[^>]*data-testid="connect-cta"/)?.[1]
-    ?? "")
-    .replaceAll("&amp;", "&")
-    .replaceAll("&quot;", '"');
+  const href = unescapeHtml(
+    html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1]
+      ?? html.match(/href="([^"]+)"[^>]*data-testid="connect-cta"/)?.[1]
+      ?? "",
+  );
   return new URL(href);
 }
 
@@ -134,13 +135,21 @@ describe("shared Postgres store across instances", () => {
 
     const connect = await second.app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
-    const state = connectAuthUrl(await connect.text()).searchParams.get("state");
+    const authUrl = connectAuthUrl(await connect.text());
+    const state = authUrl.searchParams.get("state");
     assert.ok(state);
+    assert.ok(authUrl.searchParams.get("code_challenge"));
+    assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
+    const pending = await first.store.findSessionByOAuthState(state);
+    assert.ok(pending?.codeVerifier);
 
     const callback = await first.app.request(
       `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     );
     assert.equal(callback.status, 302);
+    const afterCallback = await second.store.getSession(pending.id);
+    assert.equal(afterCallback?.codeVerifier, undefined);
+    assert.equal(afterCallback?.oauthState, undefined);
     const redirected = new URL(callback.headers.get("location") ?? "");
     const publicToken = redirected.searchParams.get("public_token");
     assert.ok(publicToken);
@@ -181,6 +190,46 @@ describe("shared Postgres store across instances", () => {
     const after = await first.app.request("/v1/grants?externalUserId=user-1");
     const remaining = (await after.json()) as { grants: unknown[] };
     assert.deepEqual(remaining.grants, []);
+
+    await pg.close();
+  });
+
+  it("consumes oauth_state once and GCs expired link_sessions", async () => {
+    const pg = new PGlite();
+    const db = new PgDatabase(new PgliteExecutor(pg));
+    const store = new PostgresStore(db);
+    await store.ready();
+
+    const live = await store.createSession({
+      tenantId: "default",
+      externalUserId: "live",
+      redirectUri: "http://localhost:9999/done",
+      products: ["messages"],
+      ttlMs: 60_000,
+    });
+    live.oauthState = "pg-state-1";
+    live.codeVerifier = "pg-verifier-1";
+    await store.saveSession(live);
+
+    const claimed = await store.consumeOAuthState("pg-state-1");
+    assert.ok(claimed);
+    assert.equal(claimed.codeVerifier, "pg-verifier-1");
+    assert.equal(claimed.oauthState, undefined);
+    assert.equal(await store.consumeOAuthState("pg-state-1"), undefined);
+
+    const expired = await store.createSession({
+      tenantId: "default",
+      externalUserId: "gone",
+      redirectUri: "http://localhost:9999/done",
+      products: ["messages"],
+      ttlMs: 1,
+    });
+    expired.expiresAt = new Date(Date.now() - 120_000).toISOString();
+    await store.saveSession(expired);
+    const removed = await store.deleteExpiredSessions();
+    assert.ok(removed >= 1);
+    assert.ok(await store.getSession(live.id));
+    assert.equal(await store.getSession(expired.id), undefined);
 
     await pg.close();
   });

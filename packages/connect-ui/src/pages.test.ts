@@ -23,6 +23,8 @@ describe("renderConnectPage", () => {
     assert.match(html, /datetime="2099-01-15T12:00:00\.000Z"/);
     assert.match(html, /This link expires/);
     assert.match(html, /host never holds your refresh token/);
+    assert.match(html, /Content-Security-Policy/);
+    assert.match(html, /default-src 'none'/);
     assert.doesNotMatch(html, /Stub Connect UI/);
   });
 });
@@ -44,6 +46,15 @@ describe("renderConnectErrorPage", () => {
     assert.match(html, /Google did not accept the authorization/);
     assert.match(html, /exact redirect/);
     assert.equal(connectErrorStatus("oauth_exchange"), 400);
+  });
+
+  it("prompts re-consent when Google omits the refresh token", () => {
+    const html = renderConnectErrorPage({ kind: "oauth_missing_refresh" });
+    assert.match(html, /Google did not return a refresh token/);
+    assert.match(html, /approve Google access again/i);
+    assert.match(html, /No grant was created/);
+    assert.match(html, /role="alert"/);
+    assert.equal(connectErrorStatus("oauth_missing_refresh"), 400);
   });
 
   it("escapes provider error text", () => {

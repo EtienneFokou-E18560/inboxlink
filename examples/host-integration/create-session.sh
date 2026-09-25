@@ -5,12 +5,17 @@ set -euo pipefail
 
 # Default to documented Production. Override for local InboxLink.
 BASE_URL="${INBOXLINK_BASE_URL:-https://inboxlink-two.vercel.app}"
-# Optional — only required when the server runs INBOXLINK_MODE=multi.
+# Required for Production (multi) and any multi server. Optional for local single.
 API_SECRET="${INBOXLINK_API_SECRET:-}"
 EXTERNAL_USER_ID="${EXTERNAL_USER_ID:-host-user-1}"
 # Your host's post-Connect callback — InboxLink appends public_token & link_token.
 # Use a URL you control (not example.com). Google OAuth redirect stays on InboxLink.
 REDIRECT_URI="${REDIRECT_URI:-http://127.0.0.1:9999/done}"
+
+if [[ -z "$API_SECRET" && "$BASE_URL" == *"inboxlink-two.vercel.app"* ]]; then
+  echo "FAIL: Production is multi — set INBOXLINK_API_SECRET (never commit; never browsers)." >&2
+  exit 1
+fi
 
 BODY=$(printf '{"externalUserId":"%s","redirectUri":"%s","products":["messages"]}' \
   "$EXTERNAL_USER_ID" "$REDIRECT_URI")

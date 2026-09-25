@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
-import { newId, randomToken } from "@inboxlink/core";
+import { createPkcePair, newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
 import {
   ImapAdapter,
@@ -33,9 +33,18 @@ import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
-import { syncGmailGrant } from "../sync/gmail-sync.js";
+import { getAccessTokenCache } from "../access-token-cache.js";
+import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
+import { applyGmailPushNotification, parsePubSubPushBody } from "../sync/gmail-push.js";
+import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watch.js";
+import { drainSyncJobs } from "../queue/sync-queue.js";
 import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
+import {
+  emitWebhookSafe,
+  type WebhookBus,
+} from "../webhooks/deliver.js";
+import { timingSafeEqual } from "node:crypto";
 
 export type AppEnv = {
   Variables: {
@@ -76,6 +85,17 @@ export type CreateAppOptions = {
    * Also drives browser CORS (never `*`) together with `publicBaseUrl`.
    */
   allowedRedirectOrigins?: string[] | null;
+  /**
+   * Outbound host webhook bus (Wave C). Omit / null = no delivery.
+   * Failures must never fail Connect or sync HTTP responses.
+   */
+  webhooks?: WebhookBus | null;
+  /** Full Pub/Sub topic for Gmail users.watch (`GMAIL_PUBSUB_TOPIC`). */
+  gmailPubsubTopic?: string;
+  /** Shared secret for Pub/Sub push verification (`GMAIL_PUSH_SECRET`). */
+  gmailPushSecret?: string;
+  /** Bearer for internal cron routes (`CRON_SECRET`). */
+  cronSecret?: string;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -109,6 +129,10 @@ export function createApp(opts: CreateAppOptions) {
     await next();
     const path = c.req.path;
     const status = c.res.status;
+    const contentType = c.res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html")) {
+      applyHtmlSecurityHeaders(c.res.headers);
+    }
     if (isHealthPath(path) && status < 400) return;
     log.info("http_request", {
       method: c.req.method,
@@ -161,13 +185,16 @@ export function createApp(opts: CreateAppOptions) {
   // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
   mountDocsHub(app);
 
-  app.get("/v1/schema.sql", (c) =>
-    c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
-  );
-
   app.use("/v1/*", async (c, next) => {
     // OAuth browser callback must remain public (state-bound).
     if (c.req.path.startsWith("/v1/oauth/")) {
+      return next();
+    }
+    // Pub/Sub push + cron use their own secrets (not tenant Bearer).
+    if (
+      c.req.path.startsWith("/v1/internal/gmail/push") ||
+      c.req.path.startsWith("/v1/internal/cron/")
+    ) {
       return next();
     }
     if (c.req.path.startsWith("/v1/connect/")) {
@@ -207,6 +234,15 @@ export function createApp(opts: CreateAppOptions) {
     c.set("tenantId", tenantId);
     return next();
   });
+
+  /**
+   * Schema dump for operators. Behind the same `/v1/*` auth as host APIs —
+   * Bearer required in `multi` (Production) so `token_vault` / session DDL
+   * is not world-readable.
+   */
+  app.get("/v1/schema.sql", (c) =>
+    c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
+  );
 
   app.post("/v1/link/sessions", async (c) => {
     const body = (await c.req.json()) as {
@@ -292,13 +328,16 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
     const state = randomToken(16);
+    const { codeVerifier, codeChallenge } = createPkcePair();
     session.oauthState = state;
+    session.codeVerifier = codeVerifier;
     await opts.store.saveSession(session);
     const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
       redirectUri,
       scopes: opts.gmailScopes,
+      codeChallenge,
     });
     return c.html(
       renderConnectPage({
@@ -429,8 +468,8 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_missing"),
       );
     }
-    const session = await opts.store.findSessionByOAuthState(state);
-    if (!session || isExpired(session.expiresAt)) {
+    const session = await opts.store.consumeOAuthState(state);
+    if (!session) {
       log.warn("oauth_callback_failed", {
         reason: "unknown_oauth_state",
         store: opts.storeKind ?? "memory",
@@ -443,7 +482,11 @@ export function createApp(opts: CreateAppOptions) {
     const redirectUri = oauthRedirectUri(opts);
     let tokens;
     try {
-      tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
+      tokens = await opts.gmail.exchangeAuthorizationCode({
+        code,
+        redirectUri,
+        codeVerifier: session.codeVerifier,
+      });
     } catch (err) {
       const reason = googleErrorCode(err);
       log.warn("oauth_callback_failed", { reason, store: opts.storeKind ?? "memory" });
@@ -453,6 +496,17 @@ export function createApp(opts: CreateAppOptions) {
           detail: oauthExchangeHint(reason, redirectUri),
         }),
         connectErrorStatus("oauth_exchange"),
+      );
+    }
+    const refreshToken = tokens.refreshToken;
+    if (!refreshToken) {
+      log.warn("oauth_callback_failed", {
+        reason: "missing_refresh_token",
+        store: opts.storeKind ?? "memory",
+      });
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_missing_refresh" }),
+        connectErrorStatus("oauth_missing_refresh"),
       );
     }
     const grantId = newId("grant");
@@ -470,12 +524,10 @@ export function createApp(opts: CreateAppOptions) {
     };
     await opts.store.putGrant(grant);
     try {
-      if (tokens.refreshToken) {
-        await opts.vault.seal(tokens.refreshToken, {
-          grantId,
-          tenantId: session.tenantId,
-        });
-      }
+      await opts.vault.seal(refreshToken, {
+        grantId,
+        tenantId: session.tenantId,
+      });
     } catch {
       await opts.store.deleteGrant(grantId, session.tenantId);
       log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });
@@ -485,6 +537,7 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
     session.oauthState = undefined;
+    session.codeVerifier = undefined;
     const publicToken = randomToken(24);
     session.status = "completed";
     session.grantId = grantId;
@@ -497,11 +550,43 @@ export function createApp(opts: CreateAppOptions) {
       store: opts.storeKind ?? "memory",
     });
 
+    // Host webhook: grant.connected (awaited but never fails Connect).
+    await emitWebhookSafe(opts.webhooks, "grant.connected", {
+      grantId,
+      tenantId: session.tenantId,
+      externalUserId: session.externalUserId,
+      provider: "gmail",
+      email: grant.email,
+    });
+
+    // Gmail push watch (best-effort; poll/sync remains the fallback).
+    await startOrRenewGmailWatch({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      grant,
+      topicName: opts.gmailPubsubTopic,
+    });
+
+    // Enqueue bootstrap sync job (drained by cron / deferred invoke).
     if (opts.queue) {
-      await opts.queue.enqueue({
+      const { jobId } = await opts.queue.enqueue({
         grantId,
         tenantId: session.tenantId,
         kind: "bootstrap",
+        forceBootstrap: true,
+      });
+      void drainSyncJobs({
+        store: opts.store,
+        vault: opts.vault,
+        gmail: opts.gmail,
+        webhooks: opts.webhooks,
+        limit: 1,
+      }).catch((err) => {
+        log.warn("sync_drain_after_connect_failed", {
+          jobId,
+          error: err instanceof Error ? err.message : "unknown",
+        });
       });
     }
 
@@ -538,6 +623,7 @@ export function createApp(opts: CreateAppOptions) {
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     await opts.vault.destroy(grantId);
+    getAccessTokenCache().invalidate(grantId);
     await opts.store.deleteGrant(grantId, tenantId);
     await opts.store.deleteMessages(grantId);
     return c.body(null, 204);
@@ -562,6 +648,37 @@ export function createApp(opts: CreateAppOptions) {
     const ready = await readyGmailGrant(opts, grantId, tenantId);
     if (!ready.ok) return c.json({ error: ready.error }, ready.status);
 
+    const sourceRaw = (c.req.query("source") ?? "store").trim().toLowerCase();
+    if (sourceRaw !== "store" && sourceRaw !== "live") {
+      return c.json({ error: "invalid_source" }, 400);
+    }
+    const source = sourceRaw as "store" | "live";
+
+    if (source === "store") {
+      const offset = parseStoreOffset(cursor);
+      if (offset === null) return c.json({ error: "invalid_cursor" }, 400);
+
+      const all = await opts.store.listMessages(grantId);
+      // Newest first for the synced read model (store may keep ASC insertion order).
+      const sorted = [...all].sort((a, b) => {
+        const ta = Date.parse(a.receivedAt) || 0;
+        const tb = Date.parse(b.receivedAt) || 0;
+        if (tb !== ta) return tb - ta;
+        return a.providerMessageId.localeCompare(b.providerMessageId);
+      });
+      const page = sorted.slice(offset, offset + limit);
+      const nextOffset = offset + page.length;
+      const nextCursor = nextOffset < sorted.length ? String(nextOffset) : undefined;
+      const syncCursor = await opts.store.getSyncCursor(grantId);
+      return c.json({
+        messages: page,
+        nextCursor,
+        source: "store",
+        syncedAt: syncCursor?.updatedAt,
+        historyId: syncCursor?.value,
+      });
+    }
+
     const parsedFilters = parseMessageListFilters({
       q: c.req.query("q") ?? undefined,
       from: c.req.query("from") ?? undefined,
@@ -585,9 +702,13 @@ export function createApp(opts: CreateAppOptions) {
         labelIds: parsedFilters.filters.labelIds,
         includeSpamTrash: parsedFilters.filters.includeSpamTrash,
       });
-      return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+      return c.json({
+        messages: page.messages,
+        nextCursor: page.nextCursor,
+        source: "live",
+      });
     } catch (err) {
-      return gmailReadError(opts.store, ready.grant, err);
+      return gmailReadError(opts, ready.grant, err);
     }
   });
 
@@ -615,7 +736,7 @@ export function createApp(opts: CreateAppOptions) {
       if (err instanceof GmailApiError && err.status === 404) {
         return c.json({ error: "not_found" }, 404);
       }
-      return gmailReadError(opts.store, ready.grant, err);
+      return gmailReadError(opts, ready.grant, err);
     }
   });
 
@@ -638,55 +759,148 @@ export function createApp(opts: CreateAppOptions) {
       }
     }
 
-    // Inline sync (no Redis). Optional queue enqueue is fire-and-forget only.
-    if (opts.queue) {
-      await opts.queue.enqueue({
-        grantId,
-        tenantId: grant.tenantId,
-        kind: forceBootstrap ? "bootstrap" : "incremental",
-      });
-    }
+    const enqueued = opts.queue
+      ? await opts.queue.enqueue({
+          grantId,
+          tenantId: grant.tenantId,
+          kind: forceBootstrap ? "bootstrap" : "incremental",
+          forceBootstrap,
+        })
+      : {
+          jobId: (
+            await opts.store.enqueueSyncJob({
+              grantId,
+              tenantId: grant.tenantId,
+              kind: forceBootstrap ? "bootstrap" : "incremental",
+              forceBootstrap,
+            })
+          ).id,
+        };
 
-    const result = await syncGmailGrant({
+    // Best-effort deferred drain so local/demo don't wait solely on cron.
+    void drainSyncJobs({
       store: opts.store,
       vault: opts.vault,
       gmail: opts.gmail,
-      grant,
-      forceBootstrap,
+      webhooks: opts.webhooks,
+      limit: 3,
+    }).catch((err) => {
+      log.warn("sync_drain_deferred_failed", {
+        jobId: enqueued.jobId,
+        error: err instanceof Error ? err.message : "unknown",
+      });
     });
 
-    if (result.status === "needs_reauth") {
-      return c.json(
-        {
-          grantId,
-          status: "needs_reauth",
-          mode: result.mode,
-          error: result.error ?? "needs_reauth",
-        },
-        409,
-      );
-    }
-    if (result.status === "gmail_unavailable") {
-      return c.json(
-        {
-          grantId,
-          status: "error",
-          mode: result.mode,
-          error: "gmail_unavailable",
-        },
-        502,
-      );
-    }
+    return c.json(
+      {
+        jobId: enqueued.jobId,
+        grantId,
+        status: "queued",
+      },
+      202,
+    );
+  });
 
+  app.get("/v1/grants/:grantId/sync/jobs/:jobId", async (c) => {
+    const grantId = c.req.param("grantId");
+    const jobId = c.req.param("jobId");
+    const tenantId = c.get("tenantId");
+    const grant = await opts.store.getGrant(grantId);
+    if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    const job = await opts.store.getSyncJob(jobId);
+    if (!job || job.grantId !== grantId || job.tenantId !== tenantId) {
+      return c.json({ error: "not_found" }, 404);
+    }
     return c.json({
-      grantId,
-      status: "ok",
-      mode: result.mode,
-      historyId: result.historyId,
-      upserted: result.upserted,
-      deleted: result.deleted,
+      jobId: job.id,
+      grantId: job.grantId,
+      status: job.status,
+      kind: job.kind,
+      forceBootstrap: job.forceBootstrap,
+      result: job.result,
+      error: job.error,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
     });
   });
+
+  /**
+   * Gmail Pub/Sub push endpoint. Verify with `GMAIL_PUSH_SECRET` via
+   * `?token=` or `X-InboxLink-Push-Secret` (first-cut shared secret).
+   * Returns 204 quickly after accept; history apply runs in-request
+   * (keep Pub/Sub ack deadline generous / maxDuration ≥ 60s).
+   */
+  app.post("/v1/internal/gmail/push", async (c) => {
+    if (!verifyPushSecret(c.req.header("x-inboxlink-push-secret"), c.req.query("token"), opts.gmailPushSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+    const notification = parsePubSubPushBody(raw);
+    if (!notification) {
+      // Ack malformed payloads so Pub/Sub does not retry forever.
+      log.warn("gmail_push_parse_failed");
+      return c.body(null, 204);
+    }
+    try {
+      const applied = await applyGmailPushNotification({
+        store: opts.store,
+        vault: opts.vault,
+        gmail: opts.gmail,
+        webhooks: opts.webhooks,
+        notification,
+      });
+      log.info("gmail_push_applied", {
+        status: applied.status,
+        grantCount: applied.grantIds.length,
+      });
+    } catch (err) {
+      log.warn("gmail_push_apply_failed", {
+        error: err instanceof Error ? err.message : "unknown",
+      });
+      // Still 204 — avoid Pub/Sub retry storms; host can poll POST …/sync.
+    }
+    return c.body(null, 204);
+  });
+
+  /** Daily: renew Gmail users.watch (≤7 day expiry). */
+  const renewWatches = async (c: Context<AppEnv>) => {
+    if (!verifyCronSecret(c.req.header("authorization"), opts.cronSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const summary = await renewAllGmailWatches({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      topicName: opts.gmailPubsubTopic,
+    });
+    return c.json({ ok: true, ...summary });
+  };
+  app.post("/v1/internal/cron/renew-gmail-watches", renewWatches);
+  app.get("/v1/internal/cron/renew-gmail-watches", renewWatches);
+
+  /** Drain durable sync_jobs queue (Vercel cron every few minutes). */
+  const drainJobs = async (c: Context<AppEnv>) => {
+    if (!verifyCronSecret(c.req.header("authorization"), opts.cronSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const summary = await drainSyncJobs({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      webhooks: opts.webhooks,
+      limit: 10,
+    });
+    return c.json({ ok: true, ...summary });
+  };
+  app.post("/v1/internal/cron/drain-sync-jobs", drainJobs);
+  app.get("/v1/internal/cron/drain-sync-jobs", drainJobs);
 
   return app;
 }
@@ -734,6 +948,34 @@ async function listImapMessages(
     }
     return c.json({ error: "imap_unavailable" }, 502);
   }
+}
+
+function verifyCronSecret(
+  authorization: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!expected?.trim()) return false;
+  const token = parseBearerToken(authorization);
+  return timingSafeStringEqual(token ?? undefined, expected);
+}
+
+function verifyPushSecret(
+  header: string | undefined,
+  queryToken: string | undefined,
+  expected: string | undefined,
+): boolean {
+  if (!expected?.trim()) return false;
+  const provided = header?.trim() || queryToken?.trim();
+  return timingSafeStringEqual(provided, expected);
+}
+
+/** Constant-time string compare; false when either side missing. */
+function timingSafeStringEqual(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }
 
 function googleErrorCode(err: unknown): string {
@@ -785,22 +1027,25 @@ async function openGmailAccess(
   opts: CreateAppOptions,
   grant: Grant,
 ): Promise<{ ok: true; accessToken: string } | GmailAccessFailure> {
-  const ciphertext = await opts.vault.getCiphertext(grant.id);
-  if (!ciphertext) return { ok: false, error: "missing_refresh_token", status: 409 };
-  let refreshToken: string;
-  try {
-    refreshToken = await opts.vault.open(ciphertext, { grantId: grant.id, tenantId: grant.tenantId });
-  } catch {
-    return { ok: false, error: "missing_refresh_token", status: 409 };
-  }
-  try {
-    const accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
-    return { ok: true, accessToken };
-  } catch {
-    await markNeedsReauth(opts.store, grant);
+  const access = await openGrantAccessToken({
+    store: opts.store,
+    vault: opts.vault,
+    gmail: opts.gmail,
+    grant,
+  });
+  if (access.ok) return access;
+  if (access.error === "needs_reauth") {
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,
+      reason: "refresh_rejected",
+    });
+    await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      externalUserId: grant.externalUserId,
+      provider: grant.provider,
+      email: grant.email,
       reason: "refresh_rejected",
     });
     return {
@@ -810,6 +1055,7 @@ async function openGmailAccess(
       guidance: NEEDS_REAUTH_GUIDANCE,
     };
   }
+  return { ok: false, error: access.error, status: 409 };
 }
 
 function accessBody(access: GmailAccessFailure): { error: string; guidance?: string } {
@@ -818,14 +1064,27 @@ function accessBody(access: GmailAccessFailure): { error: string; guidance?: str
     : { error: access.error };
 }
 
-async function gmailReadError(store: GrantStore, grant: Grant, err: unknown): Promise<Response> {
+async function gmailReadError(
+  opts: CreateAppOptions,
+  grant: Grant,
+  err: unknown,
+): Promise<Response> {
   if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
-    await markNeedsReauth(store, grant);
+    getAccessTokenCache().invalidate(grant.id);
+    await markNeedsReauth(opts.store, grant);
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,
       reason: "gmail_unauthorized",
       gmailStatus: err.status,
+    });
+    await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      externalUserId: grant.externalUserId,
+      provider: grant.provider,
+      email: grant.email,
+      reason: "gmail_unauthorized",
     });
     return Response.json({ error: "needs_reauth", guidance: NEEDS_REAUTH_GUIDANCE }, { status: 409 });
   }
@@ -856,10 +1115,13 @@ function parseLimit(value: string | undefined): number | null {
   return limit;
 }
 
-async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
-  grant.status = "needs_reauth";
-  grant.updatedAt = new Date().toISOString();
-  await store.updateGrant(grant);
+/** Store list cursor is a decimal offset into the synced cache (newest-first). */
+function parseStoreOffset(cursor: string | undefined): number | null {
+  if (cursor === undefined || cursor === "") return 0;
+  if (!/^\d+$/.test(cursor)) return null;
+  const offset = Number(cursor);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return offset;
 }
 
 function isExpired(iso: string): boolean {
@@ -878,5 +1140,24 @@ function escapeHtml(value: string): string {
 function clientKey(c: { req: { header: (name: string) => string | undefined } }): string {
   const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
   return forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
+}
+
+/** Basic browser hardening for Connect / landing / status / docs HTML. */
+const HTML_CSP = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'none'",
+  "img-src 'self' data:",
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "connect-src 'self'",
+].join("; ");
+
+function applyHtmlSecurityHeaders(headers: Headers): void {
+  headers.set("Content-Security-Policy", HTML_CSP);
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Referrer-Policy", "no-referrer");
 }
 

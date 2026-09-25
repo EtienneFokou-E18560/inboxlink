@@ -1,12 +1,19 @@
-import type { Grant, Message, SyncCursor, TokenVault } from "@inboxlink/core";
+import type { Grant, Message, SyncCursor } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError, type GmailHistoryRecord } from "@inboxlink/adapters-gmail";
+import { getAccessTokenCache } from "../access-token-cache.js";
+import {
+  markNeedsReauth,
+  openGrantAccessToken,
+  type CiphertextVault,
+} from "../gmail-access.js";
 import type { GrantStore } from "../store.js";
 
+/** Cap bootstrap list page size; upsert only — never wipe prior cache. */
 const BOOTSTRAP_MAX = 50;
+/** Bound concurrent Gmail getMessage calls during incremental sync. */
+const GET_MESSAGE_CONCURRENCY = 5;
 
-export type CiphertextVault = TokenVault & {
-  getCiphertext(grantId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
-};
+export type { CiphertextVault };
 
 export type SyncResult = {
   grantId: string;
@@ -71,6 +78,7 @@ export async function syncGmailGrant(input: {
     });
   } catch (err) {
     if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+      getAccessTokenCache().invalidate(grantId);
       await markNeedsReauth(store, grant);
       return {
         grantId,
@@ -104,8 +112,8 @@ async function runBootstrap(input: {
     grantId: grant.id,
     maxResults: BOOTSTRAP_MAX,
   });
-  await store.deleteMessages(grant.id);
-  await store.upsertMessages(page.messages);
+  // Upsert only — do not deleteMessages. Prior cache rows outside this page stay.
+  if (page.messages.length) await store.upsertMessages(page.messages);
   const profile = await gmail.getProfile(accessToken);
   await putHistoryCursor(store, grant.id, profile.historyId);
   return {
@@ -151,9 +159,11 @@ async function runIncremental(input: {
     touched.delete(id);
   }
 
-  const toFetch = new Set([...added, ...touched]);
+  const toFetch = [...new Set([...added, ...touched])];
   const upserts: Message[] = [];
-  for (const messageId of toFetch) {
+  const fetchDeletes = new Set<string>();
+
+  await mapWithConcurrency(toFetch, GET_MESSAGE_CONCURRENCY, async (messageId) => {
     try {
       const message = await gmail.getMessage({
         accessToken,
@@ -164,12 +174,14 @@ async function runIncremental(input: {
     } catch (err) {
       // Message may already be gone; treat as delete.
       if (err instanceof GmailApiError && err.status === 404) {
-        deleted.add(messageId);
-        continue;
+        fetchDeletes.add(messageId);
+        return;
       }
       throw err;
     }
-  }
+  });
+
+  for (const id of fetchDeletes) deleted.add(id);
 
   if (upserts.length) await store.upsertMessages(upserts);
   const deleteIds = [...deleted];
@@ -210,14 +222,24 @@ function applyHistoryRecord(
   }
 }
 
-async function putHistoryCursor(store: GrantStore, grantId: string, historyId: string): Promise<void> {
-  const cursor: SyncCursor = {
-    grantId,
-    kind: "gmail_history",
-    value: historyId,
-    updatedAt: new Date().toISOString(),
-  };
-  await store.putSyncCursor(cursor);
+/** Run async work over items with a fixed worker pool (order of completion free). */
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (!items.length) return;
+  let next = 0;
+  const limit = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= items.length) return;
+        await worker(items[index]!);
+      }
+    }),
+  );
 }
 
 async function openAccessToken(input: {
@@ -226,31 +248,17 @@ async function openAccessToken(input: {
   gmail: GmailAdapter;
   grant: Grant;
 }): Promise<{ status: "ok"; accessToken: string } | { status: "needs_reauth"; error: string }> {
-  const { store, vault, gmail, grant } = input;
-  const ciphertext = await vault.getCiphertext(grant.id);
-  if (!ciphertext) {
-    return { status: "needs_reauth", error: "missing_refresh_token" };
-  }
-  let refreshToken: string;
-  try {
-    refreshToken = await vault.open(ciphertext, {
-      grantId: grant.id,
-      tenantId: grant.tenantId,
-    });
-  } catch {
-    return { status: "needs_reauth", error: "missing_refresh_token" };
-  }
-  try {
-    const refreshed = await gmail.refreshAccessToken(refreshToken);
-    return { status: "ok", accessToken: refreshed.accessToken };
-  } catch {
-    await markNeedsReauth(store, grant);
-    return { status: "needs_reauth", error: "needs_reauth" };
-  }
+  const access = await openGrantAccessToken(input);
+  if (access.ok) return { status: "ok", accessToken: access.accessToken };
+  return { status: "needs_reauth", error: access.error };
 }
 
-async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
-  grant.status = "needs_reauth";
-  grant.updatedAt = new Date().toISOString();
-  await store.updateGrant(grant);
+async function putHistoryCursor(store: GrantStore, grantId: string, historyId: string): Promise<void> {
+  const cursor: SyncCursor = {
+    grantId,
+    kind: "gmail_history",
+    value: historyId,
+    updatedAt: new Date().toISOString(),
+  };
+  await store.putSyncCursor(cursor);
 }

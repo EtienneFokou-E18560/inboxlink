@@ -30,12 +30,34 @@ export type ServerConfig = {
   /** Soft abuse guard for Connect + host APIs (single and multi). */
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
+  /**
+   * Host webhook callback URL (Wave C). Delivery is off unless both URL and
+   * `webhookSecret` are set. No DB-backed destinations in this wave.
+   */
+  webhookUrl?: string;
+  /** HMAC-SHA256 shared secret for outbound webhooks (`INBOXLINK_WEBHOOK_SECRET`). */
+  webhookSecret?: string;
+  /**
+   * Full Cloud Pub/Sub topic resource name for Gmail `users.watch`
+   * (`projects/PROJECT/topics/TOPIC`). Unset = push disabled (poll via sync).
+   */
+  gmailPubsubTopic?: string;
+  /**
+   * Shared secret for Pub/Sub push endpoint verification (first cut).
+   * Pass as `?token=` or `X-InboxLink-Push-Secret`. Never commit real values.
+   */
+  gmailPushSecret?: string;
+  /**
+   * Bearer secret for internal cron routes (watch renew + sync job drain).
+   * Vercel Cron / GitHub Actions send `Authorization: Bearer <CRON_SECRET>`.
+   */
+  cronSecret?: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
   const publicBaseUrl = resolvePublicBaseUrl(env, port);
-  // Default stays single — do not flip Production to multi without an explicit ops decision.
+  // Process default is single (local demos). Production deploys set INBOXLINK_MODE=multi.
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
     env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
@@ -74,7 +96,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
     rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
+    webhookUrl: optionalTrimmed(env.INBOXLINK_WEBHOOK_URL),
+    webhookSecret: optionalTrimmed(env.INBOXLINK_WEBHOOK_SECRET),
+    gmailPubsubTopic: optionalTrimmed(env.GMAIL_PUBSUB_TOPIC),
+    gmailPushSecret: optionalTrimmed(env.GMAIL_PUSH_SECRET),
+    cronSecret: optionalTrimmed(env.CRON_SECRET),
   };
+}
+
+function optionalTrimmed(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  return value ? value : undefined;
 }
 
 /**

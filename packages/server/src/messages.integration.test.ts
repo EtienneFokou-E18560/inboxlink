@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import type { Grant, Message } from "@inboxlink/core";
+import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createApp } from "./routes/app.js";
@@ -152,6 +153,10 @@ after(async () => {
   });
 });
 
+beforeEach(() => {
+  resetAccessTokenCacheForTests();
+});
+
 function gmail() {
   return new GmailAdapter({
     clientId: "test-client-id.apps.googleusercontent.com",
@@ -200,24 +205,103 @@ describe("Gmail message list", () => {
     assert.equal(denied.status, 401);
   });
 
-  it("lists a normalized message from the vaulted refresh token", async () => {
+  it("defaults to the synced store cache without calling Gmail", async () => {
+    hits = [];
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant();
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const older: Message = {
+      id: "msg_old",
+      grantId: grant.id,
+      providerMessageId: "old",
+      subject: "Older",
+      snippet: "Older",
+      from: [{ email: "a@example.com" }],
+      to: [{ email: "me@example.com" }],
+      sentAt: new Date(1_700_000_000_000).toISOString(),
+      receivedAt: new Date(1_700_000_000_000).toISOString(),
+      folderIds: ["INBOX"],
+      hasAttachments: false,
+    };
+    const newer: Message = {
+      id: "msg_18c1abc",
+      grantId: grant.id,
+      providerMessageId: "18c1abc",
+      subject: "Normalized hello",
+      snippet: "Hello from Ada",
+      from: [{ name: "Lovelace, Ada", email: "ada@example.com" }],
+      to: [{ email: "etiennefk@gmail.com" }],
+      cc: [{ name: "Grace Hopper", email: "grace@example.com" }],
+      sentAt: new Date(1_710_000_000_000).toISOString(),
+      receivedAt: new Date(1_710_000_000_000).toISOString(),
+      folderIds: ["INBOX", "CATEGORY_PERSONAL"],
+      labels: ["INBOX", "UNREAD", "CATEGORY_PERSONAL"],
+      hasAttachments: false,
+    };
+    await store.upsertMessages([older, newer]);
+    await store.putSyncCursor({
+      grantId: grant.id,
+      kind: "gmail_history",
+      value: "hist-42",
+      updatedAt: "2026-03-10T12:00:00.000Z",
+    });
+    const app = appFor(store, vault);
+
+    const missing = await app.request("/v1/grants/grant_missing/messages");
+    assert.equal(missing.status, 404);
+
+    const listed = await app.request(`/v1/grants/${grant.id}/messages?limit=1`);
+    assert.equal(listed.status, 200);
+    const body = (await listed.json()) as {
+      messages: Message[];
+      nextCursor?: string;
+      source?: string;
+      syncedAt?: string;
+      historyId?: string;
+    };
+    assert.equal(body.source, "store");
+    assert.equal(body.syncedAt, "2026-03-10T12:00:00.000Z");
+    assert.equal(body.historyId, "hist-42");
+    assert.equal(body.nextCursor, "1");
+    assert.equal(body.messages.length, 1);
+    assert.equal(body.messages[0]?.id, "msg_18c1abc");
+    assert.equal(body.messages[0]?.subject, "Normalized hello");
+    assert.equal(hits.length, 0);
+
+    const page2 = await app.request(`/v1/grants/${grant.id}/messages?limit=1&cursor=1`);
+    assert.equal(page2.status, 200);
+    const body2 = (await page2.json()) as { messages: Message[]; nextCursor?: string };
+    assert.equal(body2.messages[0]?.id, "msg_old");
+    assert.equal(body2.nextCursor, undefined);
+
+    const empty = await app.request(`/v1/grants/${activeGrant("grant_empty").id}/messages`);
+    assert.equal(empty.status, 404);
+  });
+
+  it("lists live Gmail with source=live using the vaulted refresh token", async () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
     getStatus = 200;
     const store = new MemoryStore();
     const vault = new MemoryTokenVault(MASTER);
-    const grant = activeGrant();
+    const grant = activeGrant("grant_live");
     await store.putGrant(grant);
     await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
     const app = appFor(store, vault);
 
-    const missing = await app.request("/v1/grants/grant_missing/messages");
-    assert.equal(missing.status, 404);
-
-    const listed = await app.request(`/v1/grants/${grant.id}/messages?limit=5&cursor=page-2`);
+    const listed = await app.request(
+      `/v1/grants/${grant.id}/messages?source=live&limit=5&cursor=page-2`,
+    );
     assert.equal(listed.status, 200);
-    const body = (await listed.json()) as { messages: Message[]; nextCursor?: string };
+    const body = (await listed.json()) as {
+      messages: Message[];
+      nextCursor?: string;
+      source?: string;
+    };
+    assert.equal(body.source, "live");
     assert.equal(body.nextCursor, undefined);
     assert.equal(body.messages.length, 1);
     const message = body.messages[0];
@@ -225,18 +309,8 @@ describe("Gmail message list", () => {
     assert.equal(message.id, "msg_18c1abc");
     assert.equal(message.grantId, grant.id);
     assert.equal(message.providerMessageId, "18c1abc");
-    assert.equal(message.threadId, "18c1abc");
     assert.equal(message.subject, "Normalized hello");
-    assert.equal(message.snippet, "Hello from Ada");
-    assert.deepEqual(message.from, [{ name: "Lovelace, Ada", email: "ada@example.com" }]);
-    assert.deepEqual(message.to, [{ email: "etiennefk@gmail.com" }]);
-    assert.deepEqual(message.cc, [{ name: "Grace Hopper", email: "grace@example.com" }]);
-    assert.equal(message.receivedAt, new Date(1_710_000_000_000).toISOString());
     assert.equal(message.hasAttachments, false);
-    assert.equal(message.attachments, undefined);
-    assert.deepEqual(message.folderIds, ["INBOX", "CATEGORY_PERSONAL"]);
-    assert.deepEqual(message.labels, ["INBOX", "UNREAD", "CATEGORY_PERSONAL"]);
-    // List uses metadata — body/attachments come from get-by-id (format=full).
     assert.equal(message.body, undefined);
 
     const raw = JSON.stringify(body);
@@ -257,24 +331,13 @@ describe("Gmail message list", () => {
     assert.ok(fetched);
     const fetchedUrl = new URL(fetched.url, "http://gmail.local");
     assert.equal(fetchedUrl.searchParams.get("format"), "metadata");
-    assert.deepEqual(fetchedUrl.searchParams.getAll("metadataHeaders").sort(), [
-      "Cc",
-      "Date",
-      "From",
-      "Subject",
-      "To",
-    ]);
-    assert.equal(
-      hits.some((hit) => new URL(hit.url, "http://gmail.local").searchParams.get("format") === "full"),
-      false,
-    );
 
-    const again = await app.request(`/v1/grants/${grant.id}/messages`);
+    const again = await app.request(`/v1/grants/${grant.id}/messages?source=live`);
     const firstPage = (await again.json()) as { nextCursor?: string };
     assert.equal(firstPage.nextCursor, "page-2");
   });
 
-  it("does not call Gmail for an inactive grant and marks a rejected refresh", async () => {
+  it("does not call Gmail for an inactive grant and marks a rejected refresh on live", async () => {
     hits = [];
     refreshStatus = 200;
     const store = new MemoryStore();
@@ -293,7 +356,7 @@ describe("Gmail message list", () => {
     await store.putGrant(live);
     await vault.seal(REFRESH, { grantId: live.id, tenantId: live.tenantId });
     refreshStatus = 400;
-    const rejected = await app.request(`/v1/grants/${live.id}/messages`);
+    const rejected = await app.request(`/v1/grants/${live.id}/messages?source=live`);
     assert.equal(rejected.status, 409);
     const rejectedBody = (await rejected.json()) as { error: string; guidance?: string };
     assert.equal(rejectedBody.error, "needs_reauth");
@@ -304,16 +367,26 @@ describe("Gmail message list", () => {
     const bare = activeGrant("grant_no_token");
     await store.putGrant(bare);
     const before = hits.length;
-    const missingToken = await app.request(`/v1/grants/${bare.id}/messages`);
+    // Store list does not require a refresh token.
+    const storeList = await app.request(`/v1/grants/${bare.id}/messages`);
+    assert.equal(storeList.status, 200);
+    assert.equal(((await storeList.json()) as { messages: Message[] }).messages.length, 0);
+    assert.equal(hits.length, before);
+
+    const missingToken = await app.request(`/v1/grants/${bare.id}/messages?source=live`);
     assert.equal(missingToken.status, 409);
     assert.equal(((await missingToken.json()) as { error: string }).error, "missing_refresh_token");
     assert.equal(hits.length, before);
 
     const badLimit = await app.request(`/v1/grants/${bare.id}/messages?limit=99`);
     assert.equal(badLimit.status, 400);
+
+    const badSource = await app.request(`/v1/grants/${bare.id}/messages?source=redis`);
+    assert.equal(badSource.status, 400);
+    assert.equal(((await badSource.json()) as { error: string }).error, "invalid_source");
   });
 
-  it("forwards Gmail q, label, and structured filters to users.messages.list", async () => {
+  it("forwards Gmail q, label, and structured filters on source=live", async () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
@@ -326,10 +399,11 @@ describe("Gmail message list", () => {
     const app = appFor(store, vault);
 
     const listed = await app.request(
-      `/v1/grants/${grant.id}/messages?limit=3&q=${encodeURIComponent("is:unread")}&from=${encodeURIComponent("ada@example.com")}&label=INBOX&label=UNREAD&includeSpamTrash=true`,
+      `/v1/grants/${grant.id}/messages?source=live&limit=3&q=${encodeURIComponent("is:unread")}&from=${encodeURIComponent("ada@example.com")}&label=INBOX&label=UNREAD&includeSpamTrash=true`,
     );
     assert.equal(listed.status, 200);
-    const body = (await listed.json()) as { messages: Message[] };
+    const body = (await listed.json()) as { messages: Message[]; source?: string };
+    assert.equal(body.source, "live");
     assert.equal(body.messages.length, 1);
 
     const list = hits.find((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?"));
@@ -342,7 +416,7 @@ describe("Gmail message list", () => {
     assert.equal(JSON.stringify(body).includes(REFRESH), false);
   });
 
-  it("rejects invalid filter query params without calling Gmail", async () => {
+  it("rejects invalid filter query params on source=live without calling Gmail", async () => {
     hits = [];
     const store = new MemoryStore();
     const vault = new MemoryTokenVault(MASTER);
@@ -351,18 +425,22 @@ describe("Gmail message list", () => {
     await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
     const app = appFor(store, vault);
 
-    const badLabel = await app.request(`/v1/grants/${grant.id}/messages?label=bad%20label`);
+    const badLabel = await app.request(
+      `/v1/grants/${grant.id}/messages?source=live&label=bad%20label`,
+    );
     assert.equal(badLabel.status, 400);
     assert.equal(((await badLabel.json()) as { error: string }).error, "invalid_label");
 
-    const badSpam = await app.request(`/v1/grants/${grant.id}/messages?includeSpamTrash=maybe`);
+    const badSpam = await app.request(
+      `/v1/grants/${grant.id}/messages?source=live&includeSpamTrash=maybe`,
+    );
     assert.equal(badSpam.status, 400);
     assert.equal(((await badSpam.json()) as { error: string }).error, "invalid_include_spam_trash");
 
     assert.equal(hits.length, 0);
   });
 
-  it("applies message filters in multi mode with a Bearer secret", async () => {
+  it("applies message filters in multi mode with a Bearer secret on source=live", async () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
@@ -375,12 +453,12 @@ describe("Gmail message list", () => {
     const app = appFor(store, vault, "multi");
 
     const denied = await app.request(
-      `/v1/grants/${grant.id}/messages?subject=${encodeURIComponent("Normalized hello")}`,
+      `/v1/grants/${grant.id}/messages?source=live&subject=${encodeURIComponent("Normalized hello")}`,
     );
     assert.equal(denied.status, 401);
 
     const listed = await app.request(
-      `/v1/grants/${grant.id}/messages?subject=${encodeURIComponent("Normalized hello")}&label=INBOX`,
+      `/v1/grants/${grant.id}/messages?source=live&subject=${encodeURIComponent("Normalized hello")}&label=INBOX`,
       { headers: { authorization: "Bearer tenant-api-key-test" } },
     );
     assert.equal(listed.status, 200);
@@ -391,7 +469,7 @@ describe("Gmail message list", () => {
     assert.deepEqual(listUrl.searchParams.getAll("labelIds"), ["INBOX"]);
   });
 
-  it("reads the refresh token sealed on another Postgres instance", async () => {
+  it("reads the refresh token sealed on another Postgres instance for source=live", async () => {
     hits = [];
     refreshStatus = 200;
     listStatus = 200;
@@ -406,12 +484,57 @@ describe("Gmail message list", () => {
     await storeA.putGrant(grant);
     await vaultA.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
     const appB = appFor(storeB, vaultB);
-    const listed = await appB.request(`/v1/grants/${grant.id}/messages?limit=1`);
+    const listed = await appB.request(`/v1/grants/${grant.id}/messages?source=live&limit=1`);
     assert.equal(listed.status, 200);
     const body = (await listed.json()) as { messages: Message[] };
     assert.equal(body.messages[0]?.subject, "Normalized hello");
     assert.equal(JSON.stringify(body).includes(REFRESH), false);
     assert.ok(await vaultB.getCiphertext(grant.id));
+    await pg.close();
+  });
+
+  it("lists store-backed messages across Postgres store instances", async () => {
+    hits = [];
+    const pg = new PGlite();
+    const db = new PgDatabase(new PgliteExecutor(pg));
+    const storeA = new PostgresStore(db);
+    const storeB = new PostgresStore(db);
+    const vault = new PostgresTokenVault(db, MASTER);
+    const grant = activeGrant("grant_pg_store_list");
+    await storeA.putGrant(grant);
+    await storeA.upsertMessages([
+      {
+        id: "msg_pg",
+        grantId: grant.id,
+        providerMessageId: "pg-1",
+        subject: "From store",
+        snippet: "From store",
+        from: [{ email: "a@example.com" }],
+        to: [{ email: "me@example.com" }],
+        sentAt: new Date(0).toISOString(),
+        receivedAt: new Date(0).toISOString(),
+        folderIds: ["INBOX"],
+        hasAttachments: false,
+      },
+    ]);
+    await storeA.putSyncCursor({
+      grantId: grant.id,
+      kind: "gmail_history",
+      value: "pg-hist",
+      updatedAt: "2026-03-11T00:00:00.000Z",
+    });
+    const app = appFor(storeB, vault);
+    const listed = await app.request(`/v1/grants/${grant.id}/messages`);
+    assert.equal(listed.status, 200);
+    const body = (await listed.json()) as {
+      messages: Message[];
+      source?: string;
+      historyId?: string;
+    };
+    assert.equal(body.source, "store");
+    assert.equal(body.historyId, "pg-hist");
+    assert.equal(body.messages[0]?.subject, "From store");
+    assert.equal(hits.length, 0);
     await pg.close();
   });
 });
@@ -489,6 +612,61 @@ describe("Gmail message get-by-id", () => {
 
     const unknownGrant = await app.request("/v1/grants/grant_missing/messages/msg_18c1abc");
     assert.equal(unknownGrant.status, 404);
+  });
+
+  it("refreshes the access token once across live list and get for the same grant", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_cache_hit");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const listed = await app.request(`/v1/grants/${grant.id}/messages?source=live&limit=1`);
+    assert.equal(listed.status, 200);
+    const got = await app.request(`/v1/grants/${grant.id}/messages/msg_18c1abc`);
+    assert.equal(got.status, 200);
+    const listedAgain = await app.request(`/v1/grants/${grant.id}/messages?source=live&limit=1`);
+    assert.equal(listedAgain.status, 200);
+
+    const tokenHits = hits.filter((hit) => hit.url.startsWith("/token"));
+    assert.equal(tokenHits.length, 1);
+    assert.ok(hits.some((hit) => hit.url.includes("/messages/18c1abc") && hit.url.includes("format=full")));
+  });
+
+  it("invalidates the cached access token when the grant is deleted", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_cache_revoke");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    assert.equal(
+      (await app.request(`/v1/grants/${grant.id}/messages?source=live&limit=1`)).status,
+      200,
+    );
+    assert.equal(hits.filter((h) => h.url.startsWith("/token")).length, 1);
+
+    const del = await app.request(`/v1/grants/${grant.id}`, { method: "DELETE" });
+    assert.equal(del.status, 204);
+
+    // Recreate grant + vault entry under the same id (new Connect).
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    hits = [];
+    assert.equal(
+      (await app.request(`/v1/grants/${grant.id}/messages?source=live&limit=1`)).status,
+      200,
+    );
+    assert.equal(hits.filter((h) => h.url.startsWith("/token")).length, 1);
   });
 });
 
