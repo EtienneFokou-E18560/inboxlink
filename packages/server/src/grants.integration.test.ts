@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { createApp } from "./routes/app.js";
@@ -13,10 +14,21 @@ const EMAIL = "tester@gmail.com";
 let google: Server;
 let tokenUrl = "";
 let userinfoUrl = "";
+let lastTokenBody = "";
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
 
 before(async () => {
-  google = createServer((req, res) => {
+  google = createServer(async (req, res) => {
     if (req.url?.startsWith("/token")) {
+      lastTokenBody = await readBody(req);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -29,6 +41,7 @@ before(async () => {
       return;
     }
     if (req.url?.startsWith("/userinfo")) {
+      await readBody(req);
       const auth = req.headers.authorization ?? "";
       if (auth !== "Bearer ya29.test-access") {
         res.writeHead(401);
@@ -110,7 +123,7 @@ describe("grants, vault, and Gmail OAuth", () => {
   });
 
   it("connects, lists the grant, and revoke clears ciphertext", async () => {
-    const { app, vault } = buildApp();
+    const { app, vault, store } = buildApp();
     const auth = { authorization: `Bearer ${API_SECRET}`, "content-type": "application/json" };
 
     const created = await app.request("/v1/link/sessions", {
@@ -143,11 +156,28 @@ describe("grants, vault, and Gmail OAuth", () => {
     );
     const state = authUrl.searchParams.get("state");
     assert.ok(state);
+    const codeChallenge = authUrl.searchParams.get("code_challenge");
+    assert.ok(codeChallenge);
+    assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
+    const pending = [...store.sessions.values()].find((s) => s.oauthState === state);
+    assert.ok(pending?.codeVerifier);
+    const codeVerifier = pending.codeVerifier;
+    assert.equal(
+      createHash("sha256").update(codeVerifier, "ascii").digest("base64url"),
+      codeChallenge,
+    );
 
+    lastTokenBody = "";
     const callback = await app.request(
       `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     );
     assert.equal(callback.status, 302);
+    const tokenParams = new URLSearchParams(lastTokenBody);
+    assert.equal(tokenParams.get("code"), "auth-code");
+    assert.equal(tokenParams.get("code_verifier"), codeVerifier);
+    const completed = store.sessions.get(pending.id);
+    assert.equal(completed?.codeVerifier, undefined);
+    assert.equal(completed?.oauthState, undefined);
     const redirected = new URL(callback.headers.get("location") ?? "");
     const publicToken = redirected.searchParams.get("public_token");
     assert.ok(publicToken);

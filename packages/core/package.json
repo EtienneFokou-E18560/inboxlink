@@ -23,7 +23,8 @@
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json",
     "lint": "tsc -b tsconfig.json",
-    "prepack": "pnpm run build"
+    "prepack": "pnpm run build",
+    "test": "node --import tsx --test src/crypto.test.ts"
   },
   "publishConfig": {
     "access": "public"
@@ -44,6 +45,9 @@
     "types"
   ],
   "sideEffects": false,
+  "devDependencies": {
+    "tsx": "^4.19.3"
+  },
   "engines": {
     "node": ">=22"
   }

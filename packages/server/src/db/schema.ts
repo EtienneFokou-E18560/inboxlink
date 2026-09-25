@@ -42,6 +42,7 @@ export const linkSessions = pgTable(
     products: jsonb("products").$type<string[]>().notNull(),
     status: text("status").notNull(),
     oauthState: text("oauth_state"),
+    codeVerifier: text("code_verifier"),
     publicToken: text("public_token"),
     grantId: text("grant_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -131,11 +132,13 @@ CREATE TABLE IF NOT EXISTS link_sessions (
   products JSONB NOT NULL,
   status TEXT NOT NULL,
   oauth_state TEXT,
+  code_verifier TEXT,
   public_token TEXT,
   grant_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE link_sessions ADD COLUMN IF NOT EXISTS code_verifier TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS link_sessions_public_token_idx ON link_sessions (public_token);
 CREATE INDEX IF NOT EXISTS link_sessions_oauth_state_idx ON link_sessions (oauth_state);
 
