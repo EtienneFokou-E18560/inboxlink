@@ -61,6 +61,8 @@ export function createAppFromEnv(
     }),
     allowedRedirectOrigins: config.allowedRedirectOrigins,
   });
+  // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).
+  void store.deleteExpiredSessions().catch(() => {});
   return { app, config, store, vault, storeKind };
 }
 

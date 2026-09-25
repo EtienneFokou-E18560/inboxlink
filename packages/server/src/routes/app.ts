@@ -102,6 +102,10 @@ export function createApp(opts: CreateAppOptions) {
     await next();
     const path = c.req.path;
     const status = c.res.status;
+    const contentType = c.res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html")) {
+      applyHtmlSecurityHeaders(c.res.headers);
+    }
     if (isHealthPath(path) && status < 400) return;
     log.info("http_request", {
       method: c.req.method,
@@ -154,10 +158,6 @@ export function createApp(opts: CreateAppOptions) {
   // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
   mountDocsHub(app);
 
-  app.get("/v1/schema.sql", (c) =>
-    c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
-  );
-
   app.use("/v1/*", async (c, next) => {
     // OAuth browser callback must remain public (state-bound).
     if (c.req.path.startsWith("/v1/oauth/")) {
@@ -200,6 +200,15 @@ export function createApp(opts: CreateAppOptions) {
     c.set("tenantId", tenantId);
     return next();
   });
+
+  /**
+   * Schema dump for operators. Behind the same `/v1/*` auth as host APIs —
+   * Bearer required in `multi` (Production) so `token_vault` / session DDL
+   * is not world-readable.
+   */
+  app.get("/v1/schema.sql", (c) =>
+    c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
+  );
 
   app.post("/v1/link/sessions", async (c) => {
     const body = (await c.req.json()) as {
@@ -322,8 +331,8 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_missing"),
       );
     }
-    const session = await opts.store.findSessionByOAuthState(state);
-    if (!session || isExpired(session.expiresAt)) {
+    const session = await opts.store.consumeOAuthState(state);
+    if (!session) {
       log.warn("oauth_callback_failed", {
         reason: "unknown_oauth_state",
         store: opts.storeKind ?? "memory",
@@ -716,5 +725,24 @@ function isExpired(iso: string): boolean {
 function clientKey(c: { req: { header: (name: string) => string | undefined } }): string {
   const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
   return forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
+}
+
+/** Basic browser hardening for Connect / landing / status / docs HTML. */
+const HTML_CSP = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'none'",
+  "img-src 'self' data:",
+  "style-src 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "connect-src 'self'",
+].join("; ");
+
+function applyHtmlSecurityHeaders(headers: Headers): void {
+  headers.set("Content-Security-Policy", HTML_CSP);
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Referrer-Policy", "no-referrer");
 }
 

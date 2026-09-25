@@ -193,6 +193,46 @@ describe("shared Postgres store across instances", () => {
 
     await pg.close();
   });
+
+  it("consumes oauth_state once and GCs expired link_sessions", async () => {
+    const pg = new PGlite();
+    const db = new PgDatabase(new PgliteExecutor(pg));
+    const store = new PostgresStore(db);
+    await store.ready();
+
+    const live = await store.createSession({
+      tenantId: "default",
+      externalUserId: "live",
+      redirectUri: "http://localhost:9999/done",
+      products: ["messages"],
+      ttlMs: 60_000,
+    });
+    live.oauthState = "pg-state-1";
+    live.codeVerifier = "pg-verifier-1";
+    await store.saveSession(live);
+
+    const claimed = await store.consumeOAuthState("pg-state-1");
+    assert.ok(claimed);
+    assert.equal(claimed.codeVerifier, "pg-verifier-1");
+    assert.equal(claimed.oauthState, undefined);
+    assert.equal(await store.consumeOAuthState("pg-state-1"), undefined);
+
+    const expired = await store.createSession({
+      tenantId: "default",
+      externalUserId: "gone",
+      redirectUri: "http://localhost:9999/done",
+      products: ["messages"],
+      ttlMs: 1,
+    });
+    expired.expiresAt = new Date(Date.now() - 120_000).toISOString();
+    await store.saveSession(expired);
+    const removed = await store.deleteExpiredSessions();
+    assert.ok(removed >= 1);
+    assert.ok(await store.getSession(live.id));
+    assert.equal(await store.getSession(expired.id), undefined);
+
+    await pg.close();
+  });
 });
 
 describe("store selection", () => {

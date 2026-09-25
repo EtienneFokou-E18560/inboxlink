@@ -4,6 +4,17 @@ Short guide for Production at `https://inboxlink-two.vercel.app`. No paid APM re
 
 **Never** paste refresh tokens, Bearer secrets, `public_token`, `link_token`, or `DATABASE_URL` into git, PRs, Slack, or this doc.
 
+## Security posture (quick)
+
+| Control | Behavior |
+|---------|----------|
+| **PKCE (S256)** | Connect issues `code_verifier` / `code_challenge`; Google token exchange sends the verifier. `oauth_state` is **consumed atomically** on first callback use (replay → unknown state). |
+| **Refresh fail-closed** | Missing / rejected refresh → grant `needs_reauth`; no silent “half grant”. |
+| **Access-token cache** | In-process short-lived access tokens only (see below). Refresh tokens never cached. |
+| **Schema dump** | `GET /v1/schema.sql` requires Bearer in `multi` (Production) — not world-readable. |
+| **HTML headers** | Connect / landing / status / docs send CSP + `X-Content-Type-Options` + `X-Frame-Options` + `Referrer-Policy`. |
+| **Health smoke** | [production-health-smoke.yml](../.github/workflows/production-health-smoke.yml) + `scripts/smoke-health.sh` (expect `store: "postgres"`). |
+
 ## Health clarity
 
 ```bash
@@ -31,7 +42,7 @@ Healthy Production shape:
 }
 ```
 
-`GET /health` is public (no Bearer). Host APIs (`/v1/link/sessions`, grants, messages) require `Authorization: Bearer <INBOXLINK_API_SECRET>`.
+`GET /health` is public (no Bearer). Host APIs (`/v1/link/sessions`, grants, messages, **`/v1/schema.sql`**) require `Authorization: Bearer <INBOXLINK_API_SECRET>` in `multi`.
 
 **Automated smoke:** GitHub Actions workflow [`.github/workflows/production-health-smoke.yml`](../.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh` on a 6-hour schedule and via **Actions → Production health smoke → Run workflow**. It fails the job if `ok` is not `true` or `store` is not `postgres`. Optional repo variable `INBOXLINK_PRODUCTION_URL` overrides the default Production base URL; do not store Production secrets in git or workflow files (health is public). GitHub emails on workflow failure; Vercel’s own emails cover function crashes.
 
@@ -87,9 +98,21 @@ Browser HTML pages (not JSON) on `/v1/oauth/gmail/callback`:
 | `invalid_grant` | Code reused/expired | Restart Connect |
 | Google did not return a refresh token | Offline token omitted (repeat auth / skipped consent) | New connect link; approve Google access again (re-consent) |
 | Could not store refresh token | Short/missing master key | Set `INBOXLINK_MASTER_KEY` (≥16 chars), redeploy |
-| Unknown OAuth state | Memory store / wrong instance | Require `store: postgres` before Connect |
+| Unknown OAuth state | Memory store / wrong instance / **state replay** | Require `store: postgres` before Connect; state is one-shot |
 
 Logs: look for `oauth_callback_failed` with a redacted `reason` code (never the authorization `code`).
+
+## Gmail 429 and sync timeouts
+
+Inline `POST /v1/grants/:grantId/sync` and message list/get talk to Google from the Vercel function. Typical failure modes:
+
+| Symptom | Likely cause | Mitigation |
+|---------|--------------|------------|
+| `502` `gmail_unavailable` with Gmail status **429** | Google quota / user-rate limit | Back off; reduce concurrent sync/list; retry later. Logs: `gmail_unavailable` + `gmailStatus: 429`. |
+| Function **timeout** during sync | Large mailbox / slow Gmail RTT vs Vercel `maxDuration` | Sync is still **inline**; keep payloads small. Prefer incremental sync after a successful bootstrap; avoid hammering `POST …/sync` in a loop. |
+| Cold start + cache miss stampede | New isolate empty access-token cache | Expected; tokens re-refresh. Not a durability bug. |
+
+Do **not** raise Google quotas by embedding Production secrets in CI or this doc. If 429s persist under normal host load, investigate per-grant polling frequency on the host side first.
 
 ## Deploy smoke checklist
 

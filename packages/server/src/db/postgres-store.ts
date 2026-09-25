@@ -24,10 +24,14 @@ export class PgDatabase {
   constructor(readonly sql: SqlExecutor) {}
 
   ensure(): Promise<void> {
-    this.ready ??= this.migrate().catch((err) => {
-      this.ready = null;
-      throw err;
-    });
+    this.ready ??= this.migrate()
+      .then(async () => {
+        await this.sql.query(`DELETE FROM link_sessions WHERE expires_at < NOW()`, []);
+      })
+      .catch((err) => {
+        this.ready = null;
+        throw err;
+      });
     return this.ready;
   }
 
@@ -151,6 +155,17 @@ export class PostgresStore implements GrantStore {
     return rows[0] ? mapSession(rows[0]) : undefined;
   }
 
+  async consumeOAuthState(state: string): Promise<StoredSession | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SessionRow>(
+      `UPDATE link_sessions SET oauth_state = NULL
+       WHERE oauth_state = $1 AND expires_at > NOW()
+       RETURNING ${SESSION_COLUMNS}`,
+      [state],
+    );
+    return rows[0] ? mapSession(rows[0]) : undefined;
+  }
+
   async saveSession(session: StoredSession): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(
@@ -241,6 +256,15 @@ export class PostgresStore implements GrantStore {
       [publicToken, tenantId],
     );
     return rows[0]?.grant_id ?? undefined;
+  }
+
+  async deleteExpiredSessions(): Promise<number> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<{ id: string }>(
+      `DELETE FROM link_sessions WHERE expires_at < NOW() RETURNING id`,
+      [],
+    );
+    return rows.length;
   }
 
   async listMessages(grantId: string): Promise<Message[]> {
