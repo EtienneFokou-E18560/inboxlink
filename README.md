@@ -10,15 +10,16 @@ It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18
 
 Working TypeScript monorepo with:
 
-- Gmail OAuth **authorization URL + callback** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
-- Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext)
-- HTTP API: link sessions, Connect stub, grants exchange/list/revoke, message list/get, health
-- Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup)
+- Gmail OAuth **authorization URL + callback** with **S256 PKCE** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
+- Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext); refresh fails **closed** (`needs_reauth`)
+- In-process **access-token cache** (short-lived access tokens only; refresh tokens stay vaulted)
+- HTTP API: link sessions, **Connect UI** (`@inboxlink/connect-ui`), grants exchange/list/revoke, message list/get, health
+- Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail, `format=metadata`), with optional filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are not implemented. The `@inboxlink/sdk` publish path is ready ([docs/publishing.md](docs/publishing.md)); no live npm release until a maintainer runs the manual workflow with credentials.
+`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail, `format=metadata`), with optional filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
 
-Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect.
+Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect. Scheduled [production health smoke](.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh`.
 
 ## Architecture overview
 
@@ -29,11 +30,11 @@ SDK / curl
   │  POST /v1/link/sessions
   │◄──── sessionId, connectUrl
   │
-User browser ──► GET /v1/connect/:linkToken (stub HTML)
+User browser ──► GET /v1/connect/:linkToken (Connect UI)
                       │
                       ▼
-                 Gmail OAuth ──────────────────────────► Google
-                      │  callback + code
+                 Gmail OAuth + PKCE ───────────────────► Google
+                      │  callback + code (state consumed once)
                       ▼
                  Vault seals refresh token
                  Store saves grant (memory or Postgres)
@@ -49,13 +50,13 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 |-------|----------|------|
 | HTTP API | `@inboxlink/server` (Hono) | Sessions, OAuth callback, grants, messages, health |
 | Core | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
-| Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL, token exchange/refresh, list + normalize |
+| Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL + PKCE, token exchange/refresh, list + normalize |
 | Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
-| Connect UI | stub HTML in server; `packages/connect-ui` placeholder | Browser Connect page |
-| SDK | `@inboxlink/sdk` | Host HTTP client (Gmail list/get/sync); npm path ready, not published yet |
+| Connect UI | `@inboxlink/connect-ui` | Hosted Connect + error pages (CSP + security headers) |
+| SDK | `@inboxlink/sdk` **0.1.1** (npm) | Host HTTP client (Gmail list/get/sync) |
 | Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
-**Standing rules:** no Production secrets in git; MIT only; no career-workspace imports, shared DB, or shared types.
+**Standing rules:** no Production secrets in git; MIT/Apache-compatible only; no career-workspace imports, shared DB, or shared types.
 
 ## Packages
 
@@ -63,9 +64,9 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 |---------|------|
 | `@inboxlink/core` | Types, vault crypto helpers, adapter interfaces |
 | `@inboxlink/adapters-gmail` | Gmail OAuth + message list/normalize |
-| `@inboxlink/sdk` | Host-app HTTP client ([usage](packages/sdk/README.md); [npm publish path](docs/publishing.md)) |
+| `@inboxlink/sdk` | Host-app HTTP client — **npm `@inboxlink/sdk@0.1.1`** ([usage](packages/sdk/README.md); [publish path](docs/publishing.md)) |
 | `@inboxlink/server` | Hono HTTP service |
-| `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors) |
+| `@inboxlink/connect-ui` | Hosted Connect pages (pending CTA, expiry, OAuth errors, CSP) |
 | `@inboxlink/demo` | Tiny SDK demo (`apps/demo`) |
 
 ## Requirements
@@ -102,12 +103,17 @@ curl -sS http://localhost:8787/health
 # Expect: "store":"postgres"
 ```
 
-The server applies schema on startup. Optional manual dump:
+The server applies schema on startup (and deletes expired `link_sessions`). Optional manual dump — **requires Bearer in `multi` / Production** (same as other `/v1/*` host APIs):
 
 ```bash
+# Local single (no Bearer):
 curl -sS http://localhost:8787/v1/schema.sql | psql "$DATABASE_URL"
+# Production / multi:
+curl -sS -H "Authorization: Bearer $INBOXLINK_API_SECRET" \
+  https://inboxlink-two.vercel.app/v1/schema.sql | psql "$DATABASE_URL"
 ```
 
+Unauthenticated `GET /v1/schema.sql` on Production returns **401** — the DDL is not world-readable.
 Redis (`REDIS_URL`) is optional; leave unset so health reports `"queue":"disabled"`.
 
 ### Env checklist (names only)
@@ -217,7 +223,14 @@ const { message } = await il.messages.get(grantId, messages[0]!.id);
 await il.grants.sync(grantId); // history watermark sync
 ```
 
-Until the first npm release, use the workspace package (or a git/`file:` dependency). Publishing is **manual / opt-in** only ([docs/publishing.md](docs/publishing.md)) — no token, no publish.
+Until you prefer a git/`file:` workspace link, install from npm:
+
+```bash
+npm install @inboxlink/sdk
+# → @inboxlink/sdk@0.1.1
+```
+
+Publishing further versions is **manual / opt-in** ([docs/publishing.md](docs/publishing.md)).
 
 Demo host client:
 
@@ -235,9 +248,9 @@ Set Project → Environment Variables from the checklist above (never commit Pro
 
 | Item | Notes |
 |------|--------|
-| Microsoft Graph adapter | Separate OAuth console + `MICROSOFT_*` env |
-| IMAP adapter | App-password / password vaulting; security review first |
-| npm publish (`@inboxlink/sdk` et al.) | Path ready ([docs/publishing.md](docs/publishing.md)); no live release yet |
+| Microsoft Graph adapter | Parked (draft PR); not in `main` |
+| IMAP adapter | Parked (draft PR); security review first |
+| Further npm releases | Path ready ([docs/publishing.md](docs/publishing.md)); `@inboxlink/sdk@0.1.1` already live |
 | career-workspace host wiring | Optional **last**; core must stay independent |
 
 ## Contributing

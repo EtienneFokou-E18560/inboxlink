@@ -183,6 +183,12 @@ describe("grants, vault, and Gmail OAuth", () => {
     const publicToken = redirected.searchParams.get("public_token");
     assert.ok(publicToken);
 
+    const replay = await app.request(
+      `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
+    );
+    assert.equal(replay.status, 400);
+    assert.match(await replay.text(), /does not match a live session|unknown or the Link session expired/i);
+
     const exchanged = await app.request("/v1/grants/exchange", {
       method: "POST",
       headers: auth,
