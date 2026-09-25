@@ -144,11 +144,11 @@ describe("InboxLink SDK", () => {
     assert.match(calls[0]!, /\/v1\/grants\/grant_1\/messages\?limit=10&cursor=abc$/);
   });
 
-  it("lists messages with Gmail filter query params", async () => {
+  it("lists messages with source=live and Gmail filter query params", async () => {
     const calls: string[] = [];
     const fetchMock: typeof fetch = async (input) => {
       calls.push(String(input));
-      return new Response(JSON.stringify({ messages: [] }), {
+      return new Response(JSON.stringify({ messages: [], source: "live" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -159,6 +159,7 @@ describe("InboxLink SDK", () => {
       fetch: fetchMock,
     });
     await il.messages.list("grant_1", {
+      source: "live",
       limit: 5,
       q: "is:unread",
       from: "ada@example.com",
@@ -166,6 +167,7 @@ describe("InboxLink SDK", () => {
       includeSpamTrash: true,
     });
     const url = new URL(calls[0]!);
+    assert.equal(url.searchParams.get("source"), "live");
     assert.equal(url.searchParams.get("limit"), "5");
     assert.equal(url.searchParams.get("q"), "is:unread");
     assert.equal(url.searchParams.get("from"), "ada@example.com");

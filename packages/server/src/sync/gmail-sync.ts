@@ -8,7 +8,10 @@ import {
 } from "../gmail-access.js";
 import type { GrantStore } from "../store.js";
 
+/** Cap bootstrap list page size; upsert only — never wipe prior cache. */
 const BOOTSTRAP_MAX = 50;
+/** Bound concurrent Gmail getMessage calls during incremental sync. */
+const GET_MESSAGE_CONCURRENCY = 5;
 
 export type { CiphertextVault };
 
@@ -109,8 +112,8 @@ async function runBootstrap(input: {
     grantId: grant.id,
     maxResults: BOOTSTRAP_MAX,
   });
-  await store.deleteMessages(grant.id);
-  await store.upsertMessages(page.messages);
+  // Upsert only — do not deleteMessages. Prior cache rows outside this page stay.
+  if (page.messages.length) await store.upsertMessages(page.messages);
   const profile = await gmail.getProfile(accessToken);
   await putHistoryCursor(store, grant.id, profile.historyId);
   return {
@@ -156,9 +159,11 @@ async function runIncremental(input: {
     touched.delete(id);
   }
 
-  const toFetch = new Set([...added, ...touched]);
+  const toFetch = [...new Set([...added, ...touched])];
   const upserts: Message[] = [];
-  for (const messageId of toFetch) {
+  const fetchDeletes = new Set<string>();
+
+  await mapWithConcurrency(toFetch, GET_MESSAGE_CONCURRENCY, async (messageId) => {
     try {
       const message = await gmail.getMessage({
         accessToken,
@@ -169,12 +174,14 @@ async function runIncremental(input: {
     } catch (err) {
       // Message may already be gone; treat as delete.
       if (err instanceof GmailApiError && err.status === 404) {
-        deleted.add(messageId);
-        continue;
+        fetchDeletes.add(messageId);
+        return;
       }
       throw err;
     }
-  }
+  });
+
+  for (const id of fetchDeletes) deleted.add(id);
 
   if (upserts.length) await store.upsertMessages(upserts);
   const deleteIds = [...deleted];
@@ -213,6 +220,26 @@ function applyHistoryRecord(
     const id = entry.message?.id;
     if (id) touched.add(id);
   }
+}
+
+/** Run async work over items with a fixed worker pool (order of completion free). */
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (!items.length) return;
+  let next = 0;
+  const limit = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= items.length) return;
+        await worker(items[index]!);
+      }
+    }),
+  );
 }
 
 async function openAccessToken(input: {

@@ -471,6 +471,37 @@ export function createApp(opts: CreateAppOptions) {
     const cursor = c.req.query("cursor")?.trim() || undefined;
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
 
+    const sourceRaw = (c.req.query("source") ?? "store").trim().toLowerCase();
+    if (sourceRaw !== "store" && sourceRaw !== "live") {
+      return c.json({ error: "invalid_source" }, 400);
+    }
+    const source = sourceRaw as "store" | "live";
+
+    if (source === "store") {
+      const offset = parseStoreOffset(cursor);
+      if (offset === null) return c.json({ error: "invalid_cursor" }, 400);
+
+      const all = await opts.store.listMessages(grantId);
+      // Newest first for the synced read model (store may keep ASC insertion order).
+      const sorted = [...all].sort((a, b) => {
+        const ta = Date.parse(a.receivedAt) || 0;
+        const tb = Date.parse(b.receivedAt) || 0;
+        if (tb !== ta) return tb - ta;
+        return a.providerMessageId.localeCompare(b.providerMessageId);
+      });
+      const page = sorted.slice(offset, offset + limit);
+      const nextOffset = offset + page.length;
+      const nextCursor = nextOffset < sorted.length ? String(nextOffset) : undefined;
+      const syncCursor = await opts.store.getSyncCursor(grantId);
+      return c.json({
+        messages: page,
+        nextCursor,
+        source: "store",
+        syncedAt: syncCursor?.updatedAt,
+        historyId: syncCursor?.value,
+      });
+    }
+
     const parsedFilters = parseMessageListFilters({
       q: c.req.query("q") ?? undefined,
       from: c.req.query("from") ?? undefined,
@@ -494,7 +525,11 @@ export function createApp(opts: CreateAppOptions) {
         labelIds: parsedFilters.filters.labelIds,
         includeSpamTrash: parsedFilters.filters.includeSpamTrash,
       });
-      return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+      return c.json({
+        messages: page.messages,
+        nextCursor: page.nextCursor,
+        source: "live",
+      });
     } catch (err) {
       return gmailReadError(opts.store, ready.grant, err);
     }
@@ -715,6 +750,15 @@ function parseLimit(value: string | undefined): number | null {
   const limit = Number(value);
   if (limit < 1 || limit > 25) return null;
   return limit;
+}
+
+/** Store list cursor is a decimal offset into the synced cache (newest-first). */
+function parseStoreOffset(cursor: string | undefined): number | null {
+  if (cursor === undefined || cursor === "") return 0;
+  if (!/^\d+$/.test(cursor)) return null;
+  const offset = Number(cursor);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return offset;
 }
 
 function isExpired(iso: string): boolean {

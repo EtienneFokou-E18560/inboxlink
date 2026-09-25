@@ -43,19 +43,25 @@ export type ListMessagesOptions = {
   /** Opaque pagination cursor from a previous `nextCursor`. */
   cursor?: string;
   /**
+   * Read model source. Default (omit / `"store"`) lists the synced cache.
+   * Pass `"live"` to hit Gmail `users.messages.list` (filters apply only here).
+   */
+  source?: "store" | "live";
+  /**
    * Gmail search query (`q`), e.g. `is:unread newer_than:7d`.
    * Combined (AND) with structured `from` / `to` / `subject` when those are set.
+   * Only applied when `source: "live"`.
    */
   q?: string;
-  /** Gmail label id(s), e.g. `INBOX`, `UNREAD` → Gmail `labelIds`. */
+  /** Gmail label id(s), e.g. `INBOX`, `UNREAD` → Gmail `labelIds`. Live only. */
   label?: string | string[];
-  /** Match From header (Gmail `from:`). */
+  /** Match From header (Gmail `from:`). Live only. */
   from?: string;
-  /** Match To header (Gmail `to:`). */
+  /** Match To header (Gmail `to:`). Live only. */
   to?: string;
-  /** Match Subject (Gmail `subject:`). */
+  /** Match Subject (Gmail `subject:`). Live only. */
   subject?: string;
-  /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). */
+  /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). Live only. */
   includeSpamTrash?: boolean;
 };
 
@@ -74,6 +80,12 @@ export type LinkSessionResult = {
 export type ListMessagesResult = {
   messages: Message[];
   nextCursor?: string;
+  /** `"store"` (synced cache, default) or `"live"` (Gmail list). */
+  source?: "store" | "live";
+  /** When `source` is store: last sync cursor write time (`sync_cursors.updated_at`). */
+  syncedAt?: string;
+  /** When `source` is store: Gmail history watermark from the last successful sync. */
+  historyId?: string;
 };
 
 export type SyncResult = {
@@ -337,11 +349,14 @@ class MessagesApi {
   /**
    * List normalized messages for a grant.
    * Maps to `GET /v1/grants/:grantId/messages`.
+   * Default `source` is the synced store cache; pass `source: "live"` for Gmail list + filters.
+   * Store responses may include `syncedAt` / `historyId` freshness fields.
    */
   list(grantId: string, opts?: ListMessagesOptions): Promise<ListMessagesResult> {
     const q = new URLSearchParams();
     if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
     if (opts?.cursor) q.set("cursor", opts.cursor);
+    if (opts?.source) q.set("source", opts.source);
     if (opts?.q) q.set("q", opts.q);
     if (opts?.from) q.set("from", opts.from);
     if (opts?.to) q.set("to", opts.to);

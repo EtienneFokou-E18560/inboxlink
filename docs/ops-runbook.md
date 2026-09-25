@@ -109,7 +109,8 @@ Inline `POST /v1/grants/:grantId/sync` and message list/get talk to Google from 
 | Symptom | Likely cause | Mitigation |
 |---------|--------------|------------|
 | `502` `gmail_unavailable` with Gmail status **429** | Google quota / user-rate limit | Back off; reduce concurrent sync/list; retry later. Logs: `gmail_unavailable` + `gmailStatus: 429`. |
-| Function **timeout** during sync | Large mailbox / slow Gmail RTT vs Vercel `maxDuration` | Sync is still **inline**; keep payloads small. Prefer incremental sync after a successful bootstrap; avoid hammering `POST …/sync` in a loop. |
+| Function **timeout** during sync | Large mailbox / slow Gmail RTT vs Vercel `maxDuration` | Sync stays **inline**; `api/index.ts` / `vercel.json` set `maxDuration: 60`. Prefer incremental sync after bootstrap; avoid hammering `POST …/sync`. Bootstrap no longer wipe-then-caps the cache. |
+| Empty / stale list after Connect | Host listed before `POST …/sync`, or expected live Gmail | Default `GET …/messages` is **store**; run sync first, or use `?source=live`. Check `syncedAt` / `historyId` on store responses. |
 | Cold start + cache miss stampede | New isolate empty access-token cache | Expected; tokens re-refresh. Not a durability bug. |
 
 Do **not** raise Google quotas by embedding Production secrets in CI or this doc. If 429s persist under normal host load, investigate per-grant polling frequency on the host side first.

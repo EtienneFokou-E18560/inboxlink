@@ -230,6 +230,38 @@ describe("Gmail history sync watermark", () => {
     assert.ok(hits.some((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?")));
   });
 
+  it("bootstraps without wiping messages already in the cache", async () => {
+    resetGmail();
+    listIds = ["msg-a"];
+    profileHistoryId = "10050";
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_no_wipe");
+    await sealGrant(store, vault, grant);
+    await store.upsertMessages([
+      {
+        id: "msg_prior",
+        grantId: grant.id,
+        providerMessageId: "prior",
+        subject: "Prior",
+        snippet: "Prior",
+        from: [],
+        to: [],
+        sentAt: new Date(0).toISOString(),
+        receivedAt: new Date(0).toISOString(),
+        folderIds: [],
+        hasAttachments: false,
+      },
+    ]);
+    const app = appFor(store, vault);
+    const res = await app.request(`/v1/grants/${grant.id}/sync`, { method: "POST" });
+    assert.equal(res.status, 200);
+    const cached = await store.listMessages(grant.id);
+    assert.equal(cached.length, 2);
+    assert.ok(cached.some((m) => m.providerMessageId === "prior"));
+    assert.ok(cached.some((m) => m.providerMessageId === "msg-a"));
+  });
+
   it("applies incremental history.list adds and deletes idempotently", async () => {
     resetGmail();
     const store = new MemoryStore();
@@ -316,7 +348,7 @@ describe("Gmail history sync watermark", () => {
     assert.ok(hits.some((hit) => hit.url.includes("/history?")));
   });
 
-  it("falls back to bootstrap when historyId returns 404", async () => {
+  it("falls back to bootstrap when historyId returns 404 without wiping prior cache", async () => {
     resetGmail();
     historyStatus = 404;
     listIds = ["fresh-1"];
@@ -355,8 +387,9 @@ describe("Gmail history sync watermark", () => {
     assert.equal(body.historyId, "12000");
     assert.equal(body.upserted, 1);
     const cached = await store.listMessages(grant.id);
-    assert.equal(cached.length, 1);
-    assert.equal(cached[0]?.providerMessageId, "fresh-1");
+    assert.equal(cached.length, 2);
+    assert.ok(cached.some((m) => m.providerMessageId === "stale"));
+    assert.ok(cached.some((m) => m.providerMessageId === "fresh-1"));
   });
 
   it("persists cursors and upserts across Postgres store instances", async () => {

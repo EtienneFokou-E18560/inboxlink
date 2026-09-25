@@ -284,30 +284,48 @@ export class PostgresStore implements GrantStore {
   async upsertMessages(messages: Message[]): Promise<void> {
     if (!messages.length) return;
     await this.db.ensure();
+    // Single multi-row upsert to cut Neon RTT vs one INSERT per message.
+    const ids: string[] = [];
+    const grantIds: string[] = [];
+    const providerIds: string[] = [];
+    const threadIds: Array<string | null> = [];
+    const subjects: string[] = [];
+    const snippets: string[] = [];
+    const payloads: string[] = [];
+    const receivedAts: string[] = [];
     for (const message of messages) {
-      await this.db.sql.query(
-        `INSERT INTO messages (
-           id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-         ON CONFLICT (grant_id, provider_message_id) DO UPDATE SET
-           id = EXCLUDED.id,
-           thread_id = EXCLUDED.thread_id,
-           subject = EXCLUDED.subject,
-           snippet = EXCLUDED.snippet,
-           payload = EXCLUDED.payload,
-           received_at = EXCLUDED.received_at`,
-        [
-          message.id,
-          message.grantId,
-          message.providerMessageId,
-          message.threadId ?? null,
-          message.subject,
-          message.snippet,
-          JSON.stringify(message),
-          message.receivedAt,
-        ],
-      );
+      ids.push(message.id);
+      grantIds.push(message.grantId);
+      providerIds.push(message.providerMessageId);
+      threadIds.push(message.threadId ?? null);
+      subjects.push(message.subject);
+      snippets.push(message.snippet);
+      payloads.push(JSON.stringify(message));
+      receivedAts.push(message.receivedAt);
     }
+    await this.db.sql.query(
+      `INSERT INTO messages (
+         id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at
+       )
+       SELECT * FROM UNNEST(
+         $1::text[],
+         $2::text[],
+         $3::text[],
+         $4::text[],
+         $5::text[],
+         $6::text[],
+         $7::jsonb[],
+         $8::timestamptz[]
+       ) AS t(id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at)
+       ON CONFLICT (grant_id, provider_message_id) DO UPDATE SET
+         id = EXCLUDED.id,
+         thread_id = EXCLUDED.thread_id,
+         subject = EXCLUDED.subject,
+         snippet = EXCLUDED.snippet,
+         payload = EXCLUDED.payload,
+         received_at = EXCLUDED.received_at`,
+      [ids, grantIds, providerIds, threadIds, subjects, snippets, payloads, receivedAts],
+    );
   }
 
   async deleteMessages(grantId: string): Promise<void> {

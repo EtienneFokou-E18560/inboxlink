@@ -1,5 +1,12 @@
 # `@inboxlink/sdk` changelog
 
+## Unreleased
+
+### Store-backed list + `source=live`
+
+Default `messages.list` reads the synced store cache. Pass `source: "live"` for
+live Gmail list + filters. Store responses may include `syncedAt` / `historyId`.
+
 ## 0.1.1
 
 Release notes for hosts upgrading from `0.1.0`.
@@ -7,14 +14,16 @@ Release notes for hosts upgrading from `0.1.0`.
 ### Message list filters
 
 `messages.list` / `messages.iterate` now forward Gmail list filters to
-`GET /v1/grants/:id/messages` (requires a Production / self-host that includes #35):
+`GET /v1/grants/:id/messages` (requires a Production / self-host that includes #35).
+**With Wave B servers, filters apply only when `source: "live"`.**
 
 | Option | Behavior |
 |--------|----------|
-| `q` | Gmail search query (e.g. `is:unread newer_than:7d`) |
-| `from` / `to` / `subject` | Structured header matchers (AND-merged into `q`) |
-| `label` | Gmail label id(s) → `labelIds` (string or string[]) |
-| `includeSpamTrash` | Include SPAM/TRASH in results |
+| `source` | `"store"` (default) or `"live"` |
+| `q` | Gmail search query (e.g. `is:unread newer_than:7d`) — live only |
+| `from` / `to` / `subject` | Structured header matchers (AND-merged into `q`) — live only |
+| `label` | Gmail label id(s) → `labelIds` (string or string[]) — live only |
+| `includeSpamTrash` | Include SPAM/TRASH in results — live only |
 
 ### Other notes since 0.1.0
 
