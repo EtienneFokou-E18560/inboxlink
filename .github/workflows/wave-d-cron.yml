@@ -12,7 +12,7 @@ on:
   schedule:
     # Daily watch renew (Google recommends renewing daily; watches expire ≤7 days)
     - cron: "0 6 * * *"
-    # Drain sync jobs every 15 minutes as a backup to Vercel */5 cron
+    # Drain sync jobs every 15 minutes (Hobby Vercel cannot run sub-daily crons)
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:

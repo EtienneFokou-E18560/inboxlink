@@ -128,7 +128,7 @@ On Connect, InboxLink calls Gmail `users.watch` (best-effort). Watches expire wi
 | `GET\|POST /v1/internal/cron/renew-gmail-watches` | `CRON_SECRET` Bearer | Renew watches for all active Gmail grants |
 | `GET\|POST /v1/internal/cron/drain-sync-jobs` | `CRON_SECRET` Bearer | Process queued `sync_jobs` |
 
-Vercel `vercel.json` schedules drain every 5 minutes and renew at 06:00 UTC. Backup: [`.github/workflows/wave-d-cron.yml`](../.github/workflows/wave-d-cron.yml) (needs secrets `INBOXLINK_CRON_BASE_URL` + `CRON_SECRET`).
+Vercel `vercel.json` schedules **daily** drain (`0 7 * * *`) and renew (`0 6 * * *`) — Hobby plans reject sub-daily cron expressions (deployment fails). Frequent drain uses [`.github/workflows/wave-d-cron.yml`](../.github/workflows/wave-d-cron.yml) (every 15 minutes; needs secrets `INBOXLINK_CRON_BASE_URL` + `CRON_SECRET`). A best-effort deferred drain also runs after `POST …/sync` enqueue.
 
 **Fallback:** If push is silent, history returns **404**, or watch expired → `syncGmailGrant` re-bootstraps without crashing. Hosts can always `POST …/sync` (poll).
 
