@@ -83,7 +83,7 @@ function pair(db: PgDatabase) {
     storeKind: "postgres",
     queue: null,
   });
-  return { app, vault };
+  return { app, vault, store };
 }
 
 function connectAuthUrl(html: string): URL {
@@ -134,13 +134,21 @@ describe("shared Postgres store across instances", () => {
 
     const connect = await second.app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
-    const state = connectAuthUrl(await connect.text()).searchParams.get("state");
+    const authUrl = connectAuthUrl(await connect.text());
+    const state = authUrl.searchParams.get("state");
     assert.ok(state);
+    assert.ok(authUrl.searchParams.get("code_challenge"));
+    assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
+    const pending = await first.store.findSessionByOAuthState(state);
+    assert.ok(pending?.codeVerifier);
 
     const callback = await first.app.request(
       `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     );
     assert.equal(callback.status, 302);
+    const afterCallback = await second.store.getSession(pending.id);
+    assert.equal(afterCallback?.codeVerifier, undefined);
+    assert.equal(afterCallback?.oauthState, undefined);
     const redirected = new URL(callback.headers.get("location") ?? "");
     const publicToken = redirected.searchParams.get("public_token");
     assert.ok(publicToken);

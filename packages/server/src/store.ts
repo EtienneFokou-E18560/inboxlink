@@ -3,6 +3,8 @@ import { newId, randomToken } from "@inboxlink/core";
 
 export type StoredSession = LinkSession & {
   oauthState?: string;
+  /** RFC 7636 code_verifier; set at Connect, used once on token exchange. */
+  codeVerifier?: string;
   publicToken?: string;
   grantId?: string;
 };

@@ -52,6 +52,7 @@ type SessionRow = {
   products: unknown;
   status: string;
   oauth_state: string | null;
+  code_verifier: string | null;
   public_token: string | null;
   grant_id: string | null;
   created_at: Date | string;
@@ -72,7 +73,7 @@ type GrantRow = {
 
 const SESSION_COLUMNS = `
   id, link_token, tenant_id, external_user_id, redirect_uri, products, status,
-  oauth_state, public_token, grant_id, created_at, expires_at
+  oauth_state, code_verifier, public_token, grant_id, created_at, expires_at
 `;
 
 export class PostgresStore implements GrantStore {
@@ -156,16 +157,18 @@ export class PostgresStore implements GrantStore {
       `UPDATE link_sessions SET
          status = $2,
          oauth_state = $3,
-         public_token = $4,
-         grant_id = $5,
-         redirect_uri = $6,
-         products = $7::jsonb,
-         expires_at = $8
+         code_verifier = $4,
+         public_token = $5,
+         grant_id = $6,
+         redirect_uri = $7,
+         products = $8::jsonb,
+         expires_at = $9
        WHERE id = $1`,
       [
         session.id,
         session.status,
         session.oauthState ?? null,
+        session.codeVerifier ?? null,
         session.publicToken ?? null,
         session.grantId ?? null,
         session.redirectUri,
@@ -404,6 +407,7 @@ function mapSession(row: SessionRow): StoredSession {
     expiresAt: asIso(row.expires_at),
   };
   if (row.oauth_state) session.oauthState = row.oauth_state;
+  if (row.code_verifier) session.codeVerifier = row.code_verifier;
   if (row.public_token) session.publicToken = row.public_token;
   if (row.grant_id) session.grantId = row.grant_id;
   return session;
