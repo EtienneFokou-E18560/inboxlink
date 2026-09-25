@@ -61,6 +61,20 @@ When Gmail refresh fails or list returns 401/403, the grant is marked `needs_rea
 
 **Fix:** create a new link session and complete Connect again (same `externalUserId` is fine). Do not reuse an old `public_token`. List grants should show `status: "needs_reauth"` until a new grant replaces it or you revoke.
 
+## Access-token cache
+
+Message list/get/sync open the vault and call Google’s token endpoint only on a **cache miss**. Short-lived access tokens are kept in an **in-process Map keyed by grant id** (shared by routes + sync inside one Node / Vercel isolate).
+
+| Limit | Behavior |
+|-------|----------|
+| Scope | Per isolate only — not Redis, not Postgres, not shared across Vercel instances |
+| Cold start | Always miss (empty Map after a new function instance boots) |
+| TTL | Google `expires_in` minus 60s skew; if omitted, ~50 minutes |
+| Invalidate | Grant delete, refresh failure, Gmail 401/403 |
+| Secrets | **Access** tokens only — refresh tokens never enter this cache |
+
+Expect fewer Google refresh RTTs on warm paths; do not rely on the cache for durability or cross-instance coherence.
+
 ## OAuth callback failures
 
 Browser HTML pages (not JSON) on `/v1/oauth/gmail/callback`:

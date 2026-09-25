@@ -39,9 +39,11 @@ User browser ──► GET /v1/connect/:linkToken (stub HTML)
                  Store saves grant (memory or Postgres)
                       │
 Host ── POST /v1/grants/exchange (one-time public_token) ──► grantId
-Host ── GET  /v1/grants/:id/messages ── open vault → refresh → Gmail list
+Host ── GET  /v1/grants/:id/messages ── vault/cache → refresh if needed → Gmail list
 Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
 ```
+
+Short-lived **access** tokens are cached in-process per grant (see [docs/ops-runbook.md](docs/ops-runbook.md#access-token-cache)); refresh tokens stay in the vault only.
 
 | Layer | Location | Role |
 |-------|----------|------|

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import type { Grant, Message } from "@inboxlink/core";
+import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createApp } from "./routes/app.js";
@@ -124,6 +125,10 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     google.close((err) => (err ? reject(err) : resolve()));
   });
+});
+
+beforeEach(() => {
+  resetAccessTokenCacheForTests();
 });
 
 function gmail() {

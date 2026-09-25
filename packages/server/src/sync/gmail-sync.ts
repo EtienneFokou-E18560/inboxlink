@@ -1,12 +1,16 @@
-import type { Grant, Message, SyncCursor, TokenVault } from "@inboxlink/core";
+import type { Grant, Message, SyncCursor } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError, type GmailHistoryRecord } from "@inboxlink/adapters-gmail";
+import { getAccessTokenCache } from "../access-token-cache.js";
+import {
+  markNeedsReauth,
+  openGrantAccessToken,
+  type CiphertextVault,
+} from "../gmail-access.js";
 import type { GrantStore } from "../store.js";
 
 const BOOTSTRAP_MAX = 50;
 
-export type CiphertextVault = TokenVault & {
-  getCiphertext(grantId: string): Uint8Array | undefined | Promise<Uint8Array | undefined>;
-};
+export type { CiphertextVault };
 
 export type SyncResult = {
   grantId: string;
@@ -71,6 +75,7 @@ export async function syncGmailGrant(input: {
     });
   } catch (err) {
     if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+      getAccessTokenCache().invalidate(grantId);
       await markNeedsReauth(store, grant);
       return {
         grantId,
@@ -210,6 +215,17 @@ function applyHistoryRecord(
   }
 }
 
+async function openAccessToken(input: {
+  store: GrantStore;
+  vault: CiphertextVault;
+  gmail: GmailAdapter;
+  grant: Grant;
+}): Promise<{ status: "ok"; accessToken: string } | { status: "needs_reauth"; error: string }> {
+  const access = await openGrantAccessToken(input);
+  if (access.ok) return { status: "ok", accessToken: access.accessToken };
+  return { status: "needs_reauth", error: access.error };
+}
+
 async function putHistoryCursor(store: GrantStore, grantId: string, historyId: string): Promise<void> {
   const cursor: SyncCursor = {
     grantId,
@@ -218,39 +234,4 @@ async function putHistoryCursor(store: GrantStore, grantId: string, historyId: s
     updatedAt: new Date().toISOString(),
   };
   await store.putSyncCursor(cursor);
-}
-
-async function openAccessToken(input: {
-  store: GrantStore;
-  vault: CiphertextVault;
-  gmail: GmailAdapter;
-  grant: Grant;
-}): Promise<{ status: "ok"; accessToken: string } | { status: "needs_reauth"; error: string }> {
-  const { store, vault, gmail, grant } = input;
-  const ciphertext = await vault.getCiphertext(grant.id);
-  if (!ciphertext) {
-    return { status: "needs_reauth", error: "missing_refresh_token" };
-  }
-  let refreshToken: string;
-  try {
-    refreshToken = await vault.open(ciphertext, {
-      grantId: grant.id,
-      tenantId: grant.tenantId,
-    });
-  } catch {
-    return { status: "needs_reauth", error: "missing_refresh_token" };
-  }
-  try {
-    const refreshed = await gmail.refreshAccessToken(refreshToken);
-    return { status: "ok", accessToken: refreshed.accessToken };
-  } catch {
-    await markNeedsReauth(store, grant);
-    return { status: "needs_reauth", error: "needs_reauth" };
-  }
-}
-
-async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
-  grant.status = "needs_reauth";
-  grant.updatedAt = new Date().toISOString();
-  await store.updateGrant(grant);
 }
