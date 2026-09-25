@@ -30,6 +30,13 @@ export type ServerConfig = {
   /** Soft abuse guard for Connect + host APIs (single and multi). */
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
+  /**
+   * Host webhook callback URL (Wave C). Delivery is off unless both URL and
+   * `webhookSecret` are set. No DB-backed destinations in this wave.
+   */
+  webhookUrl?: string;
+  /** HMAC-SHA256 shared secret for outbound webhooks (`INBOXLINK_WEBHOOK_SECRET`). */
+  webhookSecret?: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -74,7 +81,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
     rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
+    webhookUrl: optionalTrimmed(env.INBOXLINK_WEBHOOK_URL),
+    webhookSecret: optionalTrimmed(env.INBOXLINK_WEBHOOK_SECRET),
   };
+}
+
+function optionalTrimmed(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  return value ? value : undefined;
 }
 
 /**

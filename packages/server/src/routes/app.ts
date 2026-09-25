@@ -32,6 +32,10 @@ import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
 import { syncGmailGrant } from "../sync/gmail-sync.js";
 import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
+import {
+  emitWebhookSafe,
+  type WebhookBus,
+} from "../webhooks/deliver.js";
 
 export type AppEnv = {
   Variables: {
@@ -70,6 +74,11 @@ export type CreateAppOptions = {
    * Also drives browser CORS (never `*`) together with `publicBaseUrl`.
    */
   allowedRedirectOrigins?: string[] | null;
+  /**
+   * Outbound host webhook bus (Wave C). Omit / null = no delivery.
+   * Failures must never fail Connect or sync HTTP responses.
+   */
+  webhooks?: WebhookBus | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -413,6 +422,15 @@ export function createApp(opts: CreateAppOptions) {
       store: opts.storeKind ?? "memory",
     });
 
+    // Host webhook: grant.connected (awaited but never fails Connect).
+    await emitWebhookSafe(opts.webhooks, "grant.connected", {
+      grantId,
+      tenantId: session.tenantId,
+      externalUserId: session.externalUserId,
+      provider: "gmail",
+      email: grant.email,
+    });
+
     if (opts.queue) {
       await opts.queue.enqueue({
         grantId,
@@ -531,7 +549,7 @@ export function createApp(opts: CreateAppOptions) {
         source: "live",
       });
     } catch (err) {
-      return gmailReadError(opts.store, ready.grant, err);
+      return gmailReadError(opts, ready.grant, err);
     }
   });
 
@@ -559,7 +577,7 @@ export function createApp(opts: CreateAppOptions) {
       if (err instanceof GmailApiError && err.status === 404) {
         return c.json({ error: "not_found" }, 404);
       }
-      return gmailReadError(opts.store, ready.grant, err);
+      return gmailReadError(opts, ready.grant, err);
     }
   });
 
@@ -600,6 +618,14 @@ export function createApp(opts: CreateAppOptions) {
     });
 
     if (result.status === "needs_reauth") {
+      await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
+        grantId: grant.id,
+        tenantId: grant.tenantId,
+        externalUserId: grant.externalUserId,
+        provider: grant.provider,
+        email: grant.email,
+        reason: "sync",
+      });
       return c.json(
         {
           grantId,
@@ -621,6 +647,17 @@ export function createApp(opts: CreateAppOptions) {
         502,
       );
     }
+
+    await emitWebhookSafe(opts.webhooks, "sync.completed", {
+      grantId: result.grantId,
+      tenantId: grant.tenantId,
+      externalUserId: grant.externalUserId,
+      provider: grant.provider,
+      mode: result.mode,
+      historyId: result.historyId,
+      upserted: result.upserted,
+      deleted: result.deleted,
+    });
 
     return c.json({
       grantId,
@@ -697,6 +734,14 @@ async function openGmailAccess(
       tenantId: grant.tenantId,
       reason: "refresh_rejected",
     });
+    await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      externalUserId: grant.externalUserId,
+      provider: grant.provider,
+      email: grant.email,
+      reason: "refresh_rejected",
+    });
     return {
       ok: false,
       error: "needs_reauth",
@@ -713,15 +758,27 @@ function accessBody(access: GmailAccessFailure): { error: string; guidance?: str
     : { error: access.error };
 }
 
-async function gmailReadError(store: GrantStore, grant: Grant, err: unknown): Promise<Response> {
+async function gmailReadError(
+  opts: CreateAppOptions,
+  grant: Grant,
+  err: unknown,
+): Promise<Response> {
   if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
     getAccessTokenCache().invalidate(grant.id);
-    await markNeedsReauth(store, grant);
+    await markNeedsReauth(opts.store, grant);
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,
       reason: "gmail_unauthorized",
       gmailStatus: err.status,
+    });
+    await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      externalUserId: grant.externalUserId,
+      provider: grant.provider,
+      email: grant.email,
+      reason: "gmail_unauthorized",
     });
     return Response.json({ error: "needs_reauth", guidance: NEEDS_REAUTH_GUIDANCE }, { status: 409 });
   }

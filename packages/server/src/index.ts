@@ -12,6 +12,7 @@ import { createRateLimiter } from "./rate-limit.js";
 import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
+import { createWebhookBus } from "./webhooks/deliver.js";
 
 type AppBundle = {
   app: ReturnType<typeof createApp>;
@@ -60,6 +61,10 @@ export function createAppFromEnv(
       maxRequests: config.rateLimitMaxRequests,
     }),
     allowedRedirectOrigins: config.allowedRedirectOrigins,
+    webhooks: createWebhookBus({
+      url: config.webhookUrl,
+      secret: config.webhookSecret,
+    }),
   });
   // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).
   void store.deleteExpiredSessions().catch(() => {});
@@ -130,3 +135,11 @@ export {
   redactString,
 };
 export { syncGmailGrant } from "./sync/gmail-sync.js";
+export {
+  createWebhookBus,
+  deliverWebhookEvent,
+  emitWebhookSafe,
+  signWebhookBody,
+  shouldRetryStatus,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "./webhooks/deliver.js";
