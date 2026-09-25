@@ -41,7 +41,7 @@
     "tsx": "^4.19.3"
   },
   "optionalDependencies": {
-    "bullmq": "^5.44.0",
+    "bullmq": "^6.3.6",
     "ioredis": "^6.0.0"
   },
   "engines": {
