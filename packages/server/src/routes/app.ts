@@ -27,6 +27,8 @@ import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
+import { getAccessTokenCache } from "../access-token-cache.js";
+import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
 import { syncGmailGrant } from "../sync/gmail-sync.js";
 import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
@@ -426,6 +428,7 @@ export function createApp(opts: CreateAppOptions) {
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     await opts.vault.destroy(grantId);
+    getAccessTokenCache().invalidate(grantId);
     await opts.store.deleteGrant(grantId, tenantId);
     await opts.store.deleteMessages(grantId);
     return c.body(null, 204);
@@ -620,19 +623,14 @@ async function openGmailAccess(
   opts: CreateAppOptions,
   grant: Grant,
 ): Promise<{ ok: true; accessToken: string } | GmailAccessFailure> {
-  const ciphertext = await opts.vault.getCiphertext(grant.id);
-  if (!ciphertext) return { ok: false, error: "missing_refresh_token", status: 409 };
-  let refreshToken: string;
-  try {
-    refreshToken = await opts.vault.open(ciphertext, { grantId: grant.id, tenantId: grant.tenantId });
-  } catch {
-    return { ok: false, error: "missing_refresh_token", status: 409 };
-  }
-  try {
-    const accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
-    return { ok: true, accessToken };
-  } catch {
-    await markNeedsReauth(opts.store, grant);
+  const access = await openGrantAccessToken({
+    store: opts.store,
+    vault: opts.vault,
+    gmail: opts.gmail,
+    grant,
+  });
+  if (access.ok) return access;
+  if (access.error === "needs_reauth") {
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,
@@ -645,6 +643,7 @@ async function openGmailAccess(
       guidance: NEEDS_REAUTH_GUIDANCE,
     };
   }
+  return { ok: false, error: access.error, status: 409 };
 }
 
 function accessBody(access: GmailAccessFailure): { error: string; guidance?: string } {
@@ -655,6 +654,7 @@ function accessBody(access: GmailAccessFailure): { error: string; guidance?: str
 
 async function gmailReadError(store: GrantStore, grant: Grant, err: unknown): Promise<Response> {
   if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+    getAccessTokenCache().invalidate(grant.id);
     await markNeedsReauth(store, grant);
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
@@ -689,12 +689,6 @@ function parseLimit(value: string | undefined): number | null {
   const limit = Number(value);
   if (limit < 1 || limit > 25) return null;
   return limit;
-}
-
-async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
-  grant.status = "needs_reauth";
-  grant.updatedAt = new Date().toISOString();
-  await store.updateGrant(grant);
 }
 
 function isExpired(iso: string): boolean {

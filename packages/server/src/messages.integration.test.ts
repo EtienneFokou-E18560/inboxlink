@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import type { Grant, Message } from "@inboxlink/core";
+import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
 import { createApp } from "./routes/app.js";
@@ -150,6 +151,10 @@ after(async () => {
   await new Promise<void>((resolve, reject) => {
     google.close((err) => (err ? reject(err) : resolve()));
   });
+});
+
+beforeEach(() => {
+  resetAccessTokenCacheForTests();
 });
 
 function gmail() {
@@ -489,6 +494,55 @@ describe("Gmail message get-by-id", () => {
 
     const unknownGrant = await app.request("/v1/grants/grant_missing/messages/msg_18c1abc");
     assert.equal(unknownGrant.status, 404);
+  });
+
+  it("refreshes the access token once across list and get for the same grant", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_cache_hit");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    const listed = await app.request(`/v1/grants/${grant.id}/messages?limit=1`);
+    assert.equal(listed.status, 200);
+    const got = await app.request(`/v1/grants/${grant.id}/messages/msg_18c1abc`);
+    assert.equal(got.status, 200);
+    const listedAgain = await app.request(`/v1/grants/${grant.id}/messages?limit=1`);
+    assert.equal(listedAgain.status, 200);
+
+    const tokenHits = hits.filter((hit) => hit.url.startsWith("/token"));
+    assert.equal(tokenHits.length, 1);
+    assert.ok(hits.some((hit) => hit.url.includes("/messages/18c1abc") && hit.url.includes("format=full")));
+  });
+
+  it("invalidates the cached access token when the grant is deleted", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_cache_revoke");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    assert.equal((await app.request(`/v1/grants/${grant.id}/messages?limit=1`)).status, 200);
+    assert.equal(hits.filter((h) => h.url.startsWith("/token")).length, 1);
+
+    const del = await app.request(`/v1/grants/${grant.id}`, { method: "DELETE" });
+    assert.equal(del.status, 204);
+
+    // Recreate grant + vault entry under the same id (new Connect).
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    hits = [];
+    assert.equal((await app.request(`/v1/grants/${grant.id}/messages?limit=1`)).status, 200);
+    assert.equal(hits.filter((h) => h.url.startsWith("/token")).length, 1);
   });
 });
 
