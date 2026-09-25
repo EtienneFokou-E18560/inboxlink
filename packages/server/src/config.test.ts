@@ -49,4 +49,16 @@ describe("public URL and OAuth redirect", () => {
       "http://127.0.0.1:9999",
     ]);
   });
+
+  it("loads webhook URL and secret when set", () => {
+    const config = loadConfig({
+      INBOXLINK_WEBHOOK_URL: " https://hooks.example/inbox ",
+      INBOXLINK_WEBHOOK_SECRET: " whsec ",
+    });
+    assert.equal(config.webhookUrl, "https://hooks.example/inbox");
+    assert.equal(config.webhookSecret, "whsec");
+    const off = loadConfig({});
+    assert.equal(off.webhookUrl, undefined);
+    assert.equal(off.webhookSecret, undefined);
+  });
 });

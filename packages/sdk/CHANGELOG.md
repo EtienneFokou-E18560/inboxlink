@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Host webhook verify docs
+
+Documented server-delivered events (`grant.connected`, `grant.needs_reauth`,
+`sync.completed`) and how to use `webhooks.verify` against
+`X-InboxLink-Signature`. Delivery is configured on the InboxLink server via
+`INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET`.
+
 ### Store-backed list + `source=live`
 
 Default `messages.list` reads the synced store cache. Pass `source: "live"` for
