@@ -33,7 +33,7 @@ Healthy Production shape:
 
 `GET /health` is public (no Bearer). Host APIs (`/v1/link/sessions`, grants, messages) require `Authorization: Bearer <INBOXLINK_API_SECRET>`.
 
-Optional alert (no new SaaS): cron or GitHub Action that runs `scripts/smoke-health.sh` against Production and pages you on non-zero exit. Vercel’s own failure emails cover function crashes.
+**Automated smoke:** GitHub Actions workflow [`.github/workflows/production-health-smoke.yml`](../.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh` on a 6-hour schedule and via **Actions → Production health smoke → Run workflow**. It fails the job if `ok` is not `true` or `store` is not `postgres`. Optional repo variable `INBOXLINK_PRODUCTION_URL` overrides the default Production base URL; do not store Production secrets in git or workflow files (health is public). GitHub emails on workflow failure; Vercel’s own emails cover function crashes.
 
 ## Structured logs
 
