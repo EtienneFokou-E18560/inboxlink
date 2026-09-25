@@ -8,7 +8,7 @@
  *
  * Env (host-only):
  *   INBOXLINK_BASE_URL      optional — defaults to Production via SDK
- *   INBOXLINK_API_SECRET    optional — only for multi mode
+ *   INBOXLINK_API_SECRET    required for Production / multi (never browsers)
  */
 import {
   InboxLink,
@@ -17,6 +17,14 @@ import {
 
 const baseUrl = process.env.INBOXLINK_BASE_URL?.trim() || undefined;
 const apiSecret = process.env.INBOXLINK_API_SECRET?.trim() || undefined;
+
+if (!apiSecret && !baseUrl) {
+  console.error(
+    "FAIL: Production is multi — set INBOXLINK_API_SECRET (never ship to browsers).",
+  );
+  console.error("For local single-mode, set INBOXLINK_BASE_URL=http://localhost:8787");
+  process.exit(1);
+}
 
 function arg(name) {
   const i = process.argv.indexOf(name);

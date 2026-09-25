@@ -24,7 +24,8 @@ No local InboxLink server required if you use the shared Production instance (Gm
 ```bash
 pnpm --filter @inboxlink/core --filter @inboxlink/sdk build
 
-# Defaults: Production base URL, no API secret (single mode)
+# Production is multi — Bearer / apiSecret required (never commit the real value)
+export INBOXLINK_API_SECRET=…   # from your secret store; not for browsers
 export REDIRECT_URI=http://127.0.0.1:9999/done
 node examples/host-integration/sdk-host.mjs
 ```
@@ -32,8 +33,11 @@ node examples/host-integration/sdk-host.mjs
 Open the printed `connectUrl`, finish Gmail Connect, then:
 
 ```bash
+export INBOXLINK_API_SECRET=…   # same secret as above
 node examples/host-integration/done-handler.mjs --url 'http://127.0.0.1:9999/done?public_token=…'
 ```
+
+`GET /health` on Production is public and should report `"mode":"multi"`.
 
 ## Quick start (local server)
 
@@ -43,11 +47,11 @@ Terminal A — InboxLink server:
 pnpm --filter @inboxlink/server dev
 ```
 
-Terminal B:
+Terminal B (local default is often `single` — secret optional unless you set `INBOXLINK_MODE=multi`):
 
 ```bash
 export INBOXLINK_BASE_URL=http://localhost:8787
-export INBOXLINK_API_SECRET=dev-api-secret-change-me   # optional in single mode
+# export INBOXLINK_API_SECRET=dev-api-secret-change-me   # only if local is multi
 ./examples/host-integration/create-session.sh
 ```
 

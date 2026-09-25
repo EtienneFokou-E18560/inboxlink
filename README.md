@@ -120,8 +120,8 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `GOOGLE_CLIENT_ID` | **Yes** for live Gmail | OAuth **web** client |
 | `GOOGLE_CLIENT_SECRET` | **Yes** for live Gmail | Matching secret |
 | `GOOGLE_REDIRECT_URI` | Strongly recommended | Must match Console exactly (local or prod callback URL) |
-| `INBOXLINK_MODE` | Optional | Default **`single`** (no Bearer). Do not flip Production to `multi` without an explicit ops decision and a real API secret. |
-| `INBOXLINK_API_SECRET` | If `multi` | Bearer for the default tenant (`/v1/*` except oauth/connect). Never commit real values. |
+| `INBOXLINK_MODE` | Optional (local) | Local default **`single`**. **Production is `multi`** and requires Bearer / `INBOXLINK_API_SECRET`. |
+| `INBOXLINK_API_SECRET` | If `multi` (incl. Production) | Bearer for the default tenant (`/v1/*` except oauth/connect/health). Never commit real values; never ship to browsers. |
 | `INBOXLINK_TENANT_ID` | Optional | Tenant id for `INBOXLINK_API_SECRET` (default `default`) |
 | `INBOXLINK_TENANT_SECRETS` | Optional | Extra `tenantId=secret` pairs (comma/newline) for multiple host apps |
 | `INBOXLINK_RATE_LIMIT_WINDOW_MS` / `INBOXLINK_RATE_LIMIT_MAX` | Optional | Soft in-process abuse guard in multi (defaults 60000 / 120) |
@@ -140,8 +140,8 @@ Reproduce health → session → (browser Connect) → exchange → list grants 
 # Local (server already running):
 ./scripts/proof-curl.sh
 
-# Production smoke (health + session create only until you Connect in a browser):
-BASE_URL=https://inboxlink-two.vercel.app ./scripts/proof-curl.sh
+# Production smoke (health is public; host APIs need Bearer):
+BASE_URL=https://inboxlink-two.vercel.app INBOXLINK_API_SECRET=… ./scripts/proof-curl.sh
 
 # After Connect redirect, continue with tokens from your private notes:
 PUBLIC_TOKEN=… ./scripts/proof-curl.sh exchange
@@ -161,7 +161,7 @@ curl -sS -X POST http://localhost:8787/v1/link/sessions \
 
 Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange**. Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
 
-List messages for a grant (`single` mode needs no API key):
+List messages for a grant (local `single` needs no API key; Production / `multi` needs Bearer):
 
 ```bash
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
@@ -195,8 +195,10 @@ Hosts talk to InboxLink over HTTP. **Do not set `GOOGLE_*` in the host** — Goo
 ```ts
 import { InboxLink } from "@inboxlink/sdk";
 
-// Production + single mode: baseUrl defaults; apiSecret omitted
-const il = new InboxLink();
+// Production is multi — apiSecret required (server-side; never browsers)
+const il = new InboxLink({
+  apiSecret: process.env.INBOXLINK_API_SECRET,
+});
 
 const session = await il.createConnectSession({
   externalUserId: "user-1",
@@ -240,9 +242,11 @@ Set Project → Environment Variables from the checklist above (never commit Pro
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local checks, PR expectations, and scope rules.
 
-### Multi mode (optional)
+### Multi mode
 
-Default mode is **`single`** — demos and Production should not flip to `multi` casually. When you do enable multi:
+**Production runs `INBOXLINK_MODE=multi`.** Host APIs require `Authorization: Bearer <INBOXLINK_API_SECRET>` (SDK: `apiSecret`). Unauthenticated `POST /v1/link/sessions` returns `401`. `GET /health` stays public (expect `"mode":"multi"`, `"store":"postgres"`). Never ship the API secret to browsers.
+
+Local default remains **`single`** for easy demos. When you enable multi (Production or self-host):
 
 1. Set `INBOXLINK_MODE=multi` and a **non-placeholder** `INBOXLINK_API_SECRET` (hosted/production refuses the committed `dev-api-secret-change-me` value).
 2. Host apps must send `Authorization: Bearer <secret>` on every host API (not Basic, not bare tokens).
