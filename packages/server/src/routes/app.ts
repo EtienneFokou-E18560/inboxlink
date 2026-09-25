@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
-import { newId, randomToken } from "@inboxlink/core";
+import { createPkcePair, newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
 import {
   connectErrorStatus,
@@ -283,13 +283,16 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
     const state = randomToken(16);
+    const { codeVerifier, codeChallenge } = createPkcePair();
     session.oauthState = state;
+    session.codeVerifier = codeVerifier;
     await opts.store.saveSession(session);
     const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
       redirectUri,
       scopes: opts.gmailScopes,
+      codeChallenge,
     });
     return c.html(
       renderConnectPage({
@@ -331,7 +334,11 @@ export function createApp(opts: CreateAppOptions) {
     const redirectUri = oauthRedirectUri(opts);
     let tokens;
     try {
-      tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
+      tokens = await opts.gmail.exchangeAuthorizationCode({
+        code,
+        redirectUri,
+        codeVerifier: session.codeVerifier,
+      });
     } catch (err) {
       const reason = googleErrorCode(err);
       log.warn("oauth_callback_failed", { reason, store: opts.storeKind ?? "memory" });
@@ -373,6 +380,7 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
     session.oauthState = undefined;
+    session.codeVerifier = undefined;
     const publicToken = randomToken(24);
     session.status = "completed";
     session.grantId = grantId;
