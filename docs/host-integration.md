@@ -133,7 +133,7 @@ The public token is **consumed once**. Persist `grantId` against your user. Late
 ### 4. Use the grant (messages)
 
 ```ts
-await il.grants.sync(grantId); // populate / refresh synced cache
+await il.grants.sync(grantId); // enqueue (202 + jobId); poll getSyncJob or wait for webhook
 const page = await il.messages.list(grantId, { limit: 25 });
 // page.syncedAt / page.historyId reflect last sync cursor when source=store
 const live = await il.messages.list(grantId, {
@@ -161,9 +161,14 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set on 
 |-------|------|
 | `grant.connected` | OAuth Connect succeeds and a grant is vaulted |
 | `grant.needs_reauth` | Refresh / Gmail auth fails and the grant is marked `needs_reauth` |
-| `sync.completed` | `POST /v1/grants/:id/sync` finishes successfully |
+| `sync.completed` | Sync job completes successfully (API drain, cron, or Gmail push apply) |
+| `message.created` | New message upserted from Gmail Pub/Sub push apply |
 
-`message.created` is deferred (Wave D / Gmail push). Delivery is at-least-once with bounded retries (retry on 408/429/5xx; drop on hard 4xx). Failures never break Connect redirects or sync HTTP responses.
+Delivery is at-least-once with bounded retries (retry on 408/429/5xx; drop on hard 4xx). Failures never break Connect redirects or sync HTTP responses.
+
+### Async sync API
+
+`POST /v1/grants/:id/sync` returns **202** `{ jobId, status: "queued" }`. Poll `GET /v1/grants/:id/sync/jobs/:jobId` (or `il.grants.getSyncJob`) for `completed` / `failed`. See [ops-runbook](./ops-runbook.md#async-sync-jobs-wave-d2).
 
 ### Payload + verify
 

@@ -2,11 +2,12 @@ import { createHmac } from "node:crypto";
 import { newId } from "@inboxlink/core";
 import { log } from "../log.js";
 
-/** Events emitted by the host webhook bus (Wave C). `message.created` deferred to Wave D. */
+/** Events emitted by the host webhook bus (Waves C–D). */
 export type WebhookEventType =
   | "grant.connected"
   | "grant.needs_reauth"
-  | "sync.completed";
+  | "sync.completed"
+  | "message.created";
 
 export type WebhookEvent = {
   id: string;

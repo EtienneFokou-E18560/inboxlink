@@ -259,6 +259,34 @@ export class GmailAdapter implements MailboxAdapter {
     };
   }
 
+  /**
+   * Register a Gmail push watch (`users.watch`) against a Cloud Pub/Sub topic.
+   * Expiration is ≤7 days (ms epoch string from Google); renew daily.
+   * Requires topic IAM: `gmail-api-push@system.gserviceaccount.com` as publisher.
+   */
+  async watchMailbox(input: {
+    accessToken: string;
+    /** Full topic resource name, e.g. `projects/my-proj/topics/gmail-push`. */
+    topicName: string;
+    labelIds?: string[];
+  }): Promise<GmailWatchResult> {
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/watch`);
+    const body = {
+      topicName: input.topicName,
+      labelIds: input.labelIds ?? ["INBOX"],
+    };
+    const json = await gmailJsonPost<{ historyId?: string; expiration?: string }>(
+      url,
+      input.accessToken,
+      body,
+    );
+    if (!json.historyId || !json.expiration) throw new GmailApiError(502);
+    return {
+      historyId: json.historyId,
+      expiration: watchExpirationToIso(json.expiration),
+    };
+  }
+
   private async fetchNormalizedMessage(
     base: string,
     accessToken: string,
@@ -303,10 +331,39 @@ export type GmailHistoryRecord = {
   labelsRemoved?: { message?: { id?: string }; labelIds?: string[] }[];
 };
 
+export type GmailWatchResult = {
+  historyId: string;
+  /** ISO-8601 expiration time. */
+  expiration: string;
+};
+
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
   if (!res.ok) throw new GmailApiError(res.status);
   return (await res.json()) as T;
+}
+
+async function gmailJsonPost<T>(url: URL, accessToken: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new GmailApiError(res.status);
+  return (await res.json()) as T;
+}
+
+/** Google returns watch expiration as ms-since-epoch string. */
+function watchExpirationToIso(expiration: string): string {
+  const ms = Number(expiration);
+  if (Number.isFinite(ms) && ms > 0) return new Date(ms).toISOString();
+  // Already ISO or unknown — pass through if parseable.
+  const parsed = Date.parse(expiration);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  return new Date(Date.now() + 6 * 24 * 60 * 60_000).toISOString();
 }
 
 function emailFromIdToken(idToken: string | undefined): string | undefined {

@@ -8,7 +8,14 @@ import type {
   TokenVault,
 } from "@inboxlink/core";
 import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
-import type { GrantStore, StoredSession } from "../store.js";
+import type {
+  EnqueueSyncJobInput,
+  GrantStore,
+  StoredSession,
+  SyncJobKind,
+  SyncJobRecord,
+  SyncJobStatus,
+} from "../store.js";
 import { SCHEMA_SQL } from "./schema.js";
 import type { SqlExecutor } from "./sql.js";
 
@@ -247,6 +254,30 @@ export class PostgresStore implements GrantStore {
     return rows.map(mapGrant);
   }
 
+  async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow>(
+      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+       FROM grants
+       WHERE provider = 'gmail' AND status = 'active' AND lower(email) = lower($1)
+       ORDER BY created_at ASC`,
+      [email.trim()],
+    );
+    return rows.map(mapGrant);
+  }
+
+  async listActiveGmailGrants(): Promise<Grant[]> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow>(
+      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+       FROM grants
+       WHERE provider = 'gmail' AND status = 'active'
+       ORDER BY created_at ASC`,
+      [],
+    );
+    return rows.map(mapGrant);
+  }
+
   async consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined> {
     await this.db.ensure();
     const rows = await this.db.sql.query<{ grant_id: string | null }>(
@@ -349,29 +380,210 @@ export class PostgresStore implements GrantStore {
       kind: string;
       value: string;
       updated_at: Date | string;
-    }>(`SELECT grant_id, kind, value, updated_at FROM sync_cursors WHERE grant_id = $1`, [grantId]);
+      watch_expiration: Date | string | null;
+    }>(
+      `SELECT grant_id, kind, value, updated_at, watch_expiration
+       FROM sync_cursors WHERE grant_id = $1`,
+      [grantId],
+    );
     const row = rows[0];
     if (!row) return undefined;
-    return {
+    const cursor: SyncCursor = {
       grantId: row.grant_id,
       kind: asSyncCursorKind(row.kind),
       value: row.value,
       updatedAt: asIso(row.updated_at),
     };
+    if (row.watch_expiration) cursor.watchExpiration = asIso(row.watch_expiration);
+    return cursor;
   }
 
   async putSyncCursor(cursor: SyncCursor): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(
-      `INSERT INTO sync_cursors (grant_id, kind, value, updated_at)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO sync_cursors (grant_id, kind, value, updated_at, watch_expiration)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (grant_id) DO UPDATE SET
          kind = EXCLUDED.kind,
          value = EXCLUDED.value,
-         updated_at = EXCLUDED.updated_at`,
-      [cursor.grantId, cursor.kind, cursor.value, cursor.updatedAt],
+         updated_at = EXCLUDED.updated_at,
+         watch_expiration = COALESCE(EXCLUDED.watch_expiration, sync_cursors.watch_expiration)`,
+      [
+        cursor.grantId,
+        cursor.kind,
+        cursor.value,
+        cursor.updatedAt,
+        cursor.watchExpiration ?? null,
+      ],
     );
   }
+
+  async enqueueSyncJob(input: EnqueueSyncJobInput): Promise<SyncJobRecord> {
+    await this.db.ensure();
+    const now = new Date().toISOString();
+    const id = newId("sjob");
+    await this.db.sql.query(
+      `INSERT INTO sync_jobs (
+         id, grant_id, tenant_id, kind, status, force_bootstrap, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, 'queued', $5, $6, $6)`,
+      [id, input.grantId, input.tenantId, input.kind, input.forceBootstrap === true ? "1" : "0", now],
+    );
+    return {
+      id,
+      grantId: input.grantId,
+      tenantId: input.tenantId,
+      kind: input.kind,
+      status: "queued",
+      forceBootstrap: input.forceBootstrap === true,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async getSyncJob(jobId: string): Promise<SyncJobRecord | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SyncJobRow>(
+      `SELECT id, grant_id, tenant_id, kind, status, force_bootstrap, result, error,
+              created_at, updated_at, started_at, finished_at
+       FROM sync_jobs WHERE id = $1`,
+      [jobId],
+    );
+    return rows[0] ? mapSyncJob(rows[0]) : undefined;
+  }
+
+  async claimQueuedSyncJobs(limit: number): Promise<SyncJobRecord[]> {
+    await this.db.ensure();
+    const n = Math.max(1, Math.min(50, Math.floor(limit)));
+    try {
+      const rows = await this.db.sql.query<SyncJobRow>(
+        `WITH next AS (
+           SELECT id FROM sync_jobs
+           WHERE status = 'queued'
+           ORDER BY created_at ASC
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED
+         )
+         UPDATE sync_jobs AS j
+         SET status = 'running',
+             started_at = NOW(),
+             updated_at = NOW()
+         FROM next
+         WHERE j.id = next.id
+         RETURNING j.id, j.grant_id, j.tenant_id, j.kind, j.status, j.force_bootstrap, j.result, j.error,
+                   j.created_at, j.updated_at, j.started_at, j.finished_at`,
+        [n],
+      );
+      return rows.map(mapSyncJob);
+    } catch {
+      // PGlite / older engines: claim without SKIP LOCKED.
+      const rows = await this.db.sql.query<SyncJobRow>(
+        `WITH next AS (
+           SELECT id FROM sync_jobs
+           WHERE status = 'queued'
+           ORDER BY created_at ASC
+           LIMIT $1
+         )
+         UPDATE sync_jobs AS j
+         SET status = 'running',
+             started_at = NOW(),
+             updated_at = NOW()
+         FROM next
+         WHERE j.id = next.id AND j.status = 'queued'
+         RETURNING j.id, j.grant_id, j.tenant_id, j.kind, j.status, j.force_bootstrap, j.result, j.error,
+                   j.created_at, j.updated_at, j.started_at, j.finished_at`,
+        [n],
+      );
+      return rows.map(mapSyncJob);
+    }
+  }
+
+  async completeSyncJob(
+    jobId: string,
+    result: Record<string, unknown>,
+  ): Promise<SyncJobRecord | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SyncJobRow>(
+      `UPDATE sync_jobs
+       SET status = 'completed',
+           result = $2::jsonb,
+           error = NULL,
+           finished_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, grant_id, tenant_id, kind, status, force_bootstrap, result, error,
+                 created_at, updated_at, started_at, finished_at`,
+      [jobId, JSON.stringify(result)],
+    );
+    return rows[0] ? mapSyncJob(rows[0]) : undefined;
+  }
+
+  async failSyncJob(jobId: string, error: string): Promise<SyncJobRecord | undefined> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<SyncJobRow>(
+      `UPDATE sync_jobs
+       SET status = 'failed',
+           error = $2,
+           finished_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, grant_id, tenant_id, kind, status, force_bootstrap, result, error,
+                 created_at, updated_at, started_at, finished_at`,
+      [jobId, error.slice(0, 500)],
+    );
+    return rows[0] ? mapSyncJob(rows[0]) : undefined;
+  }
+}
+
+type SyncJobRow = {
+  id: string;
+  grant_id: string;
+  tenant_id: string;
+  kind: string;
+  status: string;
+  force_bootstrap: string;
+  result: unknown;
+  error: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  started_at: Date | string | null;
+  finished_at: Date | string | null;
+};
+
+function mapSyncJob(row: SyncJobRow): SyncJobRecord {
+  const job: SyncJobRecord = {
+    id: row.id,
+    grantId: row.grant_id,
+    tenantId: row.tenant_id,
+    kind: asSyncJobKind(row.kind),
+    status: asSyncJobStatus(row.status),
+    forceBootstrap: row.force_bootstrap === "1" || row.force_bootstrap === "true",
+    createdAt: asIso(row.created_at),
+    updatedAt: asIso(row.updated_at),
+  };
+  if (row.result && typeof row.result === "object") {
+    job.result = row.result as Record<string, unknown>;
+  } else if (typeof row.result === "string") {
+    try {
+      job.result = JSON.parse(row.result) as Record<string, unknown>;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (row.error) job.error = row.error;
+  if (row.started_at) job.startedAt = asIso(row.started_at);
+  if (row.finished_at) job.finishedAt = asIso(row.finished_at);
+  return job;
+}
+
+function asSyncJobKind(value: string): SyncJobKind {
+  return value === "bootstrap" ? "bootstrap" : "incremental";
+}
+
+function asSyncJobStatus(value: string): SyncJobStatus {
+  if (value === "queued" || value === "running" || value === "completed" || value === "failed") {
+    return value;
+  }
+  return "failed";
 }
 
 export class PostgresTokenVault implements TokenVault {

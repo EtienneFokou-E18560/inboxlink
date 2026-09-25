@@ -11,7 +11,7 @@ export type HealthBody = {
   service: "inboxlink";
   mode: "single" | "multi";
   store: "memory" | "postgres";
-  queue?: "stub" | "disabled";
+  queue?: "jobs" | "disabled";
   warning?: string;
   guidance?: string;
   error?: string;
@@ -55,7 +55,7 @@ export async function probeHealth(input: HealthProbeInput): Promise<HealthResult
     ok: true,
     service: "inboxlink",
     mode: input.mode,
-    queue: input.queue ? "stub" : "disabled",
+    queue: input.queue ? "jobs" : "disabled",
     store: storeKind,
   };
   if (storeKind !== "postgres") {

@@ -9,5 +9,15 @@
     "api/index.ts": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/v1/internal/cron/drain-sync-jobs",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/v1/internal/cron/renew-gmail-watches",
+      "schedule": "0 6 * * *"
+    }
+  ]
 }

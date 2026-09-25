@@ -89,12 +89,21 @@ export type ListMessagesResult = {
 };
 
 export type SyncResult = {
+  /** Present when the server returns 202 Accepted (async job). */
+  jobId?: string;
   grantId: string;
   status: string;
-  mode: string;
+  mode?: string;
   historyId?: string;
   upserted?: number;
   deleted?: number;
+  error?: string;
+  result?: Record<string, unknown>;
+  kind?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
 };
 
 export type SyncOptions = {
@@ -335,11 +344,23 @@ class GrantsApi {
     return this.http.request("DELETE", `v1/grants/${encodeURIComponent(grantId)}`);
   }
 
-  /** Run history sync (bootstrap / incremental / full). Maps to `POST /v1/grants/:grantId/sync`. */
+  /**
+   * Enqueue Gmail history sync. Maps to `POST /v1/grants/:grantId/sync`.
+   * Returns `202` body `{ jobId, grantId, status: "queued" }`. Poll
+   * {@link getSyncJob} (or wait for `sync.completed` webhook) for results.
+   */
   sync(grantId: string, opts?: SyncOptions): Promise<SyncResult> {
     const body =
       opts?.mode && opts.mode !== "incremental" ? { mode: opts.mode } : undefined;
     return this.http.request("POST", `v1/grants/${encodeURIComponent(grantId)}/sync`, body);
+  }
+
+  /** Poll async sync job status. Maps to `GET /v1/grants/:grantId/sync/jobs/:jobId`. */
+  getSyncJob(grantId: string, jobId: string): Promise<SyncResult> {
+    return this.http.request(
+      "GET",
+      `v1/grants/${encodeURIComponent(grantId)}/sync/jobs/${encodeURIComponent(jobId)}`,
+    );
   }
 }
 

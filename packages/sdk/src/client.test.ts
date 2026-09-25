@@ -220,14 +220,11 @@ describe("InboxLink SDK", () => {
       calls.push({ url: String(input), init });
       return new Response(
         JSON.stringify({
+          jobId: "sjob_1",
           grantId: "grant_1",
-          status: "ok",
-          mode: "incremental",
-          historyId: "99",
-          upserted: 2,
-          deleted: 0,
+          status: "queued",
         }),
-        { status: 200, headers: { "content-type": "application/json" } },
+        { status: 202, headers: { "content-type": "application/json" } },
       );
     };
 
@@ -237,9 +234,31 @@ describe("InboxLink SDK", () => {
       fetch: fetchMock,
     });
     const result = await il.grants.sync("grant_1");
-    assert.equal(result.mode, "incremental");
-    assert.equal(result.historyId, "99");
+    assert.equal(result.status, "queued");
+    assert.equal(result.jobId, "sjob_1");
     assert.match(calls[0]!.url, /\/v1\/grants\/grant_1\/sync$/);
+  });
+
+  it("polls sync job status via grants.getSyncJob", async () => {
+    const fetchMock: typeof fetch = async (input) => {
+      assert.match(String(input), /\/v1\/grants\/grant_1\/sync\/jobs\/sjob_1$/);
+      return new Response(
+        JSON.stringify({
+          jobId: "sjob_1",
+          grantId: "grant_1",
+          status: "completed",
+          result: { mode: "bootstrap", historyId: "1" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      apiSecret: "secret",
+      fetch: fetchMock,
+    });
+    const job = await il.grants.getSyncJob("grant_1", "sjob_1");
+    assert.equal(job.status, "completed");
   });
 
   it("throws InboxLinkApiError with parsed detail on non-2xx", async () => {

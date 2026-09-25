@@ -63,6 +63,11 @@ export type SyncCursor = {
   kind: SyncCursorKind;
   value: string;
   updatedAt: string;
+  /**
+   * Gmail `users.watch` expiration (ISO). Present when push is configured.
+   * Google expires watches within ≤7 days; renew daily.
+   */
+  watchExpiration?: string;
 };
 
 export type LinkSession = {

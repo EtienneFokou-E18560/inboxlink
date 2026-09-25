@@ -62,17 +62,17 @@ const il = new InboxLink({
 | Connect | `createConnectSession`, `completeConnect` | sessions + exchange |
 | Helpers | `parseConnectRedirect`, `connectUrlForToken`, `INBOXLINK_PRODUCTION_URL` | local |
 | Link | `link.createSession` | `POST /v1/link/sessions` |
-| Grants | `grants.exchange`, `grants.list`, `grants.revoke`, `grants.sync` | `/v1/grants…` |
+| Grants | `grants.exchange`, `grants.list`, `grants.revoke`, `grants.sync`, `grants.getSyncJob` | `/v1/grants…` |
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
 | Webhooks | `webhooks.verify` | local HMAC check for server-delivered events |
 
 - `messages.list` → **synced store** by default (`source: "store"`); response may include `syncedAt` / `historyId` from the last sync cursor. Pass `source: "live"` for live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
 - `messages.get` → `{ message }` with `format=full`, including optional `body` and attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
-- `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`); bootstrap upserts without wiping prior cache
+- `grants.sync` → enqueue durable sync job (`202` + `jobId`); poll `grants.getSyncJob` or wait for `sync.completed`
 
 ### Webhooks (verify delivered events)
 
-When the InboxLink server has `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET`, it POSTs signed JSON to your host for `grant.connected`, `grant.needs_reauth`, and `sync.completed`. Use the **raw request body** and the `X-InboxLink-Signature` header:
+When the InboxLink server has `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET`, it POSTs signed JSON to your host for `grant.connected`, `grant.needs_reauth`, `sync.completed`, and `message.created` (push path). Use the **raw request body** and the `X-InboxLink-Signature` header:
 
 ```ts
 const rawBody = await request.text();
@@ -85,7 +85,7 @@ if (!ok) return new Response("invalid signature", { status: 401 });
 const event = JSON.parse(rawBody) as { type: string; data: Record<string, unknown> };
 ```
 
-See [docs/host-integration.md](../../docs/host-integration.md#host-webhooks-signed-events) for event payloads and retry behavior. `message.created` is not emitted yet.
+See [docs/host-integration.md](../../docs/host-integration.md#host-webhooks-signed-events) for event payloads and retry behavior.
 
 ## Host env (few knobs)
 
