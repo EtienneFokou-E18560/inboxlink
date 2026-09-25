@@ -86,6 +86,20 @@ Message list/get/sync open the vault and call Google’s token endpoint only on 
 
 Expect fewer Google refresh RTTs on warm paths; do not rely on the cache for durability or cross-instance coherence.
 
+## Host webhooks (Wave C)
+
+When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set, the server POSTs signed events to the host callback:
+
+| Event | Emit point |
+|-------|------------|
+| `grant.connected` | OAuth callback success |
+| `grant.needs_reauth` | Refresh / Gmail 401–403 / sync reauth |
+| `sync.completed` | Successful `POST …/sync` |
+
+Retries: 408 / 429 / 5xx (bounded). Hard 4xx → drop. Delivery failures are logged (`webhook_delivery_*`) and **never** fail Connect redirects or sync HTTP responses. `message.created` is not emitted yet.
+
+Unset either env → no outbound POSTs (hosts can still poll). See [host-integration.md](./host-integration.md#host-webhooks-signed-events).
+
 ## OAuth callback failures
 
 Browser HTML pages (not JSON) on `/v1/oauth/gmail/callback`:

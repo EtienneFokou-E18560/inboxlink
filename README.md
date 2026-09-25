@@ -136,7 +136,8 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `GMAIL_SCOPES` | Optional | Default readonly + openid email |
 | `PORT` / `HOST` | Local only | Not used on Vercel |
 | `REDIS_URL` | Optional | Queue stub |
-| `INBOXLINK_WEBHOOK_SECRET` | Optional | Not required for Slice 1 / messages proof |
+| `INBOXLINK_WEBHOOK_URL` | Optional | Host callback for signed events; off unless secret also set |
+| `INBOXLINK_WEBHOOK_SECRET` | Optional | HMAC-SHA256 shared secret (`X-InboxLink-Signature: sha256=<hex>`) |
 
 See [`.env.example`](.env.example) for placeholder shapes only.
 

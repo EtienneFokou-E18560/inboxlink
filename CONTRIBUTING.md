@@ -53,7 +53,7 @@ Copy [`.env.example`](.env.example) → `.env`. Set **names** below in Vercel or
 
 **Required for Production / live Connect:** `DATABASE_URL`, `INBOXLINK_MASTER_KEY`, `PUBLIC_BASE_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (and matching `GOOGLE_REDIRECT_URI` in Google Console).
 
-**Optional / conditional:** `INBOXLINK_MODE`, `INBOXLINK_API_SECRET` (if `multi`), `GMAIL_SCOPES`, `REDIS_URL`, `INBOXLINK_WEBHOOK_SECRET`, `PORT`, `HOST`.
+**Optional / conditional:** `INBOXLINK_MODE`, `INBOXLINK_API_SECRET` (if `multi`), `GMAIL_SCOPES`, `REDIS_URL`, `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET` (both required to enable host webhooks), `PORT`, `HOST`.
 
 Full table: [README.md](README.md#env-checklist-names-only).
 

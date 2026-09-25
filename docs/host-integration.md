@@ -153,6 +153,60 @@ Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.
 
 ---
 
+## Host webhooks (signed events)
+
+When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set on the InboxLink server, the host receives POSTs for:
+
+| Event | When |
+|-------|------|
+| `grant.connected` | OAuth Connect succeeds and a grant is vaulted |
+| `grant.needs_reauth` | Refresh / Gmail auth fails and the grant is marked `needs_reauth` |
+| `sync.completed` | `POST /v1/grants/:id/sync` finishes successfully |
+
+`message.created` is deferred (Wave D / Gmail push). Delivery is at-least-once with bounded retries (retry on 408/429/5xx; drop on hard 4xx). Failures never break Connect redirects or sync HTTP responses.
+
+### Payload + verify
+
+```http
+POST /your/webhook
+Content-Type: application/json
+X-InboxLink-Signature: sha256=<hex>
+X-InboxLink-Event: grant.connected
+```
+
+```json
+{
+  "id": "evt_…",
+  "type": "grant.connected",
+  "createdAt": "2026-09-25T00:00:00.000Z",
+  "data": {
+    "grantId": "grant_…",
+    "tenantId": "default",
+    "externalUserId": "user-1",
+    "provider": "gmail",
+    "email": "user@gmail.com"
+  }
+}
+```
+
+Host verification (same secret as `INBOXLINK_WEBHOOK_SECRET`):
+
+```ts
+import { InboxLink } from "@inboxlink/sdk";
+
+const il = new InboxLink({ apiSecret: process.env.INBOXLINK_API_SECRET });
+const rawBody = await request.text(); // must be the exact raw bytes
+const ok = il.webhooks.verify({
+  payload: rawBody,
+  signatureHeader: request.headers.get("x-inboxlink-signature") ?? "",
+  secret: process.env.INBOXLINK_WEBHOOK_SECRET!,
+});
+```
+
+Operators set URL + secret on the **InboxLink** service (see `.env.example`). Hosts only need the shared secret to verify — not Google / vault / Postgres env.
+
+---
+
 ## Auth modes
 
 | `INBOXLINK_MODE` | Host Bearer required? |
@@ -161,20 +215,6 @@ Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.
 | `single` (local / self-host default) | No — omit `apiSecret` |
 
 OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; they are bound by session state, not the API secret. `GET /health` is public on every mode.
-
----
-
-## Optional: webhooks / events (not delivered yet)
-
-v0 prepares webhook **verification** but does **not** POST events to hosts yet.
-
-What exists today:
-
-- Env placeholder `INBOXLINK_WEBHOOK_SECRET` (server `.env.example`)
-- Tenant column `webhook_secret` in the schema stub
-- SDK helper `InboxLink.webhooks.verify({ payload, signatureHeader, secret })` — HMAC-SHA256 over the raw body; header form `sha256=<hex>`
-
-Until delivery lands, poll `GET /v1/grants` / rely on redirect + exchange. Do not invent a webhook receiver contract that this repo does not implement.
 
 ---
 
@@ -187,6 +227,7 @@ Until delivery lands, poll `GET /v1/grants` / rely on redirect + exchange. Do no
 - [ ] Exchange `public_token` server-side, once  
 - [ ] Handle missing/invalid token on the redirect route  
 - [ ] Handle `needs_reauth` / `grant_inactive` from messages by sending the user through Connect again  
+- [ ] Optional: receive webhooks — set `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET` on InboxLink; verify with `webhooks.verify`  
 - [ ] Never ship `INBOXLINK_API_SECRET` / `apiSecret` to browsers  
 - [ ] Do **not** set `GOOGLE_*`, Postgres, or vault keys in the host app  
 - [ ] Do **not** add a dependency from InboxLink → your host app (or career-workspace)
