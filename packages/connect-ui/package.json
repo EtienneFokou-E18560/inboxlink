@@ -2,12 +2,29 @@
   "name": "@inboxlink/connect-ui",
   "version": "0.0.1",
   "private": true,
-  "description": "Stub package for hosted Connect UI (Link analog). Server embeds a minimal HTML page until this ships.",
+  "description": "Hosted Connect inbox UI (Link analog) — HTML pages for /v1/connect and OAuth errors",
   "license": "MIT",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
   "scripts": {
-    "build": "node -e \"console.log('@inboxlink/connect-ui stub — no build artifacts yet')\"",
-    "typecheck": "node -e \"process.exit(0)\"",
-    "lint": "node -e \"process.exit(0)\""
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json",
+    "lint": "tsc -b tsconfig.json",
+    "test": "node --import tsx --test src/pages.test.ts src/public/landing.test.ts src/public/docs-hub.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.3"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

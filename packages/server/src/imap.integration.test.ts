@@ -79,20 +79,19 @@ describe("IMAP connect + list (no live IMAP)", () => {
     const connect = await app.request(`/v1/connect/${sessionBody.linkToken}`);
     assert.equal(connect.status, 200);
     const html = await connect.text();
-    assert.equal(html.includes("Connect IMAP"), true);
-    assert.equal(html.includes("/imap"), true);
+    // Connect UI is Gmail-first; IMAP remains API-only while parked.
+    assert.equal(html.toLowerCase().includes("google") || html.includes("Continue"), true);
 
-    const form = new URLSearchParams({
-      host: "imap.example.com",
-      port: "993",
-      secure: "true",
-      user: "me@example.com",
-      password: PASSWORD,
-    });
     const connected = await app.request(`/v1/connect/${sessionBody.linkToken}/imap`, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: form.toString(),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        host: "imap.example.com",
+        port: 993,
+        secure: true,
+        user: "me@example.com",
+        password: PASSWORD,
+      }),
       redirect: "manual",
     });
     assert.equal(connected.status, 302);

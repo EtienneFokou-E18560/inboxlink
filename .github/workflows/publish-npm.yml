@@ -1,0 +1,146 @@
+# Manual / opt-in publish for @inboxlink/core and @inboxlink/sdk.
+# Never runs on push or pull_request. Default is dry-run (no registry write).
+# Real publishes authenticate with the repository NPM_TOKEN secret.
+#
+# Provenance: npm attestations require a *public* GitHub source repository.
+# This workflow enables --provenance only when github.repository_visibility
+# is "public". While the repo is private/internal, publishes omit provenance
+# (package.json must not set publishConfig.provenance: true — that flag
+# overrides NPM_CONFIG_PROVENANCE and fails private-repo publishes).
+# Making the GitHub repository public automatically re-enables provenance.
+# Long-term recommendation for MIT OSS: make the repo public for provenance trust.
+#
+# Setup (one-time, before first real publish):
+# 1. Add an npm access token as the GitHub Actions secret NPM_TOKEN.
+# 2. Optionally add GitHub Environment "npm-publish" with required reviewers.
+#
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack and dry-run only (no registry write)
+        type: boolean
+        default: true
+      package:
+        description: Which package(s) to publish
+        type: choice
+        options:
+          - both
+          - core
+          - sdk
+        default: both
+      tag:
+        description: npm dist-tag (usually latest)
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+  # Required for npm provenance when the source repository is public.
+  id-token: write
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm --filter @inboxlink/core --filter @inboxlink/sdk run build
+
+      - name: Test SDK
+        run: pnpm --filter @inboxlink/sdk test
+
+      - name: Publish packages
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          PACKAGE: ${{ inputs.package }}
+          NPM_TAG: ${{ inputs.tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # public → provenance on; private/internal → provenance off (auto).
+          REPO_VISIBILITY: ${{ github.repository_visibility }}
+        run: |
+          set -euo pipefail
+
+          if [ "${DRY_RUN}" != "true" ] && [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is required for a real publish." >&2
+            exit 1
+          fi
+
+          # Do not set publishConfig.provenance in package.json while relying on
+          # NPM_CONFIG_PROVENANCE alone — package.json provenance:true wins and
+          # breaks private-repo publishes.
+          PROVENANCE_FLAG=""
+          if [ "${REPO_VISIBILITY}" = "public" ]; then
+            echo "Public source repository: enabling npm provenance."
+            export NPM_CONFIG_PROVENANCE=true
+            PROVENANCE_FLAG="--provenance"
+          else
+            echo "Source repository visibility is \"${REPO_VISIBILITY}\" (not public)."
+            echo "Publishing without provenance. Make the GitHub repo public to re-enable it."
+            export NPM_CONFIG_PROVENANCE=false
+          fi
+
+          publish_one() {
+            local filter="$1"
+            local name version
+            name=$(pnpm --filter "$filter" exec node -p "require('./package.json').name")
+            version=$(pnpm --filter "$filter" exec node -p "require('./package.json').version")
+            echo "::group::${filter} (${name}@${version}, dry_run=${DRY_RUN}, provenance=${NPM_CONFIG_PROVENANCE})"
+            # Allow retries after a partial publish (e.g. core landed, sdk still missing).
+            if [ "${DRY_RUN}" != "true" ] && npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Already on registry: ${name}@${version} — skipping"
+              echo "::endgroup::"
+              return 0
+            fi
+            if [ "${DRY_RUN}" = "true" ]; then
+              pnpm --filter "$filter" exec npm pack --dry-run
+              # shellcheck disable=SC2086 # intentional optional --provenance flag
+              pnpm --filter "$filter" publish --dry-run --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
+            else
+              # shellcheck disable=SC2086 # intentional optional --provenance flag
+              pnpm --filter "$filter" publish --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
+            fi
+            echo "::endgroup::"
+          }
+
+          case "${PACKAGE}" in
+            core)
+              publish_one "@inboxlink/core"
+              ;;
+            sdk)
+              # core at the matching version must already be on the registry
+              # (workspace:* rewrites to that version on publish).
+              publish_one "@inboxlink/sdk"
+              ;;
+            both)
+              # Publish core first so the rewritten workspace dependency resolves on npm.
+              publish_one "@inboxlink/core"
+              publish_one "@inboxlink/sdk"
+              ;;
+            *)
+              echo "Unknown package selection: ${PACKAGE}" >&2
+              exit 1
+              ;;
+          esac

@@ -1,5 +1,9 @@
 import type { MailboxAdapter, Message } from "@inboxlink/core";
-import { normalizeGmailMessage, type GmailMessageResource } from "./normalize.js";
+import {
+  collectAttachments,
+  normalizeGmailMessage,
+  type GmailMessageResource,
+} from "./normalize.js";
 
 export type GmailAdapterConfig = {
   clientId: string;
@@ -20,7 +24,7 @@ export class GmailApiError extends Error {
   }
 }
 
-export { normalizeGmailMessage, type GmailMessageResource };
+export { collectAttachments, normalizeGmailMessage, type GmailMessageResource };
 
 const DEFAULT_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_TOKEN = "https://oauth2.googleapis.com/token";
@@ -164,35 +168,140 @@ export class GmailAdapter implements MailboxAdapter {
     };
   }
 
+  /** Current mailbox profile — `historyId` seeds or advances the sync watermark. */
+  async getProfile(accessToken: string): Promise<{ emailAddress?: string; historyId: string }> {
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/profile`);
+    const json = await gmailJson<{ emailAddress?: string; historyId?: string }>(url, accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return { emailAddress: json.emailAddress, historyId: json.historyId };
+  }
+
   /**
-   * List mailbox messages and normalize each `format=full` resource.
+   * List mailbox messages and normalize each with `format=metadata` (headers + snippet).
+   * Avoids N× `format=full` MIME fetches on the hot list path — use {@link getMessage} for body/attachments.
    * Callers pass a short-lived access token. This method does not see the refresh token.
+   * Optional filters map to Gmail `users.messages.list` (`q`, `labelIds`, `includeSpamTrash`).
    */
   async listMessages(input: {
     accessToken: string;
     grantId: string;
     maxResults?: number;
     pageToken?: string;
+    /** Gmail search query (`q`). */
+    q?: string;
+    /** Gmail label ids (`labelIds`). */
+    labelIds?: string[];
+    includeSpamTrash?: boolean;
   }): Promise<{ messages: Message[]; nextCursor?: string }> {
-    const base = (this.config.gmailApiBaseUrl ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
+    const base = gmailBase(this.config.gmailApiBaseUrl);
     const listUrl = new URL(`${base}/users/me/messages`);
     listUrl.searchParams.set("maxResults", String(input.maxResults ?? 20));
     if (input.pageToken) listUrl.searchParams.set("pageToken", input.pageToken);
+    if (input.q) listUrl.searchParams.set("q", input.q);
+    for (const labelId of input.labelIds ?? []) {
+      listUrl.searchParams.append("labelIds", labelId);
+    }
+    if (input.includeSpamTrash === true) {
+      listUrl.searchParams.set("includeSpamTrash", "true");
+    }
     const listed = await gmailJson<{ messages?: { id: string }[]; nextPageToken?: string }>(
       listUrl,
       input.accessToken,
     );
-    const messages: Message[] = [];
-    for (const item of listed.messages ?? []) {
-      const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(item.id)}`);
-      getUrl.searchParams.set("format", "full");
-      const raw = await gmailJson<GmailMessageResource>(getUrl, input.accessToken);
-      const message = normalizeGmailMessage(raw, input.grantId);
-      if (message) messages.push(message);
-    }
+    const ids = (listed.messages ?? []).map((item) => item.id).filter(Boolean);
+    const fetched = await Promise.all(
+      ids.map((id) =>
+        this.fetchNormalizedMessage(base, input.accessToken, input.grantId, id, "metadata"),
+      ),
+    );
+    const messages = fetched.filter((message): message is Message => message !== undefined);
     return { messages, nextCursor: listed.nextPageToken };
   }
+
+  /**
+   * Fetch one message by Gmail id (`format=full`), including body and attachment metadata.
+   * Does not download attachment bytes.
+   */
+  async getMessage(input: {
+    accessToken: string;
+    grantId: string;
+    /** Gmail `users.messages` id (not the InboxLink `msg_` prefix). */
+    messageId: string;
+  }): Promise<Message | undefined> {
+    const base = gmailBase(this.config.gmailApiBaseUrl);
+    return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId, "full");
+  }
+
+  /**
+   * Incremental mailbox changes after `startHistoryId` (Gmail `users.history.list`).
+   * A 404 means the watermark is too old — callers should bootstrap with a full sync.
+   */
+  async listHistory(input: {
+    accessToken: string;
+    startHistoryId: string;
+    pageToken?: string;
+    maxResults?: number;
+  }): Promise<GmailHistoryPage> {
+    const url = new URL(`${gmailBase(this.config.gmailApiBaseUrl)}/users/me/history`);
+    url.searchParams.set("startHistoryId", input.startHistoryId);
+    url.searchParams.set("maxResults", String(input.maxResults ?? 100));
+    if (input.pageToken) url.searchParams.set("pageToken", input.pageToken);
+    const json = await gmailJson<{
+      history?: GmailHistoryRecord[];
+      nextPageToken?: string;
+      historyId?: string;
+    }>(url, input.accessToken);
+    if (!json.historyId) throw new GmailApiError(502);
+    return {
+      history: json.history ?? [],
+      nextPageToken: json.nextPageToken,
+      historyId: json.historyId,
+    };
+  }
+
+  private async fetchNormalizedMessage(
+    base: string,
+    accessToken: string,
+    grantId: string,
+    messageId: string,
+    format: GmailMessageFormat,
+  ): Promise<Message | undefined> {
+    const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(messageId)}`);
+    getUrl.searchParams.set("format", format);
+    if (format === "metadata") {
+      for (const header of LIST_METADATA_HEADERS) {
+        getUrl.searchParams.append("metadataHeaders", header);
+      }
+    }
+    const raw = await gmailJson<GmailMessageResource>(getUrl, accessToken);
+    return normalizeGmailMessage(raw, grantId);
+  }
 }
+
+/** Gmail `users.messages.get` format — list uses metadata; get uses full. */
+export type GmailMessageFormat = "full" | "metadata";
+
+/** Headers required to normalize list rows without MIME body parts. */
+const LIST_METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"] as const;
+
+function gmailBase(configured: string | undefined): string {
+  return (configured ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");
+}
+
+export type GmailHistoryPage = {
+  history: GmailHistoryRecord[];
+  nextPageToken?: string;
+  historyId: string;
+};
+
+export type GmailHistoryRecord = {
+  id?: string;
+  messages?: { id?: string; threadId?: string }[];
+  messagesAdded?: { message?: { id?: string; threadId?: string } }[];
+  messagesDeleted?: { message?: { id?: string; threadId?: string } }[];
+  labelsAdded?: { message?: { id?: string }; labelIds?: string[] }[];
+  labelsRemoved?: { message?: { id?: string }; labelIds?: string[] }[];
+};
 
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });

@@ -1,0 +1,25 @@
+# Weekly dependency and Actions updates.
+# Also enable Dependabot alerts + security updates in repo Settings → Security.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    cooldown:
+      default-days: 7

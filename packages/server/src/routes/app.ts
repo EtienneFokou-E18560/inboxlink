@@ -1,5 +1,5 @@
-import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { cors } from "hono/cors";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
@@ -10,9 +10,32 @@ import {
   ImapCredentialsError,
   ImapUnavailableError,
 } from "@inboxlink/adapters-imap";
+import {
+  connectErrorStatus,
+  renderConnectErrorPage,
+  renderConnectPage,
+  renderLandingPage,
+} from "@inboxlink/connect-ui";
+import { mountDocsHub } from "../docs-hub/mount.js";
+import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
+import {
+  buildCorsOriginAllowlist,
+  toPublicGrant,
+  validateExternalUserId,
+  validateRedirectUri,
+} from "../grants-public.js";
+import {
+  createPassthroughRateLimiter,
+  createRateLimiter,
+  type RateLimiter,
+} from "../rate-limit.js";
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
+import { parseMessageListFilters } from "../message-filters.js";
+import { syncGmailGrant } from "../sync/gmail-sync.js";
+import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
+import { probeHealth, renderStatusPage } from "../public/index.js";
 
 export type AppEnv = {
   Variables: {
@@ -29,7 +52,12 @@ export type CreateAppOptions = {
   /** Optional; defaults to a real imapflow-backed adapter when omitted. */
   imap?: ImapAdapter;
   publicBaseUrl: string;
+  /** Bearer secret for the default tenant (backward compatible). */
   apiSecret: string;
+  /** Optional tenantId → secret map for multi-host deployments. */
+  tenantSecrets?: Record<string, string>;
+  /** Tenant bound to `apiSecret` when not listed in `tenantSecrets`. */
+  tenantId?: string;
   mode: "single" | "multi";
   gmailScopes: string[];
   /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
@@ -37,36 +65,101 @@ export type CreateAppOptions = {
   /** `postgres` when DATABASE_URL is set; otherwise process memory. */
   storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
+  /**
+   * Soft abuse guard for Connect + host APIs (single and multi).
+   * Pass `null` to disable (tests). Omit to use the default in-process limiter.
+   */
+  rateLimiter?: RateLimiter | null;
+  /**
+   * Host Connect `redirectUri` origins allowlist (`null` / omit = permissive).
+   * When set, session create rejects redirect URIs whose origin is not listed.
+   * Also drives browser CORS (never `*`) together with `publicBaseUrl`.
+   */
+  allowedRedirectOrigins?: string[] | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
   const app = new Hono<AppEnv>();
   const imap = opts.imap ?? new ImapAdapter();
+  const tenantSecrets =
+    opts.tenantSecrets && Object.keys(opts.tenantSecrets).length > 0
+      ? opts.tenantSecrets
+      : buildTenantSecrets({
+          apiSecret: opts.apiSecret,
+          tenantId: opts.tenantId,
+        });
+  const rateLimiter =
+    opts.rateLimiter === null
+      ? createPassthroughRateLimiter()
+      : (opts.rateLimiter ??
+        createRateLimiter({ windowMs: 60_000, maxRequests: 120 }));
 
-  app.use("*", cors());
+  const corsOrigins = buildCorsOriginAllowlist(
+    opts.allowedRedirectOrigins ?? null,
+    opts.publicBaseUrl,
+  );
+  app.use(
+    "*",
+    cors({
+      origin: corsOrigins.length > 0 ? corsOrigins : [],
+    }),
+  );
+  app.use("*", async (c, next) => {
+    const started = Date.now();
+    await next();
+    const path = c.req.path;
+    const status = c.res.status;
+    if (isHealthPath(path) && status < 400) return;
+    log.info("http_request", {
+      method: c.req.method,
+      path,
+      status,
+      durationMs: Date.now() - started,
+      store: opts.storeKind ?? "memory",
+    });
+  });
 
   // `/` is what the production URL opens. `/health/` is the same check with a trailing slash.
-  const health = async (c: { json: (body: unknown, status?: number) => Response }) => {
-    const storeKind = opts.storeKind ?? "memory";
-    try {
-      await opts.store.ready();
-    } catch {
-      return c.json(
-        { ok: false, service: "inboxlink", mode: opts.mode, store: storeKind, error: "database_unavailable" },
-        503,
-      );
-    }
-    return c.json({
-      ok: true,
-      service: "inboxlink",
+  // `/status` is a human HTML view of the same probe — JSON on `/health` stays canonical.
+  const runHealth = () =>
+    probeHealth({
+      store: opts.store,
       mode: opts.mode,
-      queue: opts.queue ? "stub" : "disabled",
-      store: storeKind,
+      storeKind: opts.storeKind,
+      queue: opts.queue,
     });
+
+  const healthJson = async (c: Context<AppEnv>) => {
+    const result = await runHealth();
+    if (!result.body.ok) {
+      log.error("health_database_unavailable", { store: result.body.store });
+    }
+    return c.json(result.body, result.status);
   };
-  app.get("/", health);
-  app.get("/health", health);
-  app.get("/health/", health);
+
+  const healthHtml = async (c: Context<AppEnv>) => {
+    const result = await runHealth();
+    if (!result.body.ok) {
+      log.error("health_database_unavailable", { store: result.body.store });
+    }
+    return c.html(
+      renderStatusPage({ health: result.body, healthJsonHref: "/health" }),
+      result.status,
+    );
+  };
+
+  app.get("/", healthJson);
+  app.get("/health", healthJson);
+  app.get("/health/", healthJson);
+  app.get("/status", healthHtml);
+  app.get("/status/", healthHtml);
+
+  /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
+  app.get("/home", (c) => c.html(renderLandingPage()));
+  app.get("/home/", (c) => c.html(renderLandingPage()));
+
+  // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
+  mountDocsHub(app);
 
   app.get("/v1/schema.sql", (c) =>
     c.text(SCHEMA_SQL, 200, { "content-type": "application/sql; charset=utf-8" }),
@@ -78,18 +171,40 @@ export function createApp(opts: CreateAppOptions) {
       return next();
     }
     if (c.req.path.startsWith("/v1/connect/")) {
+      const limited = rateLimiter.check(`connect:${clientKey(c)}`);
+      if (!limited.ok) {
+        return c.json({ error: "rate_limited" }, 429, {
+          "retry-after": String(limited.retryAfterSec),
+        });
+      }
       return next();
     }
     if (opts.mode === "single") {
-      c.set("tenantId", "default");
+      const limited = rateLimiter.check(`single:${clientKey(c)}`);
+      if (!limited.ok) {
+        return c.json({ error: "rate_limited" }, 429, {
+          "retry-after": String(limited.retryAfterSec),
+        });
+      }
+      c.set("tenantId", opts.tenantId?.trim() || "default");
       return next();
     }
-    const auth = c.req.header("authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!safeEqual(token, opts.apiSecret)) {
+
+    const token = parseBearerToken(c.req.header("authorization"));
+    if (!token) {
       return c.json({ error: "unauthorized" }, 401);
     }
-    c.set("tenantId", "default");
+    const tenantId = resolveTenantId(token, tenantSecrets);
+    if (!tenantId) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const limited = rateLimiter.check(`tenant:${tenantId}`);
+    if (!limited.ok) {
+      return c.json({ error: "rate_limited" }, 429, {
+        "retry-after": String(limited.retryAfterSec),
+      });
+    }
+    c.set("tenantId", tenantId);
     return next();
   });
 
@@ -99,14 +214,32 @@ export function createApp(opts: CreateAppOptions) {
       redirectUri?: string;
       products?: string[];
     };
-    if (!body.externalUserId || !body.redirectUri) {
+    const externalUserId = validateExternalUserId(body.externalUserId);
+    const redirectUri = validateRedirectUri(
+      body.redirectUri,
+      opts.allowedRedirectOrigins ?? null,
+    );
+    if (!externalUserId || !redirectUri) {
+      const basicOk = Boolean(
+        body.redirectUri && validateRedirectUri(body.redirectUri, null),
+      );
+      if (externalUserId && basicOk && opts.allowedRedirectOrigins?.length) {
+        return c.json(
+          {
+            error: "redirectUri_not_allowed",
+            detail:
+              "redirectUri origin is not in ALLOWED_REDIRECT_ORIGINS. Use an allowlisted http(s) origin, or leave ALLOWED_REDIRECT_ORIGINS unset for permissive single-tenant demos.",
+          },
+          400,
+        );
+      }
       return c.json({ error: "externalUserId and redirectUri are required" }, 400);
     }
     const tenantId = c.get("tenantId");
     const session = await opts.store.createSession({
       tenantId,
-      externalUserId: body.externalUserId,
-      redirectUri: body.redirectUri,
+      externalUserId,
+      redirectUri,
       products: body.products ?? ["messages"],
     });
     const connectUrl = new URL(
@@ -122,8 +255,9 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   app.get("/v1/link/sessions/:id", async (c) => {
+    const tenantId = c.get("tenantId");
     const session = await opts.store.getSession(c.req.param("id"));
-    if (!session) return c.json({ error: "not_found" }, 404);
+    if (!session || session.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     return c.json({
       id: session.id,
       status: session.status,
@@ -132,14 +266,30 @@ export function createApp(opts: CreateAppOptions) {
     });
   });
 
-  /** Minimal Connect stub — Gmail OAuth + IMAP password/app-password form. */
+  /** Connect UI — hosted Link page that starts Gmail OAuth. IMAP uses POST /imap. */
   app.get("/v1/connect/:linkToken", async (c) => {
     const session = await opts.store.getSessionByToken(c.req.param("linkToken"));
-    if (!session || isExpired(session.expiresAt)) {
-      return c.html("<h1>Invalid or expired link</h1>", 404);
+    if (!session) {
+      return c.html(
+        renderConnectErrorPage({ kind: "invalid" }),
+        connectErrorStatus("invalid"),
+      );
+    }
+    if (isExpired(session.expiresAt) || session.status === "expired") {
+      return c.html(
+        renderConnectErrorPage({ kind: "expired" }),
+        connectErrorStatus("expired"),
+      );
     }
     if (session.status !== "pending") {
-      return c.html(`<h1>Session ${session.status}</h1>`, 400);
+      const kind = session.status === "completed" ? "session_completed" : "session_other";
+      return c.html(
+        renderConnectErrorPage({
+          kind,
+          sessionStatus: session.status,
+        }),
+        connectErrorStatus(kind),
+      );
     }
     const state = randomToken(16);
     session.oauthState = state;
@@ -150,39 +300,12 @@ export function createApp(opts: CreateAppOptions) {
       redirectUri,
       scopes: opts.gmailScopes,
     });
-    const linkToken = encodeURIComponent(session.linkToken);
-    return c.html(`<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"/><title>InboxLink Connect</title>
-<style>
-  body{font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
-  a.button,button{display:inline-block;background:#111;color:#fff;padding:.75rem 1.25rem;border-radius:8px;text-decoration:none;border:0;cursor:pointer;font:inherit}
-  label{display:block;margin:.75rem 0 .25rem;font-size:.9rem}
-  input{width:100%;padding:.5rem;box-sizing:border-box}
-  .muted{color:#555;font-size:.9rem}
-  hr{border:0;border-top:1px solid #ddd;margin:2rem 0}
-</style></head>
-<body>
-  <h1>Connect inbox</h1>
-  <p>InboxLink will request <strong>read-only</strong> Gmail access. Your host app never sees the refresh token.</p>
-  <p><a class="button" href="${escapeHtml(authUrl)}">Continue with Google</a></p>
-  <hr/>
-  <h2>IMAP (password / app-password)</h2>
-  <p class="muted">Credentials are sealed in the vault. Prefer an app-password. INBOX list only in v0.</p>
-  <form method="post" action="/v1/connect/${linkToken}/imap">
-    <label for="host">IMAP host</label>
-    <input id="host" name="host" required placeholder="imap.example.com" autocomplete="off"/>
-    <label for="port">Port</label>
-    <input id="port" name="port" type="number" value="993" min="1" max="65535"/>
-    <label for="secure"><input id="secure" name="secure" type="checkbox" value="true" checked/> Use TLS (IMAPS)</label>
-    <label for="user">Username</label>
-    <input id="user" name="user" required autocomplete="username"/>
-    <label for="password">Password / app-password</label>
-    <input id="password" name="password" type="password" required autocomplete="current-password"/>
-    <p style="margin-top:1.25rem"><button type="submit">Connect IMAP</button></p>
-  </form>
-  <p class="muted">Stub Connect UI — replace with packages/connect-ui.</p>
-</body></html>`);
+    return c.html(
+      renderConnectPage({
+        authUrl,
+        expiresAt: session.expiresAt,
+      }),
+    );
   });
 
   /** IMAP connect — verifies login, seals credentials, completes the link session. */
@@ -293,14 +416,29 @@ export function createApp(opts: CreateAppOptions) {
     const state = c.req.query("state");
     const error = c.req.query("error");
     if (error) {
-      return c.html(`<h1>OAuth error</h1><pre>${escapeHtml(error)}</pre>`, 400);
+      log.warn("oauth_callback_failed", { reason: error, store: opts.storeKind ?? "memory" });
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_denied", providerError: error }),
+        connectErrorStatus("oauth_denied"),
+      );
     }
     if (!code || !state) {
-      return c.html("<h1>Missing code/state</h1>", 400);
+      log.warn("oauth_callback_failed", { reason: "missing_code_or_state" });
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_missing" }),
+        connectErrorStatus("oauth_missing"),
+      );
     }
     const session = await opts.store.findSessionByOAuthState(state);
     if (!session || isExpired(session.expiresAt)) {
-      return c.html("<h1>Unknown OAuth state</h1>", 400);
+      log.warn("oauth_callback_failed", {
+        reason: "unknown_oauth_state",
+        store: opts.storeKind ?? "memory",
+      });
+      return c.html(
+        renderConnectErrorPage({ kind: "oauth_unknown_state" }),
+        connectErrorStatus("oauth_unknown_state"),
+      );
     }
     const redirectUri = oauthRedirectUri(opts);
     let tokens;
@@ -308,9 +446,13 @@ export function createApp(opts: CreateAppOptions) {
       tokens = await opts.gmail.exchangeAuthorizationCode({ code, redirectUri });
     } catch (err) {
       const reason = googleErrorCode(err);
+      log.warn("oauth_callback_failed", { reason, store: opts.storeKind ?? "memory" });
       return c.html(
-        `<h1>Google token exchange failed</h1><p>${escapeHtml(oauthExchangeHint(reason, redirectUri))}</p>`,
-        400,
+        renderConnectErrorPage({
+          kind: "oauth_exchange",
+          detail: oauthExchangeHint(reason, redirectUri),
+        }),
+        connectErrorStatus("oauth_exchange"),
       );
     }
     const grantId = newId("grant");
@@ -336,9 +478,10 @@ export function createApp(opts: CreateAppOptions) {
       }
     } catch {
       await opts.store.deleteGrant(grantId, session.tenantId);
+      log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });
       return c.html(
-        "<h1>Could not store the refresh token</h1><p>Set INBOXLINK_MASTER_KEY to at least 16 characters, redeploy, and start Connect again.</p>",
-        500,
+        renderConnectErrorPage({ kind: "vault_failed" }),
+        connectErrorStatus("vault_failed"),
       );
     }
     session.oauthState = undefined;
@@ -347,6 +490,12 @@ export function createApp(opts: CreateAppOptions) {
     session.grantId = grantId;
     session.publicToken = publicToken;
     await opts.store.saveSession(session);
+    log.info("oauth_callback_ok", {
+      grantId,
+      tenantId: session.tenantId,
+      provider: "gmail",
+      store: opts.storeKind ?? "memory",
+    });
 
     if (opts.queue) {
       await opts.queue.enqueue({
@@ -365,17 +514,22 @@ export function createApp(opts: CreateAppOptions) {
   app.post("/v1/grants/exchange", async (c) => {
     const body = (await c.req.json()) as { publicToken?: string };
     if (!body.publicToken) return c.json({ error: "publicToken required" }, 400);
-    const grantId = await opts.store.consumePublicToken(body.publicToken);
+    const tenantId = c.get("tenantId");
+    const grantId = await opts.store.consumePublicToken(body.publicToken, tenantId);
     if (!grantId) return c.json({ error: "invalid_public_token" }, 400);
+    const grant = await opts.store.getGrant(grantId);
+    if (!grant || grant.tenantId !== tenantId) {
+      return c.json({ error: "invalid_public_token" }, 400);
+    }
     return c.json({ grantId });
   });
 
   app.get("/v1/grants", async (c) => {
-    const externalUserId = c.req.query("externalUserId");
+    const externalUserId = validateExternalUserId(c.req.query("externalUserId"));
     if (!externalUserId) return c.json({ error: "externalUserId required" }, 400);
     const tenantId = c.get("tenantId");
     const grants = await opts.store.listGrants(tenantId, externalUserId);
-    return c.json({ grants });
+    return c.json({ grants: grants.map(toPublicGrant) });
   });
 
   app.delete("/v1/grants/:grantId", async (c) => {
@@ -394,10 +548,6 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
-    if (grant.provider !== "gmail" && grant.provider !== "imap") {
-      return c.json({ error: "unsupported_provider" }, 400);
-    }
-    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
 
     const limit = parseLimit(c.req.query("limit"));
     if (limit === null) return c.json({ error: "invalid_limit" }, 400);
@@ -405,40 +555,67 @@ export function createApp(opts: CreateAppOptions) {
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
 
     if (grant.provider === "imap") {
+      if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
       return listImapMessages(c, opts, imap, grant, limit, cursor);
     }
 
-    const ciphertext = await opts.vault.getCiphertext(grantId);
-    if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
-    let refreshToken: string;
-    try {
-      refreshToken = await opts.vault.open(ciphertext, { grantId, tenantId: grant.tenantId });
-    } catch {
-      return c.json({ error: "missing_refresh_token" }, 409);
-    }
+    const ready = await readyGmailGrant(opts, grantId, tenantId);
+    if (!ready.ok) return c.json({ error: ready.error }, ready.status);
 
-    let accessToken: string;
-    try {
-      accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
-    } catch {
-      await markNeedsReauth(opts.store, grant);
-      return c.json({ error: "needs_reauth" }, 409);
-    }
+    const parsedFilters = parseMessageListFilters({
+      q: c.req.query("q") ?? undefined,
+      from: c.req.query("from") ?? undefined,
+      to: c.req.query("to") ?? undefined,
+      subject: c.req.query("subject") ?? undefined,
+      labels: c.req.queries("label") ?? [],
+      includeSpamTrash: c.req.query("includeSpamTrash") ?? undefined,
+    });
+    if (!parsedFilters.ok) return c.json({ error: parsedFilters.error }, 400);
+
+    const access = await openGmailAccess(opts, ready.grant);
+    if (!access.ok) return c.json(accessBody(access), access.status);
 
     try {
       const page = await opts.gmail.listMessages({
-        accessToken,
+        accessToken: access.accessToken,
         grantId,
         maxResults: limit,
         pageToken: cursor,
+        q: parsedFilters.filters.q,
+        labelIds: parsedFilters.filters.labelIds,
+        includeSpamTrash: parsedFilters.filters.includeSpamTrash,
       });
       return c.json({ messages: page.messages, nextCursor: page.nextCursor });
     } catch (err) {
-      if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
-        await markNeedsReauth(opts.store, grant);
-        return c.json({ error: "needs_reauth" }, 409);
+      return gmailReadError(opts.store, ready.grant, err);
+    }
+  });
+
+  app.get("/v1/grants/:grantId/messages/:messageId", async (c) => {
+    const grantId = c.req.param("grantId");
+    const tenantId = c.get("tenantId");
+    const providerMessageId = resolveProviderMessageId(c.req.param("messageId"));
+    if (!providerMessageId) return c.json({ error: "invalid_message_id" }, 400);
+
+    const ready = await readyGmailGrant(opts, grantId, tenantId);
+    if (!ready.ok) return c.json({ error: ready.error }, ready.status);
+
+    const access = await openGmailAccess(opts, ready.grant);
+    if (!access.ok) return c.json(accessBody(access), access.status);
+
+    try {
+      const message = await opts.gmail.getMessage({
+        accessToken: access.accessToken,
+        grantId,
+        messageId: providerMessageId,
+      });
+      if (!message) return c.json({ error: "not_found" }, 404);
+      return c.json({ message });
+    } catch (err) {
+      if (err instanceof GmailApiError && err.status === 404) {
+        return c.json({ error: "not_found" }, 404);
       }
-      return c.json({ error: "gmail_unavailable" }, 502);
+      return gmailReadError(opts.store, ready.grant, err);
     }
   });
 
@@ -447,17 +624,67 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
+    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+
+    let forceBootstrap = false;
+    const contentType = c.req.header("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      try {
+        const body = (await c.req.json()) as { mode?: string };
+        forceBootstrap = body.mode === "full" || body.mode === "bootstrap";
+      } catch {
+        /* empty body is fine */
+      }
+    }
+
+    // Inline sync (no Redis). Optional queue enqueue is fire-and-forget only.
     if (opts.queue) {
       await opts.queue.enqueue({
         grantId,
         tenantId: grant.tenantId,
-        kind: "incremental",
+        kind: forceBootstrap ? "bootstrap" : "incremental",
       });
     }
+
+    const result = await syncGmailGrant({
+      store: opts.store,
+      vault: opts.vault,
+      gmail: opts.gmail,
+      grant,
+      forceBootstrap,
+    });
+
+    if (result.status === "needs_reauth") {
+      return c.json(
+        {
+          grantId,
+          status: "needs_reauth",
+          mode: result.mode,
+          error: result.error ?? "needs_reauth",
+        },
+        409,
+      );
+    }
+    if (result.status === "gmail_unavailable") {
+      return c.json(
+        {
+          grantId,
+          status: "error",
+          mode: result.mode,
+          error: "gmail_unavailable",
+        },
+        502,
+      );
+    }
+
     return c.json({
       grantId,
-      status: "accepted",
-      note: "Read messages with GET /v1/grants/:grantId/messages. History sync is not implemented.",
+      status: "ok",
+      mode: result.mode,
+      historyId: result.historyId,
+      upserted: result.upserted,
+      deleted: result.deleted,
     });
   });
 
@@ -535,6 +762,92 @@ function oauthRedirectUri(opts: CreateAppOptions): string {
   );
 }
 
+async function readyGmailGrant(
+  opts: CreateAppOptions,
+  grantId: string,
+  tenantId: string,
+): Promise<{ ok: true; grant: Grant } | { ok: false; error: string; status: 400 | 404 | 409 }> {
+  const grant = await opts.store.getGrant(grantId);
+  if (!grant || grant.tenantId !== tenantId) return { ok: false, error: "not_found", status: 404 };
+  if (grant.provider !== "gmail") return { ok: false, error: "unsupported_provider", status: 400 };
+  if (grant.status !== "active") return { ok: false, error: "grant_inactive", status: 409 };
+  return { ok: true, grant };
+}
+
+type GmailAccessFailure = {
+  ok: false;
+  error: string;
+  status: 409;
+  guidance?: string;
+};
+
+async function openGmailAccess(
+  opts: CreateAppOptions,
+  grant: Grant,
+): Promise<{ ok: true; accessToken: string } | GmailAccessFailure> {
+  const ciphertext = await opts.vault.getCiphertext(grant.id);
+  if (!ciphertext) return { ok: false, error: "missing_refresh_token", status: 409 };
+  let refreshToken: string;
+  try {
+    refreshToken = await opts.vault.open(ciphertext, { grantId: grant.id, tenantId: grant.tenantId });
+  } catch {
+    return { ok: false, error: "missing_refresh_token", status: 409 };
+  }
+  try {
+    const accessToken = (await opts.gmail.refreshAccessToken(refreshToken)).accessToken;
+    return { ok: true, accessToken };
+  } catch {
+    await markNeedsReauth(opts.store, grant);
+    log.warn("grant_needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      reason: "refresh_rejected",
+    });
+    return {
+      ok: false,
+      error: "needs_reauth",
+      status: 409,
+      guidance: NEEDS_REAUTH_GUIDANCE,
+    };
+  }
+}
+
+function accessBody(access: GmailAccessFailure): { error: string; guidance?: string } {
+  return access.guidance
+    ? { error: access.error, guidance: access.guidance }
+    : { error: access.error };
+}
+
+async function gmailReadError(store: GrantStore, grant: Grant, err: unknown): Promise<Response> {
+  if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+    await markNeedsReauth(store, grant);
+    log.warn("grant_needs_reauth", {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+      reason: "gmail_unauthorized",
+      gmailStatus: err.status,
+    });
+    return Response.json({ error: "needs_reauth", guidance: NEEDS_REAUTH_GUIDANCE }, { status: 409 });
+  }
+  log.warn("gmail_unavailable", {
+    grantId: grant.id,
+    tenantId: grant.tenantId,
+    gmailStatus: err instanceof GmailApiError ? err.status : undefined,
+  });
+  return Response.json({ error: "gmail_unavailable" }, { status: 502 });
+}
+
+/** Accept InboxLink `msg_<gmailId>` or the raw Gmail message id. */
+function resolveProviderMessageId(messageId: string): string | null {
+  const trimmed = messageId.trim();
+  if (!trimmed || trimmed.length > 256) return null;
+  if (trimmed.startsWith("msg_")) {
+    const id = trimmed.slice(4);
+    return id || null;
+  }
+  return trimmed;
+}
+
 function parseLimit(value: string | undefined): number | null {
   if (value === undefined || value === "") return 20;
   if (!/^\d+$/.test(value)) return null;
@@ -554,13 +867,6 @@ function isExpired(iso: string): boolean {
   return Number.isNaN(at) || at <= Date.now();
 }
 
-function safeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -568,3 +874,9 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
+
+function clientKey(c: { req: { header: (name: string) => string | undefined } }): string {
+  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  return forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
+}
+

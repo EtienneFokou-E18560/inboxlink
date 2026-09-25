@@ -25,14 +25,15 @@
     "lint": "tsc -b tsconfig.json",
     "dev": "tsx watch src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "node --import tsx --test src/grants.integration.test.ts src/config.test.ts src/durable-store.integration.test.ts src/messages.integration.test.ts src/imap.integration.test.ts"
+    "test": "node --import tsx --test src/grants.integration.test.ts src/grants-public.test.ts src/config.test.ts src/durable-store.integration.test.ts src/messages.integration.test.ts src/message-filters.test.ts src/log.test.ts src/sync.integration.test.ts src/multi.integration.test.ts src/home.integration.test.ts src/public/status-page.test.ts src/docs-hub/docs.integration.test.ts src/imap.integration.test.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.14.1",
+    "@hono/node-server": "^2.1.1",
     "@inboxlink/adapters-gmail": "workspace:*",
     "@inboxlink/adapters-imap": "workspace:*",
+    "@inboxlink/connect-ui": "workspace:*",
     "@inboxlink/core": "workspace:*",
-    "drizzle-orm": "^0.41.0",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.7.5",
     "postgres": "^3.4.9"
   },
@@ -41,8 +42,8 @@
     "tsx": "^4.19.3"
   },
   "optionalDependencies": {
-    "bullmq": "^5.44.0",
-    "ioredis": "^5.6.0"
+    "bullmq": "^6.3.6",
+    "ioredis": "^6.0.0"
   },
   "engines": {
     "node": ">=22"

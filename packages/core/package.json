@@ -1,6 +1,6 @@
 {
   "name": "@inboxlink/core",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "description": "InboxLink types, normalized models, adapter interfaces, and crypto helpers",
   "license": "MIT",
   "type": "module",
@@ -13,12 +13,37 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -b tsconfig.json",
     "typecheck": "tsc -b tsconfig.json",
-    "lint": "tsc -b tsconfig.json"
+    "lint": "tsc -b tsconfig.json",
+    "prepack": "pnpm run build"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EtienneFokou-E18560/inboxlink.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/EtienneFokou-E18560/inboxlink/issues"
+  },
+  "homepage": "https://github.com/EtienneFokou-E18560/inboxlink/tree/main/packages/core#readme",
+  "keywords": [
+    "inboxlink",
+    "email",
+    "oauth",
+    "types"
+  ],
+  "sideEffects": false,
   "engines": {
     "node": ">=22"
   }

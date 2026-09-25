@@ -1,14 +1,15 @@
-import { serve } from "@hono/node-server";
-import { handle as handleNode } from "@hono/node-server/vercel";
+import { getRequestListener, serve } from "@hono/node-server";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { ImapAdapter } from "@inboxlink/adapters-imap";
 import { loadConfig } from "./config.js";
+import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
 import { createSyncQueue } from "./queue/sync-queue.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import { createPostgresClient, PostgresJsExecutor } from "./db/sql.js";
+import { createRateLimiter } from "./rate-limit.js";
 import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
@@ -49,11 +50,19 @@ export function createAppFromEnv(
     imap,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
+    tenantId: config.tenantId,
+    tenantSecrets: config.tenantSecrets,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
     oauthRedirectUri: config.googleRedirectUri,
     storeKind,
     queue,
+    // Soft abuse guard for Connect + host APIs in both single and multi.
+    rateLimiter: createRateLimiter({
+      windowMs: config.rateLimitWindowMs,
+      maxRequests: config.rateLimitMaxRequests,
+    }),
+    allowedRedirectOrigins: config.allowedRedirectOrigins,
   });
   return { app, config, store, vault, storeKind };
 }
@@ -71,12 +80,13 @@ function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresSto
  * Vercel Node invokes the default export with either a Web Request or the
  * Node (req, res) pair. `hono/vercel` only returns a Response, which the
  * Node listener ignores, so the request hangs. Write the Node response when
- * that is the runtime shape.
+ * that is the runtime shape (`getRequestListener` replaces the removed
+ * `@hono/node-server/vercel` adapter).
  */
 export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
   const { app } = createAppFromEnv(env);
   const web = handleWeb(app);
-  const node = handleNode(app);
+  const node = getRequestListener(app.fetch);
   return (incoming: unknown, outgoing?: unknown) => {
     if (typeof Request !== "undefined" && incoming instanceof Request) {
       return web(incoming);
@@ -91,16 +101,33 @@ export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
   const config = loadConfig(env);
   const queue = await createSyncQueue(config.redisUrl);
-  const { app } = createAppFromEnv(env, queue);
+  const { app, storeKind } = createAppFromEnv(env, queue);
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, () => {
-    console.info(
-      `[inboxlink] listening on http://${config.host}:${config.port} (mode=${config.mode})`,
-    );
-    console.info(`[inboxlink] health: ${config.publicBaseUrl}/health`);
+    log.info("server_listening", {
+      host: config.host,
+      port: config.port,
+      mode: config.mode,
+      store: storeKind,
+      health: `${config.publicBaseUrl}/health`,
+    });
+    if (storeKind !== "postgres") {
+      log.warn("ephemeral_store", { guidance: MEMORY_STORE_GUIDANCE });
+    }
   });
 
   return { app, server, config, queue };
 }
 
-export { createApp, loadConfig, MemoryStore, MemoryTokenVault, PostgresStore, PostgresTokenVault };
+export {
+  createApp,
+  loadConfig,
+  MemoryStore,
+  MemoryTokenVault,
+  PostgresStore,
+  PostgresTokenVault,
+  log,
+  redactFields,
+  redactString,
+};
+export { syncGmailGrant } from "./sync/gmail-sync.js";

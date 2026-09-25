@@ -1,3 +1,10 @@
+/**
+ * Envelope helpers for vaulted secrets (AES-256-GCM).
+ *
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Etienne Fokou
+ */
+
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const ALGO = "aes-256-gcm";
