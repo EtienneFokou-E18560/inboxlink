@@ -133,17 +133,21 @@ The public token is **consumed once**. Persist `grantId` against your user. Late
 ### 4. Use the grant (messages)
 
 ```ts
-const page = await il.messages.list(grantId, {
+await il.grants.sync(grantId); // populate / refresh synced cache
+const page = await il.messages.list(grantId, { limit: 25 });
+// page.syncedAt / page.historyId reflect last sync cursor when source=store
+const live = await il.messages.list(grantId, {
+  source: "live",
   limit: 25,
   q: "is:unread newer_than:7d",
   label: ["INBOX"],
   from: "ada@example.com",
 });
 const { message } = await il.messages.get(grantId, page.messages[0]!.id);
-await il.grants.sync(grantId);
+void live;
 ```
 
-List filters (all optional): `q` (Gmail search), `from` / `to` / `subject` (composed into `q`), `label` (→ Gmail `labelIds`), `includeSpamTrash`. Same params work on the HTTP API as query strings (`label` may be repeated). List returns metadata-normalized rows; call `messages.get` for body and attachment metadata.
+Default list reads the **synced store**. Pass `source: "live"` for live Gmail + filters: `q`, `from` / `to` / `subject`, `label`, `includeSpamTrash`. Same params work on the HTTP API as query strings (`label` may be repeated). Call `messages.get` for body and attachment metadata.
 
 Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.revoke(grantId)`.
 

@@ -17,7 +17,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Optional Redis/BullMQ **queue placeholder**
 
-`GET /v1/grants/:grantId/messages` lists Gmail messages for an active grant (live Gmail, `format=metadata`), with optional filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap via `messages.list` + profile `historyId`, then incremental `users.history.list` with a persisted watermark in `sync_cursors` and idempotent message upserts. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` runs **inline** history sync: bootstrap upserts via `messages.list` + profile `historyId` **without wiping** prior cache, then incremental `users.history.list` with bounded concurrent `getMessage` and a persisted watermark in `sync_cursors`. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. Microsoft/IMAP are parked (not in `main`). **`@inboxlink/sdk@0.1.1`** and **`@inboxlink/core@0.1.1`** are published on npm (`npm i @inboxlink/sdk`).
 
 Production: [https://inboxlink-two.vercel.app](https://inboxlink-two.vercel.app) — expect `GET /health` → `"store":"postgres"` before any live Connect. Scheduled [production health smoke](.github/workflows/production-health-smoke.yml) runs `scripts/smoke-health.sh`.
 
@@ -40,7 +40,7 @@ User browser ──► GET /v1/connect/:linkToken (Connect UI)
                  Store saves grant (memory or Postgres)
                       │
 Host ── POST /v1/grants/exchange (one-time public_token) ──► grantId
-Host ── GET  /v1/grants/:id/messages ── vault/cache → refresh if needed → Gmail list
+Host ── GET  /v1/grants/:id/messages ── synced store (default) or ?source=live → Gmail
 Host ── DELETE /v1/grants/:id ── destroy vault ciphertext + grant
 ```
 
@@ -169,24 +169,26 @@ curl -sS -X POST http://localhost:8787/v1/link/sessions \
 
 Open the returned `connectUrl`. With placeholder Google credentials, the callback uses a **stub token exchange**. Put real `GOOGLE_CLIENT_*` values in `.env` to hit Google’s token endpoint.
 
-List messages for a grant (local `single` needs no API key; Production / `multi` needs Bearer):
+List messages for a grant (default = **synced store** cache; local `single` needs no API key; Production / `multi` needs Bearer):
 
 ```bash
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?limit=20"
+# → { messages, nextCursor?, source: "store", syncedAt?, historyId? }
 ```
 
-Filter the live Gmail list (optional query params):
+Live Gmail list escape hatch (filters apply only here):
 
 ```bash
-curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?q=is:unread&from=ada@example.com&label=INBOX&limit=20"
+curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages?source=live&q=is:unread&from=ada@example.com&label=INBOX&limit=20"
 ```
 
 | Param | Maps to Gmail | Notes |
 |-------|---------------|--------|
-| `q` | `q` | Full Gmail search syntax |
-| `from` / `to` / `subject` | composed into `q` | AND-merged with `q` when both set |
-| `label` (repeatable) | `labelIds` | e.g. `INBOX`, `UNREAD` |
-| `includeSpamTrash` | `includeSpamTrash` | `true` / `false` |
+| `source` | — | Omit / `store` (default synced cache) or `live` (Gmail list) |
+| `q` | `q` | Full Gmail search syntax (**live only**) |
+| `from` / `to` / `subject` | composed into `q` | AND-merged with `q` when both set (**live only**) |
+| `label` (repeatable) | `labelIds` | e.g. `INBOX`, `UNREAD` (**live only**) |
+| `includeSpamTrash` | `includeSpamTrash` | `true` / `false` (**live only**) |
 
 Get one message with attachment metadata:
 
@@ -194,7 +196,7 @@ Get one message with attachment metadata:
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
 ```
 
-`limit` is 1–25 (default 20). `cursor` is Gmail’s `nextPageToken`, returned as `nextCursor`. Optional filters (`q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`) are forwarded to Gmail `users.messages.list`. List rows are normalized from Gmail `format=metadata` (headers, snippet, labels) — not full MIME. Use get-by-id for `body` and attachment metadata. The JSON never includes the refresh token.
+`limit` is 1–25 (default 20). Default list reads the synced cache (newest first); `cursor` is a decimal offset and `syncedAt` / `historyId` reflect the last successful `POST …/sync`. With `source=live`, `cursor` is Gmail’s `nextPageToken` and filters are forwarded to `users.messages.list` (`format=metadata`). Use get-by-id for `body` and attachment metadata. The JSON never includes the refresh token.
 
 ### Host SDK (`@inboxlink/sdk`)
 
@@ -213,14 +215,17 @@ const session = await il.createConnectSession({
   redirectUri: "http://127.0.0.1:9999/done", // your host callback
 });
 const { grantId } = await il.completeConnect({ publicToken });
-const { messages } = await il.messages.list(grantId, {
-  limit: 20,
+await il.grants.sync(grantId); // populate synced cache
+const { messages, syncedAt } = await il.messages.list(grantId, { limit: 20 });
+const { messages: live } = await il.messages.list(grantId, {
+  source: "live",
   q: "is:unread",
   from: "ada@example.com",
   label: "INBOX",
 });
 const { message } = await il.messages.get(grantId, messages[0]!.id);
-await il.grants.sync(grantId); // history watermark sync
+void syncedAt;
+void live;
 ```
 
 Until you prefer a git/`file:` workspace link, install from npm:
