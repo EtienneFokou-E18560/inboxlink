@@ -35,6 +35,9 @@ const session = await il.createConnectSession({
 const { grantId } = await il.completeConnect({ redirectUrl: request.url });
 const page = await il.messages.list(grantId, {
   limit: 20,
+}); // synced store by default — see page.syncedAt / page.historyId
+const live = await il.messages.list(grantId, {
+  source: "live",
   q: "is:unread",
   label: "INBOX",
   from: "ada@example.com",
@@ -63,9 +66,9 @@ const il = new InboxLink({
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
 | Webhooks | `webhooks.verify` | local HMAC check |
 
-- `messages.list` → live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
+- `messages.list` → **synced store** by default (`source: "store"`); response may include `syncedAt` / `historyId` from the last sync cursor. Pass `source: "live"` for live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
 - `messages.get` → `{ message }` with `format=full`, including optional `body` and attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
-- `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`)
+- `grants.sync` → inline Gmail history sync (`bootstrap` / `incremental` / `full`); bootstrap upserts without wiping prior cache
 
 ## Host env (few knobs)
 
