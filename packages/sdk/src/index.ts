@@ -29,8 +29,9 @@ export type InboxLinkClientOptions = {
   baseUrl?: string;
   /**
    * Bearer secret (`INBOXLINK_API_SECRET`).
-   * Required only when the server runs `INBOXLINK_MODE=multi`.
-   * Omit for Production / `single` mode — the Authorization header is not sent.
+   * Required when the server runs `INBOXLINK_MODE=multi` (including Production).
+   * Omit only for local/`single` servers — then no Authorization header is sent.
+   * Never ship this value to browsers.
    */
   apiSecret?: string;
   fetch?: typeof fetch;

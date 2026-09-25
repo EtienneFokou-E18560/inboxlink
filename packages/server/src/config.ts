@@ -35,7 +35,7 @@ export type ServerConfig = {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
   const publicBaseUrl = resolvePublicBaseUrl(env, port);
-  // Default stays single — do not flip Production to multi without an explicit ops decision.
+  // Process default is single (local demos). Production deploys set INBOXLINK_MODE=multi.
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
     env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";

@@ -25,11 +25,13 @@ Healthy Production shape:
 {
   "ok": true,
   "service": "inboxlink",
-  "mode": "single",
+  "mode": "multi",
   "queue": "disabled",
   "store": "postgres"
 }
 ```
+
+`GET /health` is public (no Bearer). Host APIs (`/v1/link/sessions`, grants, messages) require `Authorization: Bearer <INBOXLINK_API_SECRET>`.
 
 Optional alert (no new SaaS): cron or GitHub Action that runs `scripts/smoke-health.sh` against Production and pages you on non-zero exit. Vercel’s own failure emails cover function crashes.
 
@@ -85,7 +87,7 @@ Full timed proof steps live in the project plan `proof-deployment-4h.md` (agent 
 
 ## Host redirect allowlist + CORS
 
-Unset `ALLOWED_REDIRECT_ORIGINS` keeps Connect host redirects permissive (any http(s) URL) — appropriate for the current single-tenant demo. Browser CORS still never uses `*`: only `PUBLIC_BASE_URL`’s origin is reflected until you set the allowlist.
+Unset `ALLOWED_REDIRECT_ORIGINS` keeps Connect host redirects permissive (any http(s) URL) — fine while iterating host callbacks. Browser CORS still never uses `*`: only `PUBLIC_BASE_URL`’s origin is reflected until you set the allowlist.
 
 To reduce open-redirect of `public_token` and align CORS with known host origins:
 

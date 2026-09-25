@@ -16,8 +16,8 @@ pnpm --filter @inboxlink/core --filter @inboxlink/sdk build
 
 export INBOXLINK_BASE_URL=https://inboxlink-two.vercel.app
 export GRANT_ID=grant_…   # your active grant
-# Production is currently single-mode; the SDK still sends Bearer:
-export INBOXLINK_API_SECRET=unused-in-single-mode
+# Production is multi — required Bearer / SDK apiSecret (never commit; never ship to browsers):
+export INBOXLINK_API_SECRET=…
 
 node examples/sdk-gmail-self-run.mjs
 ```
