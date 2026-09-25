@@ -23,6 +23,8 @@ describe("renderConnectPage", () => {
     assert.match(html, /datetime="2099-01-15T12:00:00\.000Z"/);
     assert.match(html, /This link expires/);
     assert.match(html, /host never holds your refresh token/);
+    assert.match(html, /Content-Security-Policy/);
+    assert.match(html, /default-src 'none'/);
     assert.doesNotMatch(html, /Stub Connect UI/);
   });
 });

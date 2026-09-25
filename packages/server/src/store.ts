@@ -28,6 +28,12 @@ export interface GrantStore {
   getSession(id: string): Promise<StoredSession | undefined>;
   getSessionByToken(linkToken: string): Promise<StoredSession | undefined>;
   findSessionByOAuthState(state: string): Promise<StoredSession | undefined>;
+  /**
+   * Atomically claim an OAuth `state` on first use: clear `oauthState` and
+   * return the session (with `codeVerifier` still present for PKCE exchange).
+   * A second claim with the same state returns undefined (closes replay).
+   */
+  consumeOAuthState(state: string): Promise<StoredSession | undefined>;
   saveSession(session: StoredSession): Promise<void>;
   putGrant(grant: Grant): Promise<void>;
   updateGrant(grant: Grant): Promise<void>;
@@ -39,6 +45,8 @@ export interface GrantStore {
    * `tenantId`. Returns undefined when missing or cross-tenant.
    */
   consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined>;
+  /** Delete `link_sessions` rows whose `expiresAt` is in the past. */
+  deleteExpiredSessions(): Promise<number>;
   listMessages(grantId: string): Promise<Message[]>;
   upsertMessages(messages: Message[]): Promise<void>;
   deleteMessages(grantId: string): Promise<void>;
@@ -94,6 +102,16 @@ export class MemoryStore implements GrantStore {
     return undefined;
   }
 
+  async consumeOAuthState(state: string): Promise<StoredSession | undefined> {
+    for (const session of this.sessions.values()) {
+      if (session.oauthState !== state) continue;
+      if (Date.parse(session.expiresAt) <= Date.now()) return undefined;
+      session.oauthState = undefined;
+      return session;
+    }
+    return undefined;
+  }
+
   async saveSession(session: StoredSession): Promise<void> {
     const previous = this.sessions.get(session.id);
     if (previous?.publicToken && previous.publicToken !== session.publicToken) {
@@ -140,6 +158,19 @@ export class MemoryStore implements GrantStore {
     this.publicTokens.delete(publicToken);
     owner.publicToken = undefined;
     return grantId;
+  }
+
+  async deleteExpiredSessions(): Promise<number> {
+    const now = Date.now();
+    let removed = 0;
+    for (const [id, session] of this.sessions) {
+      if (Date.parse(session.expiresAt) > now) continue;
+      this.sessions.delete(id);
+      this.sessionsByToken.delete(session.linkToken);
+      if (session.publicToken) this.publicTokens.delete(session.publicToken);
+      removed += 1;
+    }
+    return removed;
   }
 
   async listMessages(grantId: string): Promise<Message[]> {
