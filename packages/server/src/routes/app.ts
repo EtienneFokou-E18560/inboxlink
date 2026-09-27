@@ -10,6 +10,7 @@ import {
   ImapCredentialsError,
   ImapUnavailableError,
 } from "@inboxlink/adapters-imap";
+import { MicrosoftAdapter, MicrosoftApiError } from "@inboxlink/adapters-microsoft";
 import {
   connectErrorStatus,
   renderConnectErrorPage,
@@ -60,6 +61,8 @@ export type CreateAppOptions = {
   gmail: GmailAdapter;
   /** Optional; defaults to a real imapflow-backed adapter when omitted. */
   imap?: ImapAdapter;
+  /** Optional Microsoft Graph adapter (parked until Gmail is complete). */
+  microsoft?: MicrosoftAdapter;
   publicBaseUrl: string;
   /** Bearer secret for the default tenant (backward compatible). */
   apiSecret: string;
@@ -69,8 +72,12 @@ export type CreateAppOptions = {
   tenantId?: string;
   mode: "single" | "multi";
   gmailScopes: string[];
+  /** Used when `microsoft` is set. */
+  microsoftScopes?: string[];
   /** Registered Google redirect. Defaults to `{publicBaseUrl}/v1/oauth/gmail/callback`. */
   oauthRedirectUri?: string;
+  /** Registered Microsoft redirect. Defaults to `{publicBaseUrl}/v1/oauth/microsoft/callback`. */
+  microsoftOauthRedirectUri?: string;
   /** `postgres` when DATABASE_URL is set; otherwise process memory. */
   storeKind?: "memory" | "postgres";
   queue: QueueHandle | null;
@@ -339,10 +346,20 @@ export function createApp(opts: CreateAppOptions) {
       scopes: opts.gmailScopes,
       codeChallenge,
     });
+    const microsoftAuthUrl =
+      opts.microsoft && (opts.microsoftScopes?.length ?? 0) > 0
+        ? opts.microsoft.buildAuthorizationUrl({
+            state,
+            redirectUri: microsoftOauthRedirectUri(opts),
+            scopes: opts.microsoftScopes!,
+            codeChallenge,
+          })
+        : undefined;
     return c.html(
       renderConnectPage({
         authUrl,
         expiresAt: session.expiresAt,
+        microsoftAuthUrl,
       }),
     );
   });
@@ -450,12 +467,23 @@ export function createApp(opts: CreateAppOptions) {
     return c.redirect(redirect.toString(), 302);
   });
 
-  app.get("/v1/oauth/gmail/callback", async (c) => {
+  app.get("/v1/oauth/gmail/callback", async (c) => finishOAuthCallback(c, opts, "gmail"));
+
+  app.get("/v1/oauth/microsoft/callback", async (c) => {
+    if (!opts.microsoft) return c.html(renderConnectErrorPage({ kind: "invalid" }), 404);
+    return finishOAuthCallback(c, opts, "microsoft");
+  });
+
+  async function finishOAuthCallback(
+    c: Context<AppEnv>,
+    appOpts: CreateAppOptions,
+    provider: "gmail" | "microsoft",
+  ) {
     const code = c.req.query("code");
     const state = c.req.query("state");
     const error = c.req.query("error");
     if (error) {
-      log.warn("oauth_callback_failed", { reason: error, store: opts.storeKind ?? "memory" });
+      log.warn("oauth_callback_failed", { reason: error, store: appOpts.storeKind ?? "memory" });
       return c.html(
         renderConnectErrorPage({ kind: "oauth_denied", providerError: error }),
         connectErrorStatus("oauth_denied"),
@@ -468,32 +496,42 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_missing"),
       );
     }
-    const session = await opts.store.consumeOAuthState(state);
+    const session = await appOpts.store.consumeOAuthState(state);
     if (!session) {
       log.warn("oauth_callback_failed", {
         reason: "unknown_oauth_state",
-        store: opts.storeKind ?? "memory",
+        store: appOpts.storeKind ?? "memory",
       });
       return c.html(
         renderConnectErrorPage({ kind: "oauth_unknown_state" }),
         connectErrorStatus("oauth_unknown_state"),
       );
     }
-    const redirectUri = oauthRedirectUri(opts);
+    const redirectUri =
+      provider === "gmail" ? oauthRedirectUri(appOpts) : microsoftOauthRedirectUri(appOpts);
+    const scopes =
+      provider === "gmail" ? appOpts.gmailScopes : (appOpts.microsoftScopes ?? []);
     let tokens;
     try {
-      tokens = await opts.gmail.exchangeAuthorizationCode({
-        code,
-        redirectUri,
-        codeVerifier: session.codeVerifier,
-      });
+      tokens =
+        provider === "gmail"
+          ? await appOpts.gmail.exchangeAuthorizationCode({
+              code,
+              redirectUri,
+              codeVerifier: session.codeVerifier,
+            })
+          : await appOpts.microsoft!.exchangeAuthorizationCode({
+              code,
+              redirectUri,
+              codeVerifier: session.codeVerifier,
+            });
     } catch (err) {
-      const reason = googleErrorCode(err);
-      log.warn("oauth_callback_failed", { reason, store: opts.storeKind ?? "memory" });
+      const reason = oauthErrorCode(err);
+      log.warn("oauth_callback_failed", { reason, store: appOpts.storeKind ?? "memory" });
       return c.html(
         renderConnectErrorPage({
           kind: "oauth_exchange",
-          detail: oauthExchangeHint(reason, redirectUri),
+          detail: oauthExchangeHint(provider, reason, redirectUri),
         }),
         connectErrorStatus("oauth_exchange"),
       );
@@ -502,7 +540,7 @@ export function createApp(opts: CreateAppOptions) {
     if (!refreshToken) {
       log.warn("oauth_callback_failed", {
         reason: "missing_refresh_token",
-        store: opts.storeKind ?? "memory",
+        store: appOpts.storeKind ?? "memory",
       });
       return c.html(
         renderConnectErrorPage({ kind: "oauth_missing_refresh" }),
@@ -515,21 +553,21 @@ export function createApp(opts: CreateAppOptions) {
       id: grantId,
       tenantId: session.tenantId,
       externalUserId: session.externalUserId,
-      provider: "gmail",
-      email: tokens.email ?? "unknown@gmail.com",
+      provider,
+      email: tokens.email ?? (provider === "gmail" ? "unknown@gmail.com" : "unknown@outlook.com"),
       status: "active",
-      scopes: tokens.scopes.length ? tokens.scopes : [...opts.gmailScopes],
+      scopes: tokens.scopes.length ? tokens.scopes : [...scopes],
       createdAt: now,
       updatedAt: now,
     };
-    await opts.store.putGrant(grant);
+    await appOpts.store.putGrant(grant);
     try {
-      await opts.vault.seal(refreshToken, {
+      await appOpts.vault.seal(refreshToken, {
         grantId,
         tenantId: session.tenantId,
       });
     } catch {
-      await opts.store.deleteGrant(grantId, session.tenantId);
+      await appOpts.store.deleteGrant(grantId, session.tenantId);
       log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });
       return c.html(
         renderConnectErrorPage({ kind: "vault_failed" }),
@@ -542,45 +580,45 @@ export function createApp(opts: CreateAppOptions) {
     session.status = "completed";
     session.grantId = grantId;
     session.publicToken = publicToken;
-    await opts.store.saveSession(session);
+    await appOpts.store.saveSession(session);
     log.info("oauth_callback_ok", {
       grantId,
       tenantId: session.tenantId,
-      provider: "gmail",
-      store: opts.storeKind ?? "memory",
+      provider,
+      store: appOpts.storeKind ?? "memory",
     });
 
-    // Host webhook: grant.connected (awaited but never fails Connect).
-    await emitWebhookSafe(opts.webhooks, "grant.connected", {
+    await emitWebhookSafe(appOpts.webhooks, "grant.connected", {
       grantId,
       tenantId: session.tenantId,
       externalUserId: session.externalUserId,
-      provider: "gmail",
+      provider,
       email: grant.email,
     });
 
-    // Gmail push watch (best-effort; poll/sync remains the fallback).
-    await startOrRenewGmailWatch({
-      store: opts.store,
-      vault: opts.vault,
-      gmail: opts.gmail,
-      grant,
-      topicName: opts.gmailPubsubTopic,
-    });
+    if (provider === "gmail") {
+      await startOrRenewGmailWatch({
+        store: appOpts.store,
+        vault: appOpts.vault,
+        gmail: appOpts.gmail,
+        grant,
+        topicName: appOpts.gmailPubsubTopic,
+      });
+    }
 
     // Enqueue bootstrap sync job (drained by cron / deferred invoke).
-    if (opts.queue) {
-      const { jobId } = await opts.queue.enqueue({
+    if (appOpts.queue) {
+      const { jobId } = await appOpts.queue.enqueue({
         grantId,
         tenantId: session.tenantId,
         kind: "bootstrap",
         forceBootstrap: true,
       });
       void drainSyncJobs({
-        store: opts.store,
-        vault: opts.vault,
-        gmail: opts.gmail,
-        webhooks: opts.webhooks,
+        store: appOpts.store,
+        vault: appOpts.vault,
+        gmail: appOpts.gmail,
+        webhooks: appOpts.webhooks,
         limit: 1,
       }).catch((err) => {
         log.warn("sync_drain_after_connect_failed", {
@@ -594,7 +632,7 @@ export function createApp(opts: CreateAppOptions) {
     redirect.searchParams.set("public_token", publicToken);
     redirect.searchParams.set("link_token", session.linkToken);
     return c.redirect(redirect.toString(), 302);
-  });
+  }
 
   app.post("/v1/grants/exchange", async (c) => {
     const body = (await c.req.json()) as { publicToken?: string };
@@ -643,6 +681,13 @@ export function createApp(opts: CreateAppOptions) {
     if (grant.provider === "imap") {
       if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
       return listImapMessages(c, opts, imap, grant, limit, cursor);
+    }
+
+    if (grant.provider === "microsoft") {
+      if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+      if (!opts.microsoft) return c.json({ error: "unsupported_provider" }, 400);
+      if (cursor && cursor.length > 2048) return c.json({ error: "invalid_cursor" }, 400);
+      return listMicrosoftMessages(c, opts, opts.microsoft, grant, limit, cursor);
     }
 
     const ready = await readyGmailGrant(opts, grantId, tenantId);
@@ -978,13 +1023,30 @@ function timingSafeStringEqual(a: string | undefined, b: string | undefined): bo
   return timingSafeEqual(left, right);
 }
 
-function googleErrorCode(err: unknown): string {
+function oauthErrorCode(err: unknown): string {
   const message = err instanceof Error ? err.message : "";
   const match = message.match(/"error"\s*:\s*"([a-z0-9_]+)"/i);
   return match?.[1] ?? "exchange_failed";
 }
 
-function oauthExchangeHint(code: string, redirectUri: string): string {
+function oauthExchangeHint(
+  provider: "gmail" | "microsoft",
+  code: string,
+  redirectUri: string,
+): string {
+  if (provider === "microsoft") {
+    switch (code) {
+      case "invalid_client":
+        return "Microsoft rejected the OAuth client. Replace MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET with the Entra app registration values, redeploy, and start Connect again.";
+      case "invalid_grant":
+        return "The Microsoft code expired or was already used. Start Connect again.";
+      case "unauthorized_client":
+      case "invalid_request":
+        return `Check the Entra redirect URI matches exactly: ${redirectUri}`;
+      default:
+        return "Microsoft did not accept the authorization code. Check the app registration, redirect URI, and tenant (MICROSOFT_TENANT), redeploy, and start Connect again.";
+    }
+  }
   switch (code) {
     case "invalid_client":
       return "Google rejected the OAuth client. Replace GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET with the web client values, redeploy, and start Connect again.";
@@ -1002,6 +1064,58 @@ function oauthRedirectUri(opts: CreateAppOptions): string {
     opts.oauthRedirectUri ??
     new URL("/v1/oauth/gmail/callback", opts.publicBaseUrl).toString()
   );
+}
+
+function microsoftOauthRedirectUri(opts: CreateAppOptions): string {
+  return (
+    opts.microsoftOauthRedirectUri ??
+    new URL("/v1/oauth/microsoft/callback", opts.publicBaseUrl).toString()
+  );
+}
+
+async function listMicrosoftMessages(
+  c: { json: (body: unknown, status?: number) => Response },
+  opts: CreateAppOptions,
+  microsoft: MicrosoftAdapter,
+  grant: Grant,
+  limit: number,
+  cursor: string | undefined,
+): Promise<Response> {
+  const ciphertext = await opts.vault.getCiphertext(grant.id);
+  if (!ciphertext) return c.json({ error: "missing_refresh_token" }, 409);
+  let refreshToken: string;
+  try {
+    refreshToken = await opts.vault.open(ciphertext, {
+      grantId: grant.id,
+      tenantId: grant.tenantId,
+    });
+  } catch {
+    return c.json({ error: "missing_refresh_token" }, 409);
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = (await microsoft.refreshAccessToken(refreshToken)).accessToken;
+  } catch {
+    await markNeedsReauth(opts.store, grant);
+    return c.json({ error: "needs_reauth" }, 409);
+  }
+
+  try {
+    const page = await microsoft.listMessages({
+      accessToken,
+      grantId: grant.id,
+      maxResults: limit,
+      pageToken: cursor,
+    });
+    return c.json({ messages: page.messages, nextCursor: page.nextCursor });
+  } catch (err) {
+    if (err instanceof MicrosoftApiError && (err.status === 401 || err.status === 403)) {
+      await markNeedsReauth(opts.store, grant);
+      return c.json({ error: "needs_reauth" }, 409);
+    }
+    return c.json({ error: "microsoft_unavailable" }, 502);
+  }
 }
 
 async function readyGmailGrant(

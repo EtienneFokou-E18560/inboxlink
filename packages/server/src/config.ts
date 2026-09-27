@@ -22,6 +22,12 @@ export type ServerConfig = {
   googleClientSecret: string;
   googleRedirectUri: string;
   gmailScopes: string[];
+  microsoftClientId: string;
+  microsoftClientSecret: string;
+  microsoftRedirectUri: string;
+  /** Authority tenant (`common` = personal + work/school). */
+  microsoftTenant: string;
+  microsoftScopes: string[];
   /**
    * Host Connect `redirectUri` origins allowlist.
    * `null` = permissive (any http(s) URL) — default for single-tenant demo.
@@ -76,6 +82,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "openid",
       "email",
     ];
+  const microsoftScopes =
+    env.MICROSOFT_SCOPES?.split(/\s+/).filter(Boolean) ??
+    [
+      "openid",
+      "offline_access",
+      "email",
+      "https://graph.microsoft.com/Mail.Read",
+    ];
 
   return {
     port,
@@ -93,6 +107,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     googleRedirectUri:
       env.GOOGLE_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/gmail/callback`,
     gmailScopes: scopes,
+    microsoftClientId: env.MICROSOFT_CLIENT_ID ?? "your-microsoft-client-id",
+    microsoftClientSecret: env.MICROSOFT_CLIENT_SECRET ?? "your-microsoft-client-secret",
+    microsoftRedirectUri:
+      env.MICROSOFT_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/microsoft/callback`,
+    microsoftTenant: env.MICROSOFT_TENANT?.trim() || "common",
+    microsoftScopes,
     allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
     rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),

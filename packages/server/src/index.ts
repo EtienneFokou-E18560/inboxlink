@@ -2,6 +2,7 @@ import { getRequestListener, serve } from "@hono/node-server";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { ImapAdapter } from "@inboxlink/adapters-imap";
+import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
 import { loadConfig } from "./config.js";
 import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
@@ -46,18 +47,27 @@ export function createAppFromEnv(
     redirectUri: config.googleRedirectUri,
   });
   const imap = new ImapAdapter();
+  const microsoft = new MicrosoftAdapter({
+    clientId: config.microsoftClientId,
+    clientSecret: config.microsoftClientSecret,
+    redirectUri: config.microsoftRedirectUri,
+    tenant: config.microsoftTenant,
+  });
   const app = createApp({
     store,
     vault,
     gmail,
     imap,
+    microsoft,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
     tenantId: config.tenantId,
     tenantSecrets: config.tenantSecrets,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
+    microsoftScopes: config.microsoftScopes,
     oauthRedirectUri: config.googleRedirectUri,
+    microsoftOauthRedirectUri: config.microsoftRedirectUri,
     storeKind,
     queue: resolvedQueue,
     // Soft abuse guard for Connect + host APIs in both single and multi.

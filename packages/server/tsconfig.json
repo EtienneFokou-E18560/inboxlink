@@ -13,6 +13,7 @@
     { "path": "../core" },
     { "path": "../adapters-gmail" },
     { "path": "../adapters-imap" },
+    { "path": "../adapters-microsoft" },
     { "path": "../connect-ui" }
   ]
 }

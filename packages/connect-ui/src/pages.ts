@@ -8,6 +8,8 @@ export type ConnectPageProps = {
   expiresAt: string;
   /** Provider button label, default Google. */
   providerLabel?: string;
+  /** Optional Microsoft Graph OAuth URL (second CTA when set). */
+  microsoftAuthUrl?: string;
 };
 
 export type ConnectErrorKind =
@@ -51,11 +53,18 @@ export function renderConnectPage(props: ConnectPageProps): string {
   const provider = escapeHtml(props.providerLabel ?? "Google");
   const authUrl = escapeHtml(props.authUrl);
   const expires = escapeHtml(formatExpiry(props.expiresAt));
+  const microsoftCta = props.microsoftAuthUrl
+    ? `<p><a class="cta" data-testid="connect-cta-microsoft" href="${escapeHtml(props.microsoftAuthUrl)}" aria-describedby="connect-lead connect-expiry">Continue with Microsoft</a></p>`
+    : "";
+  const lead = props.microsoftAuthUrl
+    ? "InboxLink asks for <strong>read-only</strong> mailbox access so your host app can sync mail. The refresh token stays vaulted here — the host never sees it."
+    : "InboxLink asks for <strong>read-only</strong> Gmail access so your host app can sync mail. The refresh token stays vaulted here — the host never sees it.";
   const body = `
     <p class="kicker">Secure connect</p>
     <h1 id="connect-heading">Connect your inbox</h1>
-    <p class="lead" id="connect-lead">InboxLink asks for <strong>read-only</strong> Gmail access so your host app can sync mail. The refresh token stays vaulted here — the host never sees it.</p>
+    <p class="lead" id="connect-lead">${lead}</p>
     <p><a class="cta" data-testid="connect-cta" href="${authUrl}" aria-describedby="connect-lead connect-expiry">Continue with ${provider}</a></p>
+    ${microsoftCta}
     <p class="meta" id="connect-expiry">This link expires <time datetime="${escapeHtml(props.expiresAt)}">${expires}</time>. If it expires, return to the app that sent you here and start a new connect.</p>
   `;
   return renderShell({ title: "InboxLink Connect", body });
