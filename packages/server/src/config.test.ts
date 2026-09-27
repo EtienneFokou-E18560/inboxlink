@@ -14,6 +14,16 @@ describe("public URL and OAuth redirect", () => {
       config.googleRedirectUri,
       "https://inboxlink-two.vercel.app/v1/oauth/gmail/callback",
     );
+    assert.equal(
+      config.microsoftRedirectUri,
+      "https://inboxlink-two.vercel.app/v1/oauth/microsoft/callback",
+    );
+    assert.equal(config.microsoftTenant, "common");
+  });
+
+  it("honors MICROSOFT_TENANT override", () => {
+    const config = loadConfig({ MICROSOFT_TENANT: "organizations" });
+    assert.equal(config.microsoftTenant, "organizations");
   });
 
   it("falls back to the Vercel production host", () => {
