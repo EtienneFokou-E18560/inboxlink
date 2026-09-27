@@ -15,6 +15,7 @@
     "lint": "pnpm -r run lint && tsc -p tsconfig.vercel.json --noEmit",
     "dev:server": "pnpm --filter @inboxlink/server dev",
     "test": "pnpm -r --if-present run test",
+    "smoke:health": "bash scripts/smoke-health.sh",
     "clean": "pnpm -r exec rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
@@ -22,7 +23,7 @@
     "hono": "^4.7.5"
   },
   "devDependencies": {
-    "@types/node": "^22.13.10",
-    "typescript": "^5.8.2"
+    "@types/node": "^26.6.1",
+    "typescript": "^7.0.2"
   }
 }

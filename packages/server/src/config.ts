@@ -1,3 +1,10 @@
+import {
+  buildTenantSecrets,
+  DEV_API_SECRET_PLACEHOLDER,
+  parseTenantSecrets,
+} from "./auth.js";
+import { parseAllowedRedirectOrigins } from "./grants-public.js";
+
 export type ServerConfig = {
   port: number;
   host: string;
@@ -5,6 +12,10 @@ export type ServerConfig = {
   mode: "single" | "multi";
   masterKey: string;
   apiSecret: string;
+  /** Default tenant when only INBOXLINK_API_SECRET is set. */
+  tenantId: string;
+  /** tenantId → Bearer secret for multi mode. */
+  tenantSecrets: Record<string, string>;
   databaseUrl?: string;
   redisUrl?: string;
   googleClientId: string;
@@ -14,17 +25,56 @@ export type ServerConfig = {
   microsoftClientId: string;
   microsoftClientSecret: string;
   microsoftRedirectUri: string;
+  /** Authority tenant (`common` = personal + work/school). */
   microsoftTenant: string;
   microsoftScopes: string[];
+  /**
+   * Host Connect `redirectUri` origins allowlist.
+   * `null` = permissive (any http(s) URL) — default for single-tenant demo.
+   */
+  allowedRedirectOrigins: string[] | null;
+  /** Soft abuse guard for Connect + host APIs (single and multi). */
+  rateLimitWindowMs: number;
+  rateLimitMaxRequests: number;
+  /**
+   * Host webhook callback URL (Wave C). Delivery is off unless both URL and
+   * `webhookSecret` are set. No DB-backed destinations in this wave.
+   */
+  webhookUrl?: string;
+  /** HMAC-SHA256 shared secret for outbound webhooks (`INBOXLINK_WEBHOOK_SECRET`). */
+  webhookSecret?: string;
+  /**
+   * Full Cloud Pub/Sub topic resource name for Gmail `users.watch`
+   * (`projects/PROJECT/topics/TOPIC`). Unset = push disabled (poll via sync).
+   */
+  gmailPubsubTopic?: string;
+  /**
+   * Shared secret for Pub/Sub push endpoint verification (first cut).
+   * Pass as `?token=` or `X-InboxLink-Push-Secret`. Never commit real values.
+   */
+  gmailPushSecret?: string;
+  /**
+   * Bearer secret for internal cron routes (watch renew + sync job drain).
+   * Vercel Cron / GitHub Actions send `Authorization: Bearer <CRON_SECRET>`.
+   */
+  cronSecret?: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
   const publicBaseUrl = resolvePublicBaseUrl(env, port);
+  // Process default is single (local demos). Production deploys set INBOXLINK_MODE=multi.
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
   const masterKey =
     env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
-  const apiSecret = env.INBOXLINK_API_SECRET ?? "dev-api-secret-change-me";
+  const apiSecret = env.INBOXLINK_API_SECRET ?? DEV_API_SECRET_PLACEHOLDER;
+  const tenantId = env.INBOXLINK_TENANT_ID?.trim() || "default";
+  const tenantSecrets = buildTenantSecrets({
+    apiSecret,
+    tenantId,
+    extra: parseTenantSecrets(env.INBOXLINK_TENANT_SECRETS),
+  });
+  assertMultiModeSecrets(mode, tenantSecrets, env);
   const scopes =
     env.GMAIL_SCOPES?.split(/\s+/).filter(Boolean) ??
     [
@@ -48,6 +98,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     mode,
     masterKey,
     apiSecret,
+    tenantId,
+    tenantSecrets,
     databaseUrl: env.DATABASE_URL,
     redisUrl: env.REDIS_URL,
     googleClientId: env.GOOGLE_CLIENT_ID ?? "your-google-client-id.apps.googleusercontent.com",
@@ -61,7 +113,49 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       env.MICROSOFT_REDIRECT_URI ?? `${publicBaseUrl}/v1/oauth/microsoft/callback`,
     microsoftTenant: env.MICROSOFT_TENANT?.trim() || "common",
     microsoftScopes,
+    allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
+    rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
+    rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
+    webhookUrl: optionalTrimmed(env.INBOXLINK_WEBHOOK_URL),
+    webhookSecret: optionalTrimmed(env.INBOXLINK_WEBHOOK_SECRET),
+    gmailPubsubTopic: optionalTrimmed(env.GMAIL_PUBSUB_TOPIC),
+    gmailPushSecret: optionalTrimmed(env.GMAIL_PUSH_SECRET),
+    cronSecret: optionalTrimmed(env.CRON_SECRET),
   };
+}
+
+function optionalTrimmed(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  return value ? value : undefined;
+}
+
+/**
+ * Multi mode in a hosted/production environment must not use the committed
+ * placeholder secret. Local demos may still use the placeholder.
+ */
+export function assertMultiModeSecrets(
+  mode: "single" | "multi",
+  tenantSecrets: Record<string, string>,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (mode !== "multi") return;
+  const hosted =
+    Boolean(env.VERCEL) ||
+    env.NODE_ENV === "production" ||
+    env.VERCEL_ENV === "production";
+  if (!hosted) return;
+  for (const [tenantId, secret] of Object.entries(tenantSecrets)) {
+    if (!secret || secret === DEV_API_SECRET_PLACEHOLDER) {
+      throw new Error(
+        `INBOXLINK_MODE=multi requires a non-default Bearer secret for tenant "${tenantId}" (set INBOXLINK_API_SECRET / INBOXLINK_TENANT_SECRETS). Default mode remains single until you explicitly enable multi.`,
+      );
+    }
+  }
+}
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number(raw ?? "");
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
 /** Prefer an explicit public URL, then the stable Vercel production host. */

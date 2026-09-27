@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
 import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
+import { unescapeHtml } from "@inboxlink/connect-ui";
 import type { Grant, Message } from "@inboxlink/core";
 import { createApp } from "./routes/app.js";
 import { MemoryStore } from "./store.js";
@@ -87,10 +88,9 @@ before(async () => {
         return;
       }
       const page = new URL(url, "http://graph.local").searchParams.get("$skiptoken");
-      const next =
-        page
-          ? undefined
-          : `http://graph.local/v1.0/me/messages?$skiptoken=page-2&$top=5`;
+      const next = page
+        ? undefined
+        : `http://graph.local/v1.0/me/messages?$skiptoken=page-2&$top=5`;
       res.end(JSON.stringify({ value: [graphMessage()], "@odata.nextLink": next }));
       return;
     }
@@ -153,6 +153,7 @@ function buildApp(mode: "single" | "multi" = "multi") {
     ],
     microsoftOauthRedirectUri: "http://localhost:8787/v1/oauth/microsoft/callback",
     queue: null,
+    rateLimiter: null,
   });
   return { app, store, vault };
 }
@@ -170,6 +171,16 @@ function activeGrant(id = "grant_ms"): Grant {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function microsoftAuthFromHtml(html: string): URL | undefined {
+  const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) => unescapeHtml(m[1] ?? ""));
+  for (const href of hrefs) {
+    if (!href.startsWith("http://") && !href.startsWith("https://")) continue;
+    const url = new URL(href);
+    if (url.hostname.includes("microsoftonline")) return url;
+  }
+  return undefined;
 }
 
 describe("Microsoft OAuth connect", () => {
@@ -191,11 +202,7 @@ describe("Microsoft OAuth connect", () => {
     const session = (await created.json()) as { linkToken: string };
     const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
     assert.equal(connect.status, 200);
-    const html = await connect.text();
-    const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((m) =>
-      (m[1] ?? "").replaceAll("&amp;", "&").replaceAll("&quot;", '"'),
-    );
-    const msAuth = hrefs.map((h) => new URL(h)).find((u) => u.hostname.includes("microsoftonline"));
+    const msAuth = microsoftAuthFromHtml(await connect.text());
     assert.ok(msAuth);
     assert.equal(msAuth.pathname.includes("/common/"), true);
     assert.equal(
@@ -248,10 +255,7 @@ describe("Microsoft OAuth connect", () => {
     });
     const session = (await created.json()) as { linkToken: string };
     const connect = await app.request(`/v1/connect/${encodeURIComponent(session.linkToken)}`);
-    const hrefs = [...(await connect.text()).matchAll(/href="([^"]+)"/g)].map((m) =>
-      (m[1] ?? "").replaceAll("&amp;", "&"),
-    );
-    const msAuth = hrefs.map((h) => new URL(h)).find((u) => u.hostname.includes("microsoftonline"));
+    const msAuth = microsoftAuthFromHtml(await connect.text());
     assert.ok(msAuth);
     const state = msAuth.searchParams.get("state");
     assert.ok(state);
@@ -260,8 +264,7 @@ describe("Microsoft OAuth connect", () => {
     );
     assert.equal(callback.status, 400);
     const html = await callback.text();
-    assert.match(html, /Microsoft token exchange failed/);
-    assert.match(html, /expired or was already used|Start Connect again/i);
+    assert.match(html, /Token exchange failed|did not accept|expired or was already used/i);
   });
 });
 

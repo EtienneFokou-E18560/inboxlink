@@ -1,17 +1,20 @@
-import { serve } from "@hono/node-server";
-import { handle as handleNode } from "@hono/node-server/vercel";
+import { getRequestListener, serve } from "@hono/node-server";
 import { handle as handleWeb } from "hono/vercel";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { ImapAdapter } from "@inboxlink/adapters-imap";
 import { MicrosoftAdapter } from "@inboxlink/adapters-microsoft";
 import { loadConfig } from "./config.js";
+import { MEMORY_STORE_GUIDANCE, log, redactFields, redactString } from "./log.js";
 import { createApp } from "./routes/app.js";
 import type { QueueHandle } from "./queue/sync-queue.js";
-import { createSyncQueue } from "./queue/sync-queue.js";
+import { createStoreSyncQueue } from "./queue/sync-queue.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import { createPostgresClient, PostgresJsExecutor } from "./db/sql.js";
+import { createRateLimiter } from "./rate-limit.js";
 import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
+import { createWebhookBus } from "./webhooks/deliver.js";
 
 type AppBundle = {
   app: ReturnType<typeof createApp>;
@@ -19,6 +22,7 @@ type AppBundle = {
   store: GrantStore;
   vault: MemoryTokenVault | PostgresTokenVault;
   storeKind: "memory" | "postgres";
+  queue: QueueHandle;
 };
 
 const postgresByUrl = new Map<string, { db: PgDatabase; store: PostgresStore }>();
@@ -26,7 +30,7 @@ const postgresByUrl = new Map<string, { db: PgDatabase; store: PostgresStore }>(
 /** Build the Hono app from env (no listen). Used by Node CLI and Vercel. */
 export function createAppFromEnv(
   env: NodeJS.ProcessEnv = process.env,
-  queue: QueueHandle | null = null,
+  queue?: QueueHandle | null,
 ): AppBundle {
   const config = loadConfig(env);
   const databaseUrl = config.databaseUrl?.trim();
@@ -36,11 +40,13 @@ export function createAppFromEnv(
     ? new PostgresTokenVault(opened.db, config.masterKey)
     : new MemoryTokenVault(config.masterKey);
   const storeKind = opened ? "postgres" : "memory";
+  const resolvedQueue = queue ?? createStoreSyncQueue(store);
   const gmail = new GmailAdapter({
     clientId: config.googleClientId,
     clientSecret: config.googleClientSecret,
     redirectUri: config.googleRedirectUri,
   });
+  const imap = new ImapAdapter();
   const microsoft = new MicrosoftAdapter({
     clientId: config.microsoftClientId,
     clientSecret: config.microsoftClientSecret,
@@ -51,18 +57,36 @@ export function createAppFromEnv(
     store,
     vault,
     gmail,
+    imap,
     microsoft,
     publicBaseUrl: config.publicBaseUrl,
     apiSecret: config.apiSecret,
+    tenantId: config.tenantId,
+    tenantSecrets: config.tenantSecrets,
     mode: config.mode,
     gmailScopes: config.gmailScopes,
     microsoftScopes: config.microsoftScopes,
     oauthRedirectUri: config.googleRedirectUri,
     microsoftOauthRedirectUri: config.microsoftRedirectUri,
     storeKind,
-    queue,
+    queue: resolvedQueue,
+    // Soft abuse guard for Connect + host APIs in both single and multi.
+    rateLimiter: createRateLimiter({
+      windowMs: config.rateLimitWindowMs,
+      maxRequests: config.rateLimitMaxRequests,
+    }),
+    allowedRedirectOrigins: config.allowedRedirectOrigins,
+    webhooks: createWebhookBus({
+      url: config.webhookUrl,
+      secret: config.webhookSecret,
+    }),
+    gmailPubsubTopic: config.gmailPubsubTopic,
+    gmailPushSecret: config.gmailPushSecret,
+    cronSecret: config.cronSecret,
   });
-  return { app, config, store, vault, storeKind };
+  // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).
+  void store.deleteExpiredSessions().catch(() => {});
+  return { app, config, store, vault, storeKind, queue: resolvedQueue };
 }
 
 function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresStore } {
@@ -78,12 +102,13 @@ function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresSto
  * Vercel Node invokes the default export with either a Web Request or the
  * Node (req, res) pair. `hono/vercel` only returns a Response, which the
  * Node listener ignores, so the request hangs. Write the Node response when
- * that is the runtime shape.
+ * that is the runtime shape (`getRequestListener` replaces the removed
+ * `@hono/node-server/vercel` adapter).
  */
 export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
   const { app } = createAppFromEnv(env);
   const web = handleWeb(app);
-  const node = handleNode(app);
+  const node = getRequestListener(app.fetch);
   return (incoming: unknown, outgoing?: unknown) => {
     if (typeof Request !== "undefined" && incoming instanceof Request) {
       return web(incoming);
@@ -96,18 +121,42 @@ export function createVercelHandler(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export async function startServer(env: NodeJS.ProcessEnv = process.env) {
-  const config = loadConfig(env);
-  const queue = await createSyncQueue(config.redisUrl);
-  const { app } = createAppFromEnv(env, queue);
+  const { app, config, storeKind, queue } = createAppFromEnv(env);
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, () => {
-    console.info(
-      `[inboxlink] listening on http://${config.host}:${config.port} (mode=${config.mode})`,
-    );
-    console.info(`[inboxlink] health: ${config.publicBaseUrl}/health`);
+    log.info("server_listening", {
+      host: config.host,
+      port: config.port,
+      mode: config.mode,
+      store: storeKind,
+      health: `${config.publicBaseUrl}/health`,
+    });
+    if (storeKind !== "postgres") {
+      log.warn("ephemeral_store", { guidance: MEMORY_STORE_GUIDANCE });
+    }
   });
 
   return { app, server, config, queue };
 }
 
-export { createApp, loadConfig, MemoryStore, MemoryTokenVault, PostgresStore, PostgresTokenVault };
+export {
+  createApp,
+  loadConfig,
+  MemoryStore,
+  MemoryTokenVault,
+  PostgresStore,
+  PostgresTokenVault,
+  log,
+  redactFields,
+  redactString,
+};
+export { syncGmailGrant } from "./sync/gmail-sync.js";
+export { createStoreSyncQueue, drainSyncJobs } from "./queue/sync-queue.js";
+export {
+  createWebhookBus,
+  deliverWebhookEvent,
+  emitWebhookSafe,
+  signWebhookBody,
+  shouldRetryStatus,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "./webhooks/deliver.js";

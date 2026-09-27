@@ -12,6 +12,8 @@
   "references": [
     { "path": "../core" },
     { "path": "../adapters-gmail" },
-    { "path": "../adapters-microsoft" }
+    { "path": "../adapters-imap" },
+    { "path": "../adapters-microsoft" },
+    { "path": "../connect-ui" }
   ]
 }

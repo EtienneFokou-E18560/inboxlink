@@ -1,3 +1,10 @@
+/**
+ * Envelope helpers for vaulted secrets (AES-256-GCM).
+ *
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Etienne Fokou
+ */
+
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const ALGO = "aes-256-gcm";
@@ -39,6 +46,17 @@ export function openSecret(masterKey: string, ciphertext: Uint8Array, aad?: stri
 
 export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString("base64url");
+}
+
+/**
+ * RFC 7636 S256 PKCE pair for OAuth authorization-code flows.
+ * Verifier is ~43 base64url chars (32 random bytes); challenge is
+ * BASE64URL(SHA-256(verifier)).
+ */
+export function createPkcePair(): { codeVerifier: string; codeChallenge: string } {
+  const codeVerifier = randomToken(32);
+  const codeChallenge = createHash("sha256").update(codeVerifier, "ascii").digest("base64url");
+  return { codeVerifier, codeChallenge };
 }
 
 export function newId(prefix: string): string {
