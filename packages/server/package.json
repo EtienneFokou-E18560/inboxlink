@@ -43,7 +43,7 @@
     "tsx": "^4.19.3"
   },
   "optionalDependencies": {
-    "bullmq": "^6.3.6",
+    "bullmq": "^6.3.8",
     "ioredis": "^6.0.0"
   },
   "engines": {
