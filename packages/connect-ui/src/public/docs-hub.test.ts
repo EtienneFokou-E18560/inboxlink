@@ -26,9 +26,8 @@ describe("renderDocsHubPage", () => {
     assert.match(html, /packages\/sdk\/README\.md/);
     assert.match(html, /examples\/host-integration/);
     assert.match(html, /@inboxlink\/core@0\.1\.1/);
-    assert.match(html, /@inboxlink\/sdk@0\.1\.0/);
+    assert.match(html, /@inboxlink\/sdk@0\.1\.1/);
     assert.match(html, /npmjs\.com\/package\/@inboxlink\/core\/v\/0\.1\.1/);
-    assert.match(html, /after #40 publish/);
     assert.match(html, /Production HTTP/);
     assert.match(html, /inboxlink\/wiki/);
     assert.match(html, /Messages-API/);
@@ -59,7 +58,7 @@ describe("renderDocsHubPage", () => {
       catalog.sections[0]?.links[0]?.href.startsWith(DEFAULT_DOCS_REPO_BASE),
     );
     assert.equal(LIVE_CORE_NPM_VERSION, "0.1.1");
-    assert.equal(LIVE_SDK_NPM_VERSION, "0.1.0");
+    assert.equal(LIVE_SDK_NPM_VERSION, "0.1.1");
     assert.equal(SDK_MAIN_VERSION, "0.1.1");
     assert.ok(catalog.footer.some((l) => l.href === DEFAULT_WIKI_BASE));
     assert.ok(

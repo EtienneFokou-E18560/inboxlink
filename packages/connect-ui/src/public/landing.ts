@@ -37,10 +37,9 @@ export function renderLandingPage(links: LandingPageLinks = {}): string {
   );
   const healthPath = escapeHtml(links.healthPath ?? DEFAULT_HEALTH);
 
-  const flow = escapeHtml(`npm i @inboxlink/core@0.1.1   # live
-npm i @inboxlink/sdk         # 0.1.0 today; filters after publish
+  const flow = escapeHtml(`npm i @inboxlink/core @inboxlink/sdk   # 0.1.1
 session → connect → grantId → messages
-filters: Production HTTP + main (SDK helpers pending)`);
+events: grant.connected · message.created · sync.completed`);
 
   const body = `
     <p class="brand-hero">Inbox<span>Link</span></p>
@@ -52,7 +51,7 @@ filters: Production HTTP + main (SDK helpers pending)`);
       <a class="cta-secondary" data-testid="landing-npm" href="${npmCoreUrl}">npm core@0.1.1</a>
     </div>
     <pre class="flow" data-testid="landing-flow" aria-label="Install and product flow">${flow}</pre>
-    <p class="landing-footer">Open-source mailbox connection infrastructure · <a href="${healthPath}">JSON health</a> stays at <code>/health</code> · human <a href="/status">/status</a></p>
+    <p class="landing-footer">Open-source mailbox connection infrastructure · <a href="${healthPath}">JSON health</a> stays at <code>/health</code> · human <a href="/status">/status</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>
   `;
 
   return renderPublicDocument({
