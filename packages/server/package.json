@@ -35,7 +35,7 @@
     "@inboxlink/connect-ui": "workspace:*",
     "@inboxlink/core": "workspace:*",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.7.5",
+    "hono": "^4.13.12",
     "postgres": "^3.4.9"
   },
   "devDependencies": {
