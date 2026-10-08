@@ -293,4 +293,54 @@ describe("InboxLink SDK", () => {
     assert.equal(il.webhooks.verify({ payload, signatureHeader: `sha256=${hex}`, secret: "whsec" }), true);
     assert.equal(il.webhooks.verify({ payload, signatureHeader: `sha256=${hex}`, secret: "wrong" }), false);
   });
+
+  it("verifySigned checks the HMAC over timestamp.body and rejects stale or future requests", () => {
+    const il = new InboxLink({ baseUrl: "http://localhost:8787", apiSecret: "x" });
+    const payload = JSON.stringify({ type: "message.created" });
+    const nowMs = 1_800_000_000_000;
+    const ts = String(nowMs / 1000);
+    const sig = `sha256=${createHmac("sha256", "whsec").update(`${ts}.${payload}`).digest("hex")}`;
+    const base = { payload, timestampHeader: ts, signatureHeader: sig, secret: "whsec", now: nowMs };
+    assert.equal(il.webhooks.verifySigned(base), true);
+    assert.equal(il.webhooks.verifySigned({ ...base, secret: "wrong" }), false);
+    assert.equal(il.webhooks.verifySigned({ ...base, payload: payload + " " }), false);
+    assert.equal(il.webhooks.verifySigned({ ...base, now: nowMs + 301_000 }), false);
+    assert.equal(il.webhooks.verifySigned({ ...base, now: nowMs - 301_000 }), false);
+    assert.equal(il.webhooks.verifySigned({ ...base, now: nowMs + 301_000, toleranceSec: 600 }), true);
+    assert.equal(il.webhooks.verifySigned({ ...base, timestampHeader: "abc" }), false);
+  });
+
+  it("manages webhook endpoints over /v1/webhooks", async () => {
+    const calls: { url: string; method?: string; body?: string }[] = [];
+    const fetchMock: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method, body: init?.body as string | undefined });
+      const status = init?.method === "DELETE" ? 204 : init?.method === "POST" ? 201 : 200;
+      return status === 204
+        ? new Response(null, { status })
+        : new Response(JSON.stringify({ id: "whe_1", webhooks: [], secret: "whsec_x" }), {
+            status,
+            headers: { "content-type": "application/json" },
+          });
+    };
+    const il = new InboxLink({ baseUrl: "http://localhost:8787", apiSecret: "x", fetch: fetchMock });
+    const created = await il.webhookEndpoints.create({
+      url: "https://hooks.example.com/a",
+      events: ["message.created"],
+    });
+    assert.equal(created.secret, "whsec_x");
+    await il.webhookEndpoints.list();
+    await il.webhookEndpoints.delete("whe_1");
+    assert.deepEqual(
+      calls.map((c) => `${c.method} ${c.url}`),
+      [
+        "POST http://localhost:8787/v1/webhooks",
+        "GET http://localhost:8787/v1/webhooks",
+        "DELETE http://localhost:8787/v1/webhooks/whe_1",
+      ],
+    );
+    assert.deepEqual(JSON.parse(calls[0]!.body!), {
+      url: "https://hooks.example.com/a",
+      events: ["message.created"],
+    });
+  });
 });

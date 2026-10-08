@@ -207,6 +207,8 @@ export class InboxLink {
   readonly grants: GrantsApi;
   readonly messages: MessagesApi;
   readonly webhooks: WebhooksApi;
+  /** Manage this tenant's webhook destinations (`/v1/webhooks`). */
+  readonly webhookEndpoints: WebhookEndpointsApi;
   /** Resolved API origin (after defaults). */
   readonly baseUrl: string;
 
@@ -226,6 +228,7 @@ export class InboxLink {
     this.grants = new GrantsApi(http);
     this.messages = new MessagesApi(http);
     this.webhooks = new WebhooksApi();
+    this.webhookEndpoints = new WebhookEndpointsApi(http);
   }
 
   /**
@@ -431,8 +434,76 @@ class MessagesApi {
   }
 }
 
+export type WebhookEventName =
+  | "grant.connected"
+  | "grant.needs_reauth"
+  | "sync.completed"
+  | "message.created";
+
+export type WebhookEndpointInfo = {
+  id: string;
+  url: string;
+  /** Empty = every event. */
+  events: WebhookEventName[];
+  createdAt: string;
+};
+
+class WebhookEndpointsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * Register a public https URL. The returned `secret` is shown ONCE: store it in your
+   * host's secret manager and pass it to `webhooks.verifySigned`.
+   */
+  create(input: {
+    url: string;
+    events?: WebhookEventName[];
+  }): Promise<WebhookEndpointInfo & { secret: string }> {
+    return this.http.request("POST", "v1/webhooks", input);
+  }
+
+  list(): Promise<{ webhooks: WebhookEndpointInfo[] }> {
+    return this.http.request("GET", "v1/webhooks");
+  }
+
+  delete(id: string): Promise<void> {
+    return this.http.request("DELETE", `v1/webhooks/${encodeURIComponent(id)}`);
+  }
+}
+
 class WebhooksApi {
-  /** Verify `sha256=<hex>` HMAC signatures (constant-time). */
+  /**
+   * Verify a delivery signed with a timestamp (preferred). Pass the raw request body plus the
+   * `X-InboxLink-Timestamp` and `X-InboxLink-Signature-V1` headers. Rejects deliveries older
+   * (or newer) than `toleranceSec` (default 300) so a captured request cannot be replayed.
+   */
+  verifySigned(input: {
+    payload: string;
+    timestampHeader: string;
+    signatureHeader: string;
+    secret: string;
+    toleranceSec?: number;
+    /** Test hook: current time in ms. */
+    now?: number;
+  }): boolean {
+    const ts = Number(input.timestampHeader);
+    if (!Number.isFinite(ts)) return false;
+    const nowSec = (input.now ?? Date.now()) / 1000;
+    if (Math.abs(nowSec - ts) > (input.toleranceSec ?? 300)) return false;
+    const expected = createHmac("sha256", input.secret)
+      .update(`${input.timestampHeader}.${input.payload}`)
+      .digest("hex");
+    const provided = input.signatureHeader.replace(/^sha256=/i, "").trim();
+    try {
+      const a = Buffer.from(expected, "hex");
+      const b = Buffer.from(provided, "hex");
+      return a.length === b.length && timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Verify `sha256=<hex>` HMAC signatures (constant-time). No replay protection: prefer verifySigned. */
   verify(input: {
     payload: string;
     signatureHeader: string;

@@ -2,12 +2,15 @@ import { createHmac } from "node:crypto";
 import { newId } from "@inboxlink/core";
 import { log } from "../log.js";
 
+export const WEBHOOK_EVENT_TYPES = [
+  "grant.connected",
+  "grant.needs_reauth",
+  "sync.completed",
+  "message.created",
+] as const;
+
 /** Events emitted by the host webhook bus (Waves C–D). */
-export type WebhookEventType =
-  | "grant.connected"
-  | "grant.needs_reauth"
-  | "sync.completed"
-  | "message.created";
+export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
 export type WebhookEvent = {
   id: string;
@@ -33,6 +36,9 @@ export type WebhookBusConfig = {
   maxAttempts?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Per-attempt timeout. Default 5s so a hanging host cannot eat the function budget. */
+  timeoutMs?: number;
+  now?: () => number;
 };
 
 export type WebhookBus = {
@@ -46,11 +52,22 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 /** Backoff between attempts (ms); index 0 unused (no sleep before first try). */
 const DEFAULT_BACKOFF_MS = [0, 100, 400] as const;
 
-/** Header hosts should pass to `InboxLink.webhooks.verify`. */
+/** Legacy header: HMAC of the raw body only (no replay protection). */
 export const WEBHOOK_SIGNATURE_HEADER = "X-InboxLink-Signature";
+/** Unix seconds the request was signed. */
+export const WEBHOOK_TIMESTAMP_HEADER = "X-InboxLink-Timestamp";
+/** Preferred header: HMAC over `${timestamp}.${body}`. Verify with a tolerance window. */
+export const WEBHOOK_SIGNATURE_V1_HEADER = "X-InboxLink-Signature-V1";
+
+const DEFAULT_TIMEOUT_MS = 5000;
 
 export function signWebhookBody(secret: string, rawBody: string): string {
   const hex = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
+  return `sha256=${hex}`;
+}
+
+export function signWebhookV1(secret: string, timestamp: string, rawBody: string): string {
+  const hex = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex");
   return `sha256=${hex}`;
 }
 
@@ -108,6 +125,9 @@ export async function deliverWebhookEvent(
   };
   const rawBody = JSON.stringify(event);
   const signature = signWebhookBody(config.secret, rawBody);
+  const timestamp = String(Math.floor((config.now ?? Date.now)() / 1000));
+  const signatureV1 = signWebhookV1(config.secret, timestamp, rawBody);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxAttempts = Math.max(1, config.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
   const fetchImpl = config.fetchImpl ?? fetch;
   const sleep = config.sleep ?? defaultSleep;
@@ -126,11 +146,14 @@ export async function deliverWebhookEvent(
         headers: {
           "content-type": "application/json",
           [WEBHOOK_SIGNATURE_HEADER]: signature,
+          [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+          [WEBHOOK_SIGNATURE_V1_HEADER]: signatureV1,
           "X-InboxLink-Event": type,
           "X-InboxLink-Delivery-Id": event.id,
           "User-Agent": "InboxLink-Webhooks/0.1",
         },
         body: rawBody,
+        signal: AbortSignal.timeout(timeoutMs),
       });
       lastStatus = res.status;
       if (res.ok) {
@@ -169,6 +192,63 @@ export async function deliverWebhookEvent(
   }
 
   return { ok: false, attempts: maxAttempts, dropped, lastStatus };
+}
+
+export type WebhookTargetResolver = {
+  targetsFor(
+    tenantId: string,
+    type: WebhookEventType,
+  ): Promise<Array<{ id: string; url: string; secret: string }>>;
+};
+
+/**
+ * Tenant-scoped bus: an event goes only to the endpoints its own tenant registered.
+ * `fallback` (the legacy single env URL/secret) applies to `fallbackTenantId` only,
+ * so one tenant's events can never reach another tenant's URL.
+ */
+export function createTenantWebhookBus(input: {
+  registry: WebhookTargetResolver;
+  fallback?: Partial<WebhookBusConfig> | null;
+  fallbackTenantId?: string;
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  timeoutMs?: number;
+}): WebhookBus {
+  const fb = input.fallback;
+  const fallbackUrl = fb?.url?.trim() ?? "";
+  const fallbackSecret = fb?.secret?.trim() ?? "";
+  return {
+    enabled: true,
+    async emit(type, data) {
+      const tenantId = typeof data.tenantId === "string" ? data.tenantId : undefined;
+      if (!tenantId) return { ok: true, attempts: 0, dropped: false };
+      const targets = await input.registry.targetsFor(tenantId, type);
+      const configs: WebhookBusConfig[] = targets.map((t) => ({
+        url: t.url,
+        secret: t.secret,
+        fetchImpl: input.fetchImpl,
+        sleep: input.sleep,
+        timeoutMs: input.timeoutMs,
+      }));
+      if (fallbackUrl && fallbackSecret && tenantId === (input.fallbackTenantId ?? "default")) {
+        configs.push({
+          url: fallbackUrl,
+          secret: fallbackSecret,
+          fetchImpl: input.fetchImpl,
+          sleep: input.sleep,
+          timeoutMs: input.timeoutMs,
+        });
+      }
+      if (configs.length === 0) return { ok: true, attempts: 0, dropped: false };
+      const results = await Promise.all(configs.map((c) => deliverWebhookEvent(c, type, data)));
+      return {
+        ok: results.every((r) => r.ok),
+        attempts: results.reduce((n, r) => n + r.attempts, 0),
+        dropped: results.some((r) => r.dropped),
+        lastStatus: results.find((r) => !r.ok)?.lastStatus ?? results[0]?.lastStatus,
+      };
+    },
+  };
 }
 
 /**

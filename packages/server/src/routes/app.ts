@@ -43,6 +43,11 @@ import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
 import { verifyPubSubOidc, type PushOidcConfig } from "../push-oidc.js";
 import {
+  WebhookLimitError,
+  parseEventTypes,
+  type WebhookRegistry,
+} from "../webhooks/endpoints.js";
+import {
   emitWebhookSafe,
   type WebhookBus,
 } from "../webhooks/deliver.js";
@@ -106,6 +111,8 @@ export type CreateAppOptions = {
   cronSecret?: string;
   /** OIDC audience + service-account email for signed Pub/Sub push requests. */
   gmailPushOidc?: PushOidcConfig | null;
+  /** Per-tenant webhook destinations (`/v1/webhooks`). Omit/null = routes return 501. */
+  webhookRegistry?: WebhookRegistry | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -636,6 +643,51 @@ export function createApp(opts: CreateAppOptions) {
     redirect.searchParams.set("link_token", session.linkToken);
     return c.redirect(redirect.toString(), 302);
   }
+
+  /** Register a webhook destination for the calling tenant. The secret is returned once. */
+  app.post("/v1/webhooks", async (c) => {
+    const registry = opts.webhookRegistry;
+    if (!registry) return c.json({ error: "webhooks_unavailable" }, 501);
+    let body: { url?: unknown; events?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+    const url = registry.validateUrl(body.url);
+    if (!url) {
+      return c.json(
+        { error: "invalid_url", detail: "Use a public https URL without credentials." },
+        400,
+      );
+    }
+    const events = parseEventTypes(body.events);
+    if (!events) return c.json({ error: "invalid_events" }, 400);
+    try {
+      const { endpoint, secret } = await registry.create({
+        tenantId: c.get("tenantId"),
+        url,
+        events,
+      });
+      return c.json({ ...endpoint, secret }, 201);
+    } catch (err) {
+      if (err instanceof WebhookLimitError) return c.json({ error: "webhook_limit_reached" }, 409);
+      throw err;
+    }
+  });
+
+  app.get("/v1/webhooks", async (c) => {
+    const registry = opts.webhookRegistry;
+    if (!registry) return c.json({ error: "webhooks_unavailable" }, 501);
+    return c.json({ webhooks: await registry.list(c.get("tenantId")) });
+  });
+
+  app.delete("/v1/webhooks/:id", async (c) => {
+    const registry = opts.webhookRegistry;
+    if (!registry) return c.json({ error: "webhooks_unavailable" }, 501);
+    const removed = await registry.delete(c.req.param("id"), c.get("tenantId"));
+    return removed ? c.body(null, 204) : c.json({ error: "not_found" }, 404);
+  });
 
   app.post("/v1/grants/exchange", async (c) => {
     const body = (await c.req.json()) as { publicToken?: string };
