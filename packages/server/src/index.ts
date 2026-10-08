@@ -14,7 +14,12 @@ import { createRateLimiter } from "./rate-limit.js";
 import type { GrantStore } from "./store.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
-import { createWebhookBus } from "./webhooks/deliver.js";
+import { createTenantWebhookBus } from "./webhooks/deliver.js";
+import {
+  MemoryWebhookEndpointStore,
+  PostgresWebhookEndpointStore,
+  WebhookRegistry,
+} from "./webhooks/endpoints.js";
 
 type AppBundle = {
   app: ReturnType<typeof createApp>;
@@ -41,6 +46,13 @@ export function createAppFromEnv(
     : new MemoryTokenVault(config.masterKey);
   const storeKind = opened ? "postgres" : "memory";
   const resolvedQueue = queue ?? createStoreSyncQueue(store);
+  const hosted =
+    Boolean(env.VERCEL) || env.NODE_ENV === "production" || env.VERCEL_ENV === "production";
+  const webhookRegistry = new WebhookRegistry(
+    opened ? new PostgresWebhookEndpointStore(opened.db) : new MemoryWebhookEndpointStore(),
+    config.masterKey,
+    { allowInsecureUrls: !hosted },
+  );
   const gmail = new GmailAdapter({
     clientId: config.googleClientId,
     clientSecret: config.googleClientSecret,
@@ -76,9 +88,13 @@ export function createAppFromEnv(
       maxRequests: config.rateLimitMaxRequests,
     }),
     allowedRedirectOrigins: config.allowedRedirectOrigins,
-    webhooks: createWebhookBus({
-      url: config.webhookUrl,
-      secret: config.webhookSecret,
+    webhookRegistry,
+    // Events reach only the tenant's own endpoints. The legacy single env URL/secret
+    // applies to the default tenant only.
+    webhooks: createTenantWebhookBus({
+      registry: webhookRegistry,
+      fallback: { url: config.webhookUrl, secret: config.webhookSecret },
+      fallbackTenantId: config.tenantId,
     }),
     gmailPubsubTopic: config.gmailPubsubTopic,
     gmailPushSecret: config.gmailPushSecret,

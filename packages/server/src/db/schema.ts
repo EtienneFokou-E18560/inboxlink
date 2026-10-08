@@ -140,8 +140,31 @@ export const messages = pgTable(
   ],
 );
 
+export const webhookEndpoints = pgTable(
+  "webhook_endpoints",
+  {
+    id: text("id").primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    url: text("url").notNull(),
+    events: jsonb("events").$type<string[]>().notNull().default([]),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("webhook_endpoints_tenant_idx").on(t.tenantId)],
+);
+
 /** SQL stub for operators who prefer raw migrate over drizzle-kit. */
 export const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS webhook_endpoints (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  events JSONB NOT NULL DEFAULT '[]'::jsonb,
+  secret_ciphertext TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS webhook_endpoints_tenant_idx ON webhook_endpoints (tenant_id);
+
 CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
