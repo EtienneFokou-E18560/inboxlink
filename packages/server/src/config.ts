@@ -58,15 +58,24 @@ export type ServerConfig = {
    * Vercel Cron / GitHub Actions send `Authorization: Bearer <CRON_SECRET>`.
    */
   cronSecret?: string;
+  /**
+   * Expected `aud` of the OIDC token Pub/Sub attaches to push requests
+   * (`GMAIL_PUSH_OIDC_AUDIENCE`). Enables signed-JWT verification on the push route.
+   */
+  gmailPushOidcAudience?: string;
+  /** Push subscription service account email (`GMAIL_PUSH_OIDC_EMAIL`). Required with the audience. */
+  gmailPushOidcEmail?: string;
 };
+
+export const DEV_MASTER_KEY_PLACEHOLDER = "dev-only-master-key-change-me-32b";
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const port = Number(env.PORT ?? "8787");
   const publicBaseUrl = resolvePublicBaseUrl(env, port);
   // Process default is single (local demos). Production deploys set INBOXLINK_MODE=multi.
   const mode = env.INBOXLINK_MODE === "multi" ? "multi" : "single";
-  const masterKey =
-    env.INBOXLINK_MASTER_KEY?.trim() || "dev-only-master-key-change-me-32b";
+  const masterKey = env.INBOXLINK_MASTER_KEY?.trim() || DEV_MASTER_KEY_PLACEHOLDER;
+  assertHostedMasterKey(masterKey, env);
   const apiSecret = env.INBOXLINK_API_SECRET ?? DEV_API_SECRET_PLACEHOLDER;
   const tenantId = env.INBOXLINK_TENANT_ID?.trim() || "default";
   const tenantSecrets = buildTenantSecrets({
@@ -121,7 +130,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     gmailPubsubTopic: optionalTrimmed(env.GMAIL_PUBSUB_TOPIC),
     gmailPushSecret: optionalTrimmed(env.GMAIL_PUSH_SECRET),
     cronSecret: optionalTrimmed(env.CRON_SECRET),
+    gmailPushOidcAudience: optionalTrimmed(env.GMAIL_PUSH_OIDC_AUDIENCE),
+    gmailPushOidcEmail: optionalTrimmed(env.GMAIL_PUSH_OIDC_EMAIL),
   };
+}
+
+function isHostedEnv(env: NodeJS.ProcessEnv): boolean {
+  return (
+    Boolean(env.VERCEL) || env.NODE_ENV === "production" || env.VERCEL_ENV === "production"
+  );
+}
+
+/**
+ * The vault master key must be explicitly set on hosted deployments. Falling back to the
+ * committed placeholder would encrypt every refresh token with a publicly known key.
+ */
+export function assertHostedMasterKey(masterKey: string, env: NodeJS.ProcessEnv): void {
+  if (!isHostedEnv(env)) return;
+  if (masterKey === DEV_MASTER_KEY_PLACEHOLDER) {
+    throw new Error(
+      "INBOXLINK_MASTER_KEY must be set to a non-default secret (>=16 chars, 32+ recommended) on hosted deployments.",
+    );
+  }
 }
 
 function optionalTrimmed(raw: string | undefined): string | undefined {

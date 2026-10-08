@@ -41,6 +41,7 @@ import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watc
 import { drainSyncJobs } from "../queue/sync-queue.js";
 import { NEEDS_REAUTH_GUIDANCE, isHealthPath, log } from "../log.js";
 import { probeHealth, renderStatusPage } from "../public/index.js";
+import { verifyPubSubOidc, type PushOidcConfig } from "../push-oidc.js";
 import {
   emitWebhookSafe,
   type WebhookBus,
@@ -103,6 +104,8 @@ export type CreateAppOptions = {
   gmailPushSecret?: string;
   /** Bearer for internal cron routes (`CRON_SECRET`). */
   cronSecret?: string;
+  /** OIDC audience + service-account email for signed Pub/Sub push requests. */
+  gmailPushOidc?: PushOidcConfig | null;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -822,8 +825,9 @@ export function createApp(opts: CreateAppOptions) {
           ).id,
         };
 
-    // Best-effort deferred drain so local/demo don't wait solely on cron.
-    void drainSyncJobs({
+    // Drain right away instead of waiting for cron. Serverless runtimes freeze the
+    // instance once the response is sent, so a bare `void` promise may never finish.
+    const drain = drainSyncJobs({
       store: opts.store,
       vault: opts.vault,
       gmail: opts.gmail,
@@ -835,6 +839,7 @@ export function createApp(opts: CreateAppOptions) {
         error: err instanceof Error ? err.message : "unknown",
       });
     });
+    await runAfterResponse(c, drain);
 
     return c.json(
       {
@@ -878,7 +883,13 @@ export function createApp(opts: CreateAppOptions) {
    * (keep Pub/Sub ack deadline generous / maxDuration ≥ 60s).
    */
   app.post("/v1/internal/gmail/push", async (c) => {
-    if (!verifyPushSecret(c.req.header("x-inboxlink-push-secret"), c.req.query("token"), opts.gmailPushSecret)) {
+    const oidcOk = opts.gmailPushOidc
+      ? await verifyPubSubOidc(c.req.header("authorization"), opts.gmailPushOidc)
+      : false;
+    if (
+      !oidcOk &&
+      !verifyPushSecret(c.req.header("x-inboxlink-push-secret"), c.req.query("token"), opts.gmailPushSecret)
+    ) {
       return c.json({ error: "unauthorized" }, 401);
     }
     let raw: unknown;
@@ -993,6 +1004,21 @@ async function listImapMessages(
     }
     return c.json({ error: "imap_unavailable" }, 502);
   }
+}
+
+/**
+ * Keep background work alive after the response where the runtime supports it
+ * (`waitUntil`); on Vercel/serverless without it, await so the work is not frozen.
+ * Plain Node servers keep running, so fire-and-forget is fine there.
+ */
+async function runAfterResponse(c: Context<AppEnv>, work: Promise<unknown>): Promise<void> {
+  try {
+    c.executionCtx.waitUntil(work);
+    return;
+  } catch {
+    /* no execution context (Node) */
+  }
+  if (process.env.VERCEL) await work;
 }
 
 function verifyCronSecret(
