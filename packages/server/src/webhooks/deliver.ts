@@ -141,20 +141,29 @@ export async function deliverWebhookEvent(
       await sleep(delay);
     }
     try {
-      const res = await fetchImpl(config.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          [WEBHOOK_SIGNATURE_HEADER]: signature,
-          [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
-          [WEBHOOK_SIGNATURE_V1_HEADER]: signatureV1,
-          "X-InboxLink-Event": type,
-          "X-InboxLink-Delivery-Id": event.id,
-          "User-Agent": "InboxLink-Webhooks/0.1",
-        },
-        body: rawBody,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      // Ref'd timer + AbortController (AbortSignal.timeout's timer is unref'd and can let the
+      // event loop drain before it fires).
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let res: Response;
+      try {
+        res = await fetchImpl(config.url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            [WEBHOOK_SIGNATURE_HEADER]: signature,
+            [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+            [WEBHOOK_SIGNATURE_V1_HEADER]: signatureV1,
+            "X-InboxLink-Event": type,
+            "X-InboxLink-Delivery-Id": event.id,
+            "User-Agent": "InboxLink-Webhooks/0.1",
+          },
+          body: rawBody,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       lastStatus = res.status;
       if (res.ok) {
         return { ok: true, attempts: attempt, dropped: false, lastStatus };
