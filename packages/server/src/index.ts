@@ -82,6 +82,10 @@ export function createAppFromEnv(
     }),
     gmailPubsubTopic: config.gmailPubsubTopic,
     gmailPushSecret: config.gmailPushSecret,
+    gmailPushOidc:
+      config.gmailPushOidcAudience && config.gmailPushOidcEmail
+        ? { audience: config.gmailPushOidcAudience, email: config.gmailPushOidcEmail }
+        : null,
     cronSecret: config.cronSecret,
   });
   // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).

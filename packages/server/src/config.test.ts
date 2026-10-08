@@ -83,3 +83,26 @@ describe("public URL and OAuth redirect", () => {
     assert.equal(config.cronSecret, "cron-secret");
   });
 });
+
+describe("hosted master key guard", () => {
+  it("throws on hosted deploys without INBOXLINK_MASTER_KEY", () => {
+    assert.throws(() => loadConfig({ VERCEL: "1" }), /INBOXLINK_MASTER_KEY/);
+    assert.throws(() => loadConfig({ NODE_ENV: "production" }), /INBOXLINK_MASTER_KEY/);
+  });
+
+  it("allows the placeholder locally and a real key when hosted", () => {
+    assert.doesNotThrow(() => loadConfig({}));
+    assert.doesNotThrow(() =>
+      loadConfig({ VERCEL: "1", INBOXLINK_MASTER_KEY: "a-real-secret-of-32-chars-or-more!!" }),
+    );
+  });
+
+  it("reads Pub/Sub OIDC settings", () => {
+    const config = loadConfig({
+      GMAIL_PUSH_OIDC_AUDIENCE: "https://x/push",
+      GMAIL_PUSH_OIDC_EMAIL: "sa@p.iam.gserviceaccount.com",
+    });
+    assert.equal(config.gmailPushOidcAudience, "https://x/push");
+    assert.equal(config.gmailPushOidcEmail, "sa@p.iam.gserviceaccount.com");
+  });
+});
