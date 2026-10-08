@@ -245,3 +245,24 @@ OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; th
 - Runnable sketches: [`examples/host-integration`](../examples/host-integration)  
 - Server routes: `packages/server/src/routes/app.ts`  
 - SDK: `packages/sdk/src/index.ts` / [`packages/sdk/README.md`](../packages/sdk/README.md)
+
+## Per-tenant webhooks
+
+Each tenant registers its own destinations; events for a tenant are delivered only to that tenant's endpoints.
+
+```bash
+# Register (secret is returned ONCE — store it in your secret manager)
+curl -sS -X POST "$BASE/v1/webhooks" -H "Authorization: Bearer $TENANT_SECRET" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://your-app.example.com/api/inboxlink/webhook","events":["message.created","sync.completed"]}'
+curl -sS "$BASE/v1/webhooks" -H "Authorization: Bearer $TENANT_SECRET"        # list (no secrets)
+curl -sS -X DELETE "$BASE/v1/webhooks/whe_…" -H "Authorization: Bearer $TENANT_SECRET"
+```
+
+- URLs must be public `https` (no credentials, no private/loopback/metadata hosts). Local `single` mode also allows `http://localhost`. Up to 5 endpoints per tenant. Omit `events` to receive all of: `grant.connected`, `grant.needs_reauth`, `sync.completed`, `message.created`.
+- Secrets are sealed with `INBOXLINK_MASTER_KEY`. Changing the master key makes existing endpoint secrets unreadable (deliveries to them are skipped) — delete and recreate them.
+- Each delivery is a `POST` with headers `X-InboxLink-Timestamp` (unix seconds) and `X-InboxLink-Signature-V1` = `sha256=HMAC(secret, "<timestamp>.<raw body>")`. Reject requests more than ~5 minutes off. The legacy `X-InboxLink-Signature` (body-only HMAC) is still sent for older hosts but has no replay protection.
+- Verify with the SDK: `il.webhooks.verifySigned({ payload, timestampHeader, signatureHeader, secret })`.
+- Delivery: 5 s timeout per attempt, up to 3 attempts (retry on 408/429/5xx and network errors). Retries are in-process; a delivery that fails all attempts is **not** persisted. Treat webhooks as a hint and reconcile with `POST /v1/grants/:id/sync` or the messages API.
+- The legacy `INBOXLINK_WEBHOOK_URL` / `INBOXLINK_WEBHOOK_SECRET` pair now applies to the default tenant only.
+- Known limit: URL validation does not defend against DNS rebinding of a hostname that later resolves to a private address.
