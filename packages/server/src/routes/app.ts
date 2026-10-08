@@ -16,6 +16,8 @@ import {
   renderConnectErrorPage,
   renderConnectPage,
   renderLandingPage,
+  renderPrivacyPage,
+  renderTermsPage,
 } from "@inboxlink/connect-ui";
 import { mountDocsHub } from "../docs-hub/mount.js";
 import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
@@ -198,6 +200,8 @@ export function createApp(opts: CreateAppOptions) {
   /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
   app.get("/home", (c) => c.html(renderLandingPage()));
   app.get("/home/", (c) => c.html(renderLandingPage()));
+  app.get("/privacy", (c) => c.html(renderPrivacyPage()));
+  app.get("/terms", (c) => c.html(renderTermsPage()));
 
   // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
   mountDocsHub(app);

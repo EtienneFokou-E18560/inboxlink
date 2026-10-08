@@ -1,5 +1,6 @@
 export { renderPublicDocument, type PublicDocumentOptions } from "./document.js";
 export { LANDING_STYLES } from "./landing-styles.js";
+export { renderPrivacyPage, renderTermsPage, type LegalPageOptions } from "./legal.js";
 export { renderLandingPage, type LandingPageLinks } from "./landing.js";
 export { DOCS_HUB_STYLES } from "./docs-hub-styles.js";
 export {
