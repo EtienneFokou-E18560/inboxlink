@@ -1,4 +1,5 @@
 import type { EmailAddress, Message, MessageAttachment } from "@inboxlink/core";
+import { charsetOf, decodeHtmlEntities, decodeWithCharset } from "./text.js";
 
 export type GmailMessageResource = {
   id?: string;
@@ -45,7 +46,7 @@ export function normalizeGmailMessage(raw: GmailMessageResource, grantId: string
     grantId,
     providerMessageId: raw.id,
     subject: headers.get("subject") ?? "",
-    snippet: raw.snippet ?? "",
+    snippet: decodeHtmlEntities(raw.snippet ?? ""),
     from: parseAddressList(headers.get("from")),
     to: parseAddressList(headers.get("to")),
     sentAt: sentAt ?? new Date(0).toISOString(),
@@ -114,15 +115,17 @@ function walk(part: GmailPart | undefined, found: { text?: string; html?: string
   if (filename || part.body?.attachmentId) found.hasAttachments = true;
   const mime = part.mimeType ?? "";
   const data = part.body?.data;
-  if (data && mime === "text/plain" && !found.text) found.text = decodeBody(data);
-  if (data && mime === "text/html" && !found.html) found.html = decodeBody(data);
+  const charset = charsetOf(headerMap(part.headers).get("content-type"));
+  if (data && mime === "text/plain" && !found.text) found.text = decodeBody(data, charset);
+  if (data && mime === "text/html" && !found.html) found.html = decodeBody(data, charset);
   for (const child of part.parts ?? []) walk(child, found);
 }
 
-function decodeBody(data: string): string | undefined {
+function decodeBody(data: string, charset?: string): string | undefined {
   try {
     const pad = data.length % 4 === 0 ? "" : "=".repeat(4 - (data.length % 4));
-    const text = Buffer.from(data.replaceAll("-", "+").replaceAll("_", "/") + pad, "base64").toString("utf8");
+    const bytes = Buffer.from(data.replaceAll("-", "+").replaceAll("_", "/") + pad, "base64");
+    const text = decodeWithCharset(bytes, charset);
     if (!text) return undefined;
     return text.length > MAX_BODY_CHARS ? text.slice(0, MAX_BODY_CHARS) : text;
   } catch {

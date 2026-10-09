@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.1.2
+
+Release notes for hosts upgrading from `0.1.1`. **Hosts that call `messages.list` with `q` / `label` should upgrade: with servers that include the store-backed list (Wave B) the filters are applied only when `source: "live"`, and `0.1.1` has no way to ask for it.** A host on `0.1.1` silently gets the unfiltered synced cache.
+
+### Server-side fix, no SDK change
+
+`snippet` is now returned as plain text. Gmail returns it HTML-escaped (`We&#39;re`); the Gmail adapter decodes it. Message bodies are decoded with the charset each MIME part declares (ISO-8859-1, Windows-1252, ...) instead of always as UTF-8.
+
 ### Async sync jobs (Wave D)
 
 `grants.sync` returns `202` `{ jobId, status: "queued" }`. Poll
