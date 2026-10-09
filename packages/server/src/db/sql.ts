@@ -26,7 +26,7 @@ export function assertValidDatabaseUrl(databaseUrl: string): void {
   } catch {
     /* handled below */
   }
-  if (protocol !== "postgres:" && protocol !== "postgresql:") {
+  if ((protocol !== "postgres:" && protocol !== "postgresql:") || databaseUrl !== databaseUrl.trim()) {
     const hint = databaseUrl !== databaseUrl.trim()
       ? " (it has leading or trailing whitespace)"
       : /^["']|["']$/.test(databaseUrl)
