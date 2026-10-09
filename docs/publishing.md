@@ -16,6 +16,7 @@ Server, adapters, connect-ui, and demo stay private / monorepo-only for now.
 - Both publishable packages share the **0.x** series while the HTTP API is still settling.
 - Treat **0.x minor bumps as potentially breaking** for consumers.
 - Bump `packages/core/package.json` and `packages/sdk/package.json` `version` fields in the same PR before a real publish.
+- `pnpm check:docs` (run in CI) fails if a package version has no CHANGELOG section or is missing from the README. The wiki is a separate repo and is not checked: update Home, Quick-start, SDK and `_Sidebar` by hand.
 - Add or update each package’s `CHANGELOG.md` in that same PR (shipped in the npm tarball via `files`).
 - Prefer publishing **core then sdk** so the SDK’s dependency resolves on the registry (`pnpm publish` rewrites `workspace:*`).
 
@@ -38,6 +39,8 @@ Workflow: [`.github/workflows/publish-npm.yml`](../.github/workflows/publish-npm
 - Set `dry_run=false` only when intentionally releasing.
 
 ### Provenance (private vs public source repo)
+
+> The repository is now public, so releases carry a provenance attestation (built and signed on GitHub Actions). npm can briefly show "taking too long to fetch the source commit" on a new version while it reads the commit from GitHub; it clears on refresh and does not affect the attestation. The private-repo rules below apply only if the repo is ever made private again.
 
 npm **provenance** attestations are only supported when the GitHub **source** repository is **public**. Publishing from a private (or internal) repo with provenance enabled fails with:
 
