@@ -40,7 +40,7 @@ Workflow: [`.github/workflows/publish-npm.yml`](../.github/workflows/publish-npm
 
 ### Provenance (private vs public source repo)
 
-> With Trusted Publishing (below), npm attached a provenance attestation to 0.1.2 even though the source repo is private. The npm page may show "taking too long to fetch the source commit": it cannot read commit details from a private repo. That notice is cosmetic; the signed attestation is still valid. The rules in this section apply to the token fallback.
+> The repository is now public, so releases carry a provenance attestation (built and signed on GitHub Actions). npm can briefly show "taking too long to fetch the source commit" on a new version while it reads the commit from GitHub; it clears on refresh and does not affect the attestation. The private-repo rules below apply only if the repo is ever made private again.
 
 npm **provenance** attestations are only supported when the GitHub **source** repository is **public**. Publishing from a private (or internal) repo with provenance enabled fails with:
 
