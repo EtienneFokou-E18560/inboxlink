@@ -27,14 +27,15 @@ export function assertValidDatabaseUrl(databaseUrl: string): void {
     /* handled below */
   }
   if ((protocol !== "postgres:" && protocol !== "postgresql:") || databaseUrl !== databaseUrl.trim()) {
-    const hint = databaseUrl !== databaseUrl.trim()
-      ? " (it has leading or trailing whitespace)"
-      : /^["']|["']$/.test(databaseUrl)
-        ? " (it is wrapped in quotes)"
-        : /^psql\b/i.test(databaseUrl.trim())
-          ? " (it starts with 'psql'; paste only the postgresql:// URL)"
-          : databaseUrl.trim() === ""
-            ? " (it is empty)"
+    const trimmed = databaseUrl.trim();
+    const hint = /^psql\b/i.test(trimmed)
+      ? " (it starts with 'psql'; paste only the postgresql:// URL)"
+      : trimmed === ""
+        ? " (it is empty)"
+        : /^["']|["']$/.test(databaseUrl)
+          ? " (it is wrapped in quotes)"
+          : databaseUrl !== trimmed
+            ? " (it has leading or trailing whitespace)"
             : "";
     throw new Error(
       `DATABASE_URL is not a valid postgres:// or postgresql:// URL${hint}. Fix it in the host's environment variables.`,
