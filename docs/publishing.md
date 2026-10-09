@@ -16,6 +16,7 @@ Server, adapters, connect-ui, and demo stay private / monorepo-only for now.
 - Both publishable packages share the **0.x** series while the HTTP API is still settling.
 - Treat **0.x minor bumps as potentially breaking** for consumers.
 - Bump `packages/core/package.json` and `packages/sdk/package.json` `version` fields in the same PR before a real publish.
+- `pnpm check:docs` (run in CI) fails if a package version has no CHANGELOG section or is missing from the README. The wiki is a separate repo and is not checked: update Home, Quick-start, SDK and `_Sidebar` by hand.
 - Add or update each package’s `CHANGELOG.md` in that same PR (shipped in the npm tarball via `files`).
 - Prefer publishing **core then sdk** so the SDK’s dependency resolves on the registry (`pnpm publish` rewrites `workspace:*`).
 
