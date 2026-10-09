@@ -280,6 +280,50 @@ describe("Gmail message list", () => {
     assert.equal(empty.status, 404);
   });
 
+  it("ignores Gmail filters on the default store list: hosts must pass source=live to use them", async () => {
+    // Contract career-workspace relies on. `q` and `label` narrow the list only on `source=live`;
+    // the synced-store default returns the cache newest first whatever filters are sent, and
+    // never calls Gmail. A host on an SDK without `source` therefore gets an unfiltered list.
+    hits = [];
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_store_filters");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const mk = (id: string, receivedMs: number, labels: string[]): Message => ({
+      id: `msg_${id}`,
+      grantId: grant.id,
+      providerMessageId: id,
+      subject: id,
+      snippet: id,
+      from: [{ email: "a@example.com" }],
+      to: [{ email: "me@example.com" }],
+      sentAt: new Date(receivedMs).toISOString(),
+      receivedAt: new Date(receivedMs).toISOString(),
+      folderIds: labels,
+      labels,
+      hasAttachments: false,
+    });
+    await store.upsertMessages([
+      mk("promo", 1_710_000_300_000, ["INBOX", "CATEGORY_PROMOTIONS"]),
+      mk("job", 1_710_000_200_000, ["INBOX"]),
+      mk("ancient", 1_000_000_000_000, ["INBOX"]),
+    ]);
+    const app = appFor(store, vault);
+
+    const q = encodeURIComponent("in:inbox newer_than:21d -category:promotions");
+    const res = await app.request(`/v1/grants/${grant.id}/messages?q=${q}&label=INBOX&limit=25`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { messages: Message[]; source?: string };
+    assert.equal(body.source, "store");
+    assert.deepEqual(
+      body.messages.map((m) => m.providerMessageId),
+      ["promo", "job", "ancient"],
+      "the promotion and the out-of-window message are still returned",
+    );
+    assert.equal(hits.length, 0, "the store list never calls Gmail");
+  });
+
   it("lists live Gmail with source=live using the vaulted refresh token", async () => {
     hits = [];
     refreshStatus = 200;
