@@ -54,23 +54,38 @@ InboxLink handles this as follows:
 
 **Long-term recommendation for MIT OSS:** make [`EtienneFokou-E18560/inboxlink`](https://github.com/EtienneFokou-E18560/inboxlink) **public** so releases carry provenance trust signals consumers expect.
 
-### Auth (do not publish without credentials)
+### Auth: no token needed (npm Trusted Publishing)
 
-**Preferred — npm Trusted Publishing (OIDC)**
+The workflow publishes with npm **Trusted Publishing** (OIDC). GitHub proves its identity to npm
+for each run, so there is **no token to create, expire or leak**. (npm limits write tokens to a short
+lifetime, so a token would need replacing again and again.)
 
-1. On npmjs.com, configure a Trusted Publisher for each package:
-   - GitHub repository: `EtienneFokou-E18560/inboxlink`
-   - Workflow filename: `publish-npm.yml` (exact name; top-level workflow only)
-2. Use Node 22+ and npm ≥ 11.5.1 (the workflow upgrades npm).
-3. Optional: add a GitHub Environment with required reviewers for real publishes.
+**One-time setup, on npmjs.com, for each of `@inboxlink/core` and `@inboxlink/sdk`:**
 
-**Fallback — granular `NPM_TOKEN`**
+1. Open the package page, then **Settings**, then **Trusted Publisher**, and choose **GitHub Actions**.
+2. Fill in exactly:
+   - Organization or user: `EtienneFokou-E18560`
+   - Repository: `inboxlink`
+   - Workflow filename: `publish-npm.yml` (the name only, not the path)
+   - Environment name: leave empty (the workflow does not use a GitHub Environment)
+3. Save. Do the same for the other package.
 
-- Store a granular automation token as repo secret `NPM_TOKEN`.
-- Prefer **stage-only** write tokens (`npm stage publish` + maintainer 2FA approve) when available.
-- Never commit tokens; rotate if exposed.
+Then run **Actions, Publish npm packages, Run workflow** with `dry_run` off. Core is published first, then the SDK;
+a version already on the registry is skipped, so a partly failed run can be re-run.
 
-Without OIDC or `NPM_TOKEN`, a non-dry-run publish fails closed.
+Afterwards you can tighten each package under **Settings, Publishing access**: *Require two-factor
+authentication and disallow tokens*. Publishing then works only through the trusted workflow (or a
+person with 2FA). Delete any old `NPM_TOKEN` repository secret.
+
+What the workflow does for this: it has `id-token: write`, installs npm 11.5.1 or newer (needed for Trusted
+Publishing), packs each package with `pnpm pack` (which rewrites `workspace:*` to the real version) and uploads
+the tarball with `npm publish`. If it fails with an authentication error, the Trusted Publisher entry is
+missing or does not match the repository and workflow filename above.
+
+**Optional fallback: a granular `NPM_TOKEN` secret.** If the secret exists the workflow uses it instead of OIDC.
+Prefer not to: tokens expire.
+
+Without a configured Trusted Publisher (or a token), a real publish fails closed.
 
 ## License headers
 
