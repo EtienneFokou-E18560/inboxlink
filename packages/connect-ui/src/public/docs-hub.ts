@@ -16,7 +16,7 @@ export const DEFAULT_WIKI_BASE =
 export const LIVE_CORE_NPM_VERSION = "0.1.1";
 
 /** Latest `@inboxlink/sdk` on npm (filters not in this registry tarball yet). */
-export const LIVE_SDK_NPM_VERSION = "0.1.0";
+export const LIVE_SDK_NPM_VERSION = "0.1.1";
 
 /** SDK version on main; npm publish tracked by PR #40. */
 export const SDK_MAIN_VERSION = "0.1.1";
@@ -142,7 +142,7 @@ export function docsHubCatalog(opts: DocsHubOptions = {}): {
         id: "messages",
         title: "Messages",
         lead:
-          "List and sync normalized messages with the grant. Filters (q, from/to/subject, label, includeSpamTrash) are live on Production HTTP and main; SDK helpers land on npm as 0.1.1 after #40 publish. Revoke when the user disconnects.",
+          "List and sync normalized messages with the grant. Filters (q, from/to/subject, label, includeSpamTrash) are live on Production HTTP and main; SDK helpers are on npm as 0.1.1. Revoke when the user disconnects.",
         links: [
           {
             href: `${hostGuide}#4-use-the-grant-messages`,

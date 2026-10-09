@@ -23,6 +23,9 @@ export function createPostgresClient(databaseUrl: string) {
     connect_timeout: 15,
     prepare: false,
     ssl: isLocalDatabaseUrl(databaseUrl) ? false : "require",
+    // Startup migrations are idempotent (CREATE ... IF NOT EXISTS); drop the NOTICE spam
+    // ("already exists, skipping") that otherwise floods logs on every cold start.
+    onnotice: () => {},
   });
 }
 

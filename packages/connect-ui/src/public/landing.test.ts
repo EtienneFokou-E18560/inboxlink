@@ -21,10 +21,11 @@ describe("renderLandingPage", () => {
     assert.match(html, /data-testid="landing-npm"/);
     assert.match(html, /@inboxlink\/core\/v\/0\.1\.1/);
     assert.match(html, /npm core@0\.1\.1/);
-    assert.match(html, /npm i @inboxlink\/core@0\.1\.1/);
-    assert.match(html, /0\.1\.0 today/);
-    assert.doesNotMatch(html, /npm i @inboxlink\/sdk@0\.1\.1/);
-    assert.doesNotMatch(html, /@inboxlink\/sdk\/v\/0\.1\.1/);
+    assert.match(html, /npm i @inboxlink\/core @inboxlink\/sdk/);
+    assert.doesNotMatch(html, /0\.1\.0 today/);
+    assert.doesNotMatch(html, /SDK helpers pending/);
+    assert.match(html, /href="\/privacy"/);
+    assert.match(html, /href="\/terms"/);
     assert.match(html, /session → connect → grantId → messages/);
     assert.match(html, /href="\/health"/);
     assert.match(html, /Fraunces/);

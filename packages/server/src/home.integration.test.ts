@@ -47,8 +47,8 @@ describe("GET /home landing", () => {
       assert.match(html, /data-testid="landing-wiki"/);
       assert.match(html, /data-testid="landing-npm"/);
       assert.match(html, /href="\/docs"/);
-      assert.match(html, /@inboxlink\/core@0\.1\.1/);
-      assert.doesNotMatch(html, /npm i @inboxlink\/sdk@0\.1\.1/);
+      assert.match(html, /npm i @inboxlink\/core @inboxlink\/sdk/);
+      assert.match(html, /href="\/privacy"/);
       assert.match(html, /href="\/health"/);
     }
 
@@ -58,6 +58,21 @@ describe("GET /home landing", () => {
       const body = (await health.json()) as { ok: boolean; service: string };
       assert.equal(body.ok, true);
       assert.equal(body.service, "inboxlink");
+    }
+  });
+});
+
+describe("legal pages", () => {
+  it("serves public /privacy and /terms HTML without auth", async () => {
+    const app = buildApp();
+    for (const [path, heading] of [
+      ["/privacy", "Privacy"],
+      ["/terms", "Terms"],
+    ] as const) {
+      const res = await app.request(path);
+      assert.equal(res.status, 200, path);
+      assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+      assert.match(await res.text(), new RegExp(`<h1>${heading}</h1>`));
     }
   });
 });
