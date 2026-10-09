@@ -1,5 +1,13 @@
 # `@inboxlink/core` changelog
 
+## Unreleased
+
+_Nothing yet._
+
+## 0.1.2
+
+Companion release with `@inboxlink/sdk@0.1.2`. No public type changes. Published with npm Trusted Publishing (no token) from `publish-npm.yml`, with a provenance attestation.
+
 ## 0.1.1
 
 Companion release with `@inboxlink/sdk@0.1.1`. No new public types were required for Gmail message list filters (filter options live on the SDK client). Version kept in lockstep so hosts resolve a matching core dependency from the registry.
