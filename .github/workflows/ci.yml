@@ -44,6 +44,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Release docs match package versions
+        run: pnpm check:docs
+
       - name: Audit (non-blocking)
         continue-on-error: true
         run: pnpm audit --prod || true
