@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@inboxlink/server": "workspace:*",
-    "hono": "^4.7.5"
+    "hono": "^4.13.12"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
