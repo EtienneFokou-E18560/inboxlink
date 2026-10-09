@@ -15,8 +15,36 @@ export function isLocalDatabaseUrl(databaseUrl: string): boolean {
   }
 }
 
+/**
+ * Fail early with a readable message when DATABASE_URL is malformed (stray quotes, a
+ * `psql '...'` prefix, whitespace, empty). The value is never included: it holds the password.
+ */
+export function assertValidDatabaseUrl(databaseUrl: string): void {
+  let protocol = "";
+  try {
+    protocol = new URL(databaseUrl).protocol;
+  } catch {
+    /* handled below */
+  }
+  if (protocol !== "postgres:" && protocol !== "postgresql:") {
+    const hint = databaseUrl !== databaseUrl.trim()
+      ? " (it has leading or trailing whitespace)"
+      : /^["']|["']$/.test(databaseUrl)
+        ? " (it is wrapped in quotes)"
+        : /^psql\b/i.test(databaseUrl.trim())
+          ? " (it starts with 'psql'; paste only the postgresql:// URL)"
+          : databaseUrl.trim() === ""
+            ? " (it is empty)"
+            : "";
+    throw new Error(
+      `DATABASE_URL is not a valid postgres:// or postgresql:// URL${hint}. Fix it in the host's environment variables.`,
+    );
+  }
+}
+
 /** One connection per serverless instance. `prepare: false` works with poolers. */
 export function createPostgresClient(databaseUrl: string) {
+  assertValidDatabaseUrl(databaseUrl);
   return postgres(databaseUrl, {
     max: 1,
     idle_timeout: 20,
