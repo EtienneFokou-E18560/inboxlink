@@ -1,6 +1,8 @@
 # Manual / opt-in publish for @inboxlink/core and @inboxlink/sdk.
 # Never runs on push or pull_request. Default is dry-run (no registry write).
-# Real publishes authenticate with the repository NPM_TOKEN secret.
+# Real publishes use npm Trusted Publishing (OIDC): GitHub proves its identity to npm for
+# each run, so there is no token to create, rotate or leak. A repository NPM_TOKEN secret
+# is only an optional fallback.
 #
 # Provenance: npm attestations require a *public* GitHub source repository.
 # This workflow enables --provenance only when github.repository_visibility
@@ -10,9 +12,11 @@
 # Making the GitHub repository public automatically re-enables provenance.
 # Long-term recommendation for MIT OSS: make the repo public for provenance trust.
 #
-# Setup (one-time, before first real publish):
-# 1. Add an npm access token as the GitHub Actions secret NPM_TOKEN.
-# 2. Optionally add GitHub Environment "npm-publish" with required reviewers.
+# Setup (one-time, on npmjs.com, for BOTH @inboxlink/core and @inboxlink/sdk):
+#   package -> Settings -> Trusted Publisher -> GitHub Actions
+#     Organization or user: EtienneFokou-E18560   Repository: inboxlink
+#     Workflow filename:    publish-npm.yml        Environment: (leave empty)
+# See docs/publishing.md. No GitHub secret is needed.
 #
 name: Publish npm packages
 
@@ -63,6 +67,12 @@ jobs:
           cache: "pnpm"
           registry-url: "https://registry.npmjs.org"
 
+      # Trusted Publishing needs npm >= 11.5.1; Node 22 ships an older npm.
+      - name: Use a current npm
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -83,9 +93,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${DRY_RUN}" != "true" ] && [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN is required for a real publish." >&2
-            exit 1
+          # No NPM_TOKEN is required: with none set, npm authenticates through GitHub's OIDC
+          # identity (Trusted Publishing) and fails closed if no trusted publisher is configured.
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            unset NODE_AUTH_TOKEN
+            echo "No NPM_TOKEN set: publishing with npm Trusted Publishing (OIDC)."
+          else
+            echo "NPM_TOKEN set: using it instead of OIDC."
           fi
 
           # Do not set publishConfig.provenance in package.json while relying on
@@ -114,13 +128,18 @@ jobs:
               echo "::endgroup::"
               return 0
             fi
+            # pnpm pack rewrites workspace:* to the real version; npm then does the upload, which
+            # is the client that supports Trusted Publishing.
+            local dest tarball
+            dest="$(mktemp -d)"
+            pnpm --filter "$filter" pack --pack-destination "$dest" >/dev/null
+            tarball="$(ls "$dest"/*.tgz)"
+            echo "Packed $(basename "$tarball")"
+            # shellcheck disable=SC2086 # intentional optional --provenance flag
             if [ "${DRY_RUN}" = "true" ]; then
-              pnpm --filter "$filter" exec npm pack --dry-run
-              # shellcheck disable=SC2086 # intentional optional --provenance flag
-              pnpm --filter "$filter" publish --dry-run --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
+              npm publish "$tarball" --dry-run --access public --tag "$NPM_TAG" ${PROVENANCE_FLAG}
             else
-              # shellcheck disable=SC2086 # intentional optional --provenance flag
-              pnpm --filter "$filter" publish --access public --no-git-checks --tag "$NPM_TAG" ${PROVENANCE_FLAG}
+              npm publish "$tarball" --access public --tag "$NPM_TAG" ${PROVENANCE_FLAG}
             fi
             echo "::endgroup::"
           }
