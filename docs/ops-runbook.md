@@ -199,3 +199,14 @@ Session create then rejects non-matching origins with `redirectUri_not_allowed`.
 
 - Health `store: "memory"` or `database_unavailable` after deploy → restore `DATABASE_URL` / roll back deployment; skip Connect.
 - Widespread 5xx → roll Vercel Production to last known-good; keep env intact.
+
+
+## Who is using it
+
+npm download counts include CI installs, mirrors and bots, so they do not show real use. Real use shows up on the server. Run the read-only report against the Production database (`DATABASE_URL` stays in your shell, never in git or chat):
+
+```bash
+psql "$DATABASE_URL" -f scripts/usage-report.sql
+```
+
+It lists, per host app (tenant): active and total connected mailboxes, distinct users, first and latest connect, syncs in the last 7 days and the last sync, plus daily syncs and weekly new grants. It reads counts only, never message content or tokens. It cannot see self-hosted installs.
