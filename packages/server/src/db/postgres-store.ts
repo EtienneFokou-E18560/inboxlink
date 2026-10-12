@@ -11,6 +11,8 @@ import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
 import type {
   EnqueueSyncJobInput,
   GrantStore,
+  MessagePage,
+  MessagePageQuery,
   StoredSession,
   SyncJobKind,
   SyncJobRecord,
@@ -310,6 +312,35 @@ export class PostgresStore implements GrantStore {
       if (message) messages.push(message);
     }
     return messages;
+  }
+
+  async listMessageIds(grantId: string): Promise<string[]> {
+    await this.db.ensure();
+    // Served from the (grant_id, provider_message_id) unique index; never touches payloads.
+    const rows = await this.db.sql.query<{ provider_message_id: string }>(
+      `SELECT provider_message_id FROM messages WHERE grant_id = $1`,
+      [grantId],
+    );
+    return rows.map((row) => row.provider_message_id);
+  }
+
+  async listMessagesPage(grantId: string, page: MessagePageQuery): Promise<MessagePage> {
+    await this.db.ensure();
+    // Fetch one extra row to learn whether another page exists without a COUNT.
+    const rows = await this.db.sql.query<{ payload: unknown }>(
+      `SELECT payload FROM messages
+       WHERE grant_id = $1
+       ORDER BY received_at DESC, provider_message_id ASC
+       LIMIT $2 OFFSET $3`,
+      [grantId, page.limit + 1, page.offset],
+    );
+    const hasMore = rows.length > page.limit;
+    const messages: Message[] = [];
+    for (const row of rows.slice(0, page.limit)) {
+      const message = asMessage(row.payload);
+      if (message) messages.push(message);
+    }
+    return { messages, hasMore };
   }
 
   async upsertMessages(messages: Message[]): Promise<void> {

@@ -44,6 +44,18 @@ export type EnqueueSyncJobInput = {
   forceBootstrap?: boolean;
 };
 
+export type MessagePageQuery = { offset: number; limit: number };
+
+export type MessagePage = { messages: Message[]; hasMore: boolean };
+
+/** Newest-first order shared by every store's `listMessagesPage`. */
+export function compareMessagesNewestFirst(a: Message, b: Message): number {
+  const ta = Date.parse(a.receivedAt) || 0;
+  const tb = Date.parse(b.receivedAt) || 0;
+  if (tb !== ta) return tb - ta;
+  return a.providerMessageId.localeCompare(b.providerMessageId);
+}
+
 /**
  * Sessions, grants, and one-time public tokens.
  * Implementations must share state across processes when more than one
@@ -78,7 +90,19 @@ export interface GrantStore {
   consumePublicToken(publicToken: string, tenantId: string): Promise<string | undefined>;
   /** Delete `link_sessions` rows whose `expiresAt` is in the past. */
   deleteExpiredSessions(): Promise<number>;
+  /**
+   * Every cached message with its full payload (bodies included). Expensive on
+   * Postgres: prefer `listMessageIds` or `listMessagesPage` on hot paths.
+   */
   listMessages(grantId: string): Promise<Message[]>;
+  /** Provider message ids of the cached messages only (no payloads). */
+  listMessageIds(grantId: string): Promise<string[]>;
+  /**
+   * One page of the synced cache, newest first (`receivedAt` DESC, then
+   * `providerMessageId` ASC). Reads at most `limit + 1` rows; `hasMore` is true
+   * when at least one message exists after this page.
+   */
+  listMessagesPage(grantId: string, page: MessagePageQuery): Promise<MessagePage>;
   upsertMessages(messages: Message[]): Promise<void>;
   deleteMessages(grantId: string): Promise<void>;
   deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void>;
@@ -236,6 +260,16 @@ export class MemoryStore implements GrantStore {
 
   async listMessages(grantId: string): Promise<Message[]> {
     return this.messages.get(grantId) ?? [];
+  }
+
+  async listMessageIds(grantId: string): Promise<string[]> {
+    return (this.messages.get(grantId) ?? []).map((message) => message.providerMessageId);
+  }
+
+  async listMessagesPage(grantId: string, page: MessagePageQuery): Promise<MessagePage> {
+    const sorted = [...(this.messages.get(grantId) ?? [])].sort(compareMessagesNewestFirst);
+    const messages = sorted.slice(page.offset, page.offset + page.limit);
+    return { messages, hasMore: page.offset + messages.length < sorted.length };
   }
 
   async upsertMessages(messages: Message[]): Promise<void> {
