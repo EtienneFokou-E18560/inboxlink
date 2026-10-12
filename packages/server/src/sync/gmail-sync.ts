@@ -25,31 +25,53 @@ export type SyncResult = {
   error?: string;
 };
 
-/**
- * Inline Gmail sync: bootstrap via messages.list + profile historyId, then
- * incremental users.history.list with a persisted watermark. No Redis required.
- */
-export async function syncGmailGrant(input: {
+export type SyncGmailGrantInput = {
   store: GrantStore;
   vault: CiphertextVault;
   gmail: GmailAdapter;
   grant: Grant;
   /** Force a full mailbox bootstrap even when a cursor exists. */
   forceBootstrap?: boolean;
-}): Promise<SyncResult> {
+};
+
+/**
+ * A sync result plus the messages the sync upserted, as it already held them in
+ * memory. Kept apart from `SyncResult` so job rows and webhook payloads never
+ * carry message bodies.
+ */
+export type DetailedSyncResult = {
+  result: SyncResult;
+  upsertedMessages: Message[];
+};
+
+/**
+ * Inline Gmail sync: bootstrap via messages.list + profile historyId, then
+ * incremental users.history.list with a persisted watermark. No Redis required.
+ */
+export async function syncGmailGrant(input: SyncGmailGrantInput): Promise<SyncResult> {
+  return (await syncGmailGrantDetailed(input)).result;
+}
+
+/**
+ * Same as `syncGmailGrant`, also returning the upserted messages so callers
+ * (Gmail push) can tell what is new without re-reading the message cache.
+ */
+export async function syncGmailGrantDetailed(
+  input: SyncGmailGrantInput,
+): Promise<DetailedSyncResult> {
   const { store, vault, gmail, grant } = input;
   const grantId = grant.id;
 
   const access = await openAccessToken({ store, vault, gmail, grant });
   if (access.status !== "ok") {
-    return {
+    return withoutMessages({
       grantId,
       status: access.status,
       mode: "bootstrap",
       upserted: 0,
       deleted: 0,
       error: access.error,
-    };
+    });
   }
 
   const cursor = await store.getSyncCursor(grantId);
@@ -80,24 +102,28 @@ export async function syncGmailGrant(input: {
     if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
       getAccessTokenCache().invalidate(grantId);
       await markNeedsReauth(store, grant);
-      return {
+      return withoutMessages({
         grantId,
         status: "needs_reauth",
         mode: force ? "bootstrap" : "incremental",
         upserted: 0,
         deleted: 0,
         error: "needs_reauth",
-      };
+      });
     }
-    return {
+    return withoutMessages({
       grantId,
       status: "gmail_unavailable",
       mode: force ? "bootstrap" : "incremental",
       upserted: 0,
       deleted: 0,
       error: "gmail_unavailable",
-    };
+    });
   }
+}
+
+function withoutMessages(result: SyncResult): DetailedSyncResult {
+  return { result, upsertedMessages: [] };
 }
 
 async function runBootstrap(input: {
@@ -105,7 +131,7 @@ async function runBootstrap(input: {
   gmail: GmailAdapter;
   grant: Grant;
   accessToken: string;
-}): Promise<SyncResult> {
+}): Promise<DetailedSyncResult> {
   const { store, gmail, grant, accessToken } = input;
   const page = await gmail.listMessages({
     accessToken,
@@ -117,12 +143,15 @@ async function runBootstrap(input: {
   const profile = await gmail.getProfile(accessToken);
   await putHistoryCursor(store, grant.id, profile.historyId);
   return {
-    grantId: grant.id,
-    status: "ok",
-    mode: "bootstrap",
-    historyId: profile.historyId,
-    upserted: page.messages.length,
-    deleted: 0,
+    result: {
+      grantId: grant.id,
+      status: "ok",
+      mode: "bootstrap",
+      historyId: profile.historyId,
+      upserted: page.messages.length,
+      deleted: 0,
+    },
+    upsertedMessages: page.messages,
   };
 }
 
@@ -132,7 +161,7 @@ async function runIncremental(input: {
   grant: Grant;
   accessToken: string;
   startHistoryId: string;
-}): Promise<SyncResult> {
+}): Promise<DetailedSyncResult> {
   const { store, gmail, grant, accessToken, startHistoryId } = input;
   const added = new Set<string>();
   const deleted = new Set<string>();
@@ -189,12 +218,15 @@ async function runIncremental(input: {
   await putHistoryCursor(store, grant.id, historyId);
 
   return {
-    grantId: grant.id,
-    status: "ok",
-    mode: "incremental",
-    historyId,
-    upserted: upserts.length,
-    deleted: deleteIds.length,
+    result: {
+      grantId: grant.id,
+      status: "ok",
+      mode: "incremental",
+      historyId,
+      upserted: upserts.length,
+      deleted: deleteIds.length,
+    },
+    upsertedMessages: upserts,
   };
 }
 

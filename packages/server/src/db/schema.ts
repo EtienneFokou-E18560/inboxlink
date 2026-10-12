@@ -137,6 +137,7 @@ export const messages = pgTable(
   },
   (t) => [
     uniqueIndex("messages_grant_provider_idx").on(t.grantId, t.providerMessageId),
+    index("messages_grant_received_idx").on(t.grantId, t.receivedAt.desc()),
   ],
 );
 
@@ -250,4 +251,5 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 );
 CREATE INDEX IF NOT EXISTS sync_jobs_status_created_idx ON sync_jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS sync_jobs_grant_idx ON sync_jobs (grant_id);
+CREATE INDEX IF NOT EXISTS messages_grant_received_idx ON messages (grant_id, received_at DESC);
 `;
