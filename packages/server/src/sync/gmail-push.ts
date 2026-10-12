@@ -3,7 +3,7 @@ import type { GmailAdapter } from "@inboxlink/adapters-gmail";
 import type { CiphertextVault } from "../gmail-access.js";
 import { log } from "../log.js";
 import type { GrantStore } from "../store.js";
-import { syncGmailGrant, type SyncResult } from "./gmail-sync.js";
+import { syncGmailGrantDetailed, type SyncResult } from "./gmail-sync.js";
 import { emitWebhookSafe, type WebhookBus } from "../webhooks/deliver.js";
 
 /** Decoded Gmail Pub/Sub push payload (`emailAddress` + `historyId`). */
@@ -44,10 +44,10 @@ export async function applyGmailPushNotification(input: {
 
   const results: SyncResult[] = [];
   for (const grant of grants) {
-    const beforeIds = new Set(
-      (await input.store.listMessages(grant.id)).map((m) => m.providerMessageId),
-    );
-    const result = await syncGmailGrant({
+    // Provider ids only: Gmail push fires on every mailbox change (read, label,
+    // archive), so never pull cached payloads here.
+    const beforeIds = new Set(await input.store.listMessageIds(grant.id));
+    const { result, upsertedMessages } = await syncGmailGrantDetailed({
       store: input.store,
       vault: input.vault,
       gmail: input.gmail,
@@ -58,7 +58,7 @@ export async function applyGmailPushNotification(input: {
       webhooks: input.webhooks,
       grant,
       result,
-      store: input.store,
+      upsertedMessages,
       beforeIds,
     });
   }
@@ -107,7 +107,8 @@ async function emitPushWebhooks(input: {
   webhooks?: WebhookBus | null;
   grant: Grant;
   result: SyncResult;
-  store: GrantStore;
+  /** Messages this sync upserted (held in memory by the sync). */
+  upsertedMessages: Message[];
   beforeIds: Set<string>;
 }): Promise<void> {
   const { grant, result } = input;
@@ -137,8 +138,16 @@ async function emitPushWebhooks(input: {
   });
 
   if (result.upserted <= 0) return;
-  const after = await input.store.listMessages(grant.id);
-  const created = after.filter((m) => !input.beforeIds.has(m.providerMessageId));
+  // New = upserted by this sync and absent from the cache before it. Emitted
+  // oldest first, the order the previous full cache re-read produced.
+  const seen = new Set<string>();
+  const created = input.upsertedMessages
+    .filter((m) => {
+      if (input.beforeIds.has(m.providerMessageId) || seen.has(m.providerMessageId)) return false;
+      seen.add(m.providerMessageId);
+      return true;
+    })
+    .sort(compareOldestFirst);
   for (const message of created) {
     await emitMessageCreated(input.webhooks, grant, message);
   }
@@ -160,4 +169,11 @@ async function emitMessageCreated(
     subject: message.subject,
     receivedAt: message.receivedAt,
   });
+}
+
+function compareOldestFirst(a: Message, b: Message): number {
+  const ta = Date.parse(a.receivedAt) || 0;
+  const tb = Date.parse(b.receivedAt) || 0;
+  if (ta !== tb) return ta - tb;
+  return a.providerMessageId.localeCompare(b.providerMessageId);
 }

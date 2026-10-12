@@ -762,20 +762,13 @@ export function createApp(opts: CreateAppOptions) {
       const offset = parseStoreOffset(cursor);
       if (offset === null) return c.json({ error: "invalid_cursor" }, 400);
 
-      const all = await opts.store.listMessages(grantId);
-      // Newest first for the synced read model (store may keep ASC insertion order).
-      const sorted = [...all].sort((a, b) => {
-        const ta = Date.parse(a.receivedAt) || 0;
-        const tb = Date.parse(b.receivedAt) || 0;
-        if (tb !== ta) return tb - ta;
-        return a.providerMessageId.localeCompare(b.providerMessageId);
-      });
-      const page = sorted.slice(offset, offset + limit);
-      const nextOffset = offset + page.length;
-      const nextCursor = nextOffset < sorted.length ? String(nextOffset) : undefined;
+      // Newest first, paged in the store (reads at most limit + 1 rows, not the whole cache).
+      const page = await opts.store.listMessagesPage(grantId, { offset, limit });
+      const nextOffset = offset + page.messages.length;
+      const nextCursor = page.hasMore ? String(nextOffset) : undefined;
       const syncCursor = await opts.store.getSyncCursor(grantId);
       return c.json({
-        messages: page,
+        messages: page.messages,
         nextCursor,
         source: "store",
         syncedAt: syncCursor?.updatedAt,
