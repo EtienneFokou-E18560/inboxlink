@@ -32,9 +32,10 @@ jobs:
           clean=$(printf '%s' "$body" | perl -0pe '
             s/<!-- CURSOR_SUMMARY -->.*?<!-- \/CURSOR_SUMMARY -->//sg;
             s/(?:\R[ \t]*)*-{3,}[ \t]*(?:\R[ \t]*)+_?Generated (?:by|with) \[?(?:Claude Code|Cursor)\b[^\n]*//g;
-            s/^.*Generated (?:by|with) \[?(?:Claude Code|Cursor)\b.*(?:\R|\z)//mg;
+            s/^.*Generated (?:by|with) \[Claude Code\].*(?:\R|\z)//mg;
+            s/^\W*Generated (?:by|with) \[?Cursor\b.*(?:\R|\z)//mg;
             s/^.*claude\.ai\/code.*(?:\R|\z)//mg;
-            s/^.*cursor\.(?:com|sh)\b.*(?:\R|\z)//mgi;
+            s/^.*https?:\/\/(?:www\.)?cursor\.(?:com|sh)\b.*(?:\R|\z)//mgi;
             s/^Co-Authored-By: (?:Claude|Cursor).*(?:\R|\z)//mgi;
             s/^Co-Authored-By: .*cursoragent.*(?:\R|\z)//mgi;
             s/\s+\z//;
