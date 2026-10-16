@@ -158,7 +158,7 @@ Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.
 InboxLink keys a grant to **your** `externalUserId`, but it treats the mailbox itself (tenant + provider + address, case ignored) as the thing that can only be connected once. When Connect finishes for an address this tenant already has a live grant for (`active` or `needs_reauth`), the **new grant wins**:
 
 - The new grant belongs to the `externalUserId` that just connected.
-- Each earlier grant for that address is retired inside InboxLink: its sealed token and cached messages are deleted and it becomes `revoked`. It still appears in `grants.list` for its old user, so you can tell it apart from a grant you never had.
+- Each earlier grant for that address is retired inside InboxLink: its sealed token and cached messages are deleted and it becomes `revoked`. It still appears in `grants.list` for its old user with `"replaced": true`, so you can tell it apart from a grant you never had or one that was simply revoked (the new grant's id is not shown).
 - Reads and syncs on a retired grant answer **409 `{ "error": "grant_replaced" }`** (other inactive grants still answer `grant_inactive`). Show "connected under another sign-in" or ask the user to reconnect; do not retry, and do not poll it.
 - The old token is **not** revoked at Google: Google's revoke ends the whole authorization for that account, which would also kill the token that was just issued.
 
