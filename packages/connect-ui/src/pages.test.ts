@@ -65,4 +65,25 @@ describe("renderConnectErrorPage", () => {
     assert.doesNotMatch(html, /<script>alert/i);
     assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/i);
   });
+
+  it("offers Start again for an unknown OAuth state when a restart URL is known", () => {
+    const html = renderConnectErrorPage({
+      kind: "oauth_unknown_state",
+      restartUrl: "https://host.example/done?error=connect_restart&x=1",
+    });
+    assert.doesNotMatch(html, /Session mismatch/);
+    assert.match(html, /could not be finished/);
+    assert.match(
+      html,
+      /data-testid="connect-restart" href="https:\/\/host\.example\/done\?error=connect_restart&amp;x=1"[^>]*>Start again</,
+    );
+  });
+
+  it("falls back to plain guidance without a restart URL, and never shows the button elsewhere", () => {
+    const unknown = renderConnectErrorPage({ kind: "oauth_unknown_state" });
+    assert.doesNotMatch(unknown, /connect-restart/);
+    assert.match(unknown, /Go back to the app that sent you here/);
+    const expired = renderConnectErrorPage({ kind: "expired", restartUrl: "https://host.example/done" });
+    assert.doesNotMatch(expired, /connect-restart/);
+  });
 });
