@@ -72,6 +72,9 @@ type SessionRow = {
   expires_at: Date | string;
 };
 
+const GRANT_COLUMNS =
+  "id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at, replaced_by";
+
 type GrantRow = {
   id: string;
   tenant_id: string;
@@ -82,6 +85,7 @@ type GrantRow = {
   scopes: unknown;
   created_at: Date | string;
   updated_at: Date | string;
+  replaced_by?: string | null;
 };
 
 const SESSION_COLUMNS = `
@@ -205,8 +209,8 @@ export class PostgresStore implements GrantStore {
   async updateGrant(grant: Grant): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(
-      `UPDATE grants SET status = $2, updated_at = $3 WHERE id = $1 AND tenant_id = $4`,
-      [grant.id, grant.status, grant.updatedAt, grant.tenantId],
+      `UPDATE grants SET status = $2, updated_at = $3, replaced_by = $5 WHERE id = $1 AND tenant_id = $4`,
+      [grant.id, grant.status, grant.updatedAt, grant.tenantId, grant.replacedBy ?? null],
     );
   }
 
@@ -233,7 +237,7 @@ export class PostgresStore implements GrantStore {
   async getGrant(id: string): Promise<Grant | undefined> {
     await this.db.ensure();
     const rows = await this.db.sql.query<GrantRow>(
-      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+      `SELECT ${GRANT_COLUMNS}
        FROM grants WHERE id = $1`,
       [id],
     );
@@ -248,7 +252,7 @@ export class PostgresStore implements GrantStore {
   async listGrants(tenantId: string, externalUserId: string): Promise<Grant[]> {
     await this.db.ensure();
     const rows = await this.db.sql.query<GrantRow>(
-      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+      `SELECT ${GRANT_COLUMNS}
        FROM grants WHERE tenant_id = $1 AND external_user_id = $2
        ORDER BY created_at ASC`,
       [tenantId, externalUserId],
@@ -256,10 +260,27 @@ export class PostgresStore implements GrantStore {
     return rows.map(mapGrant);
   }
 
+  async findLiveGrantsByAddress(
+    tenantId: string,
+    provider: Grant["provider"],
+    email: string,
+  ): Promise<Grant[]> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow>(
+      `SELECT ${GRANT_COLUMNS}
+       FROM grants
+       WHERE tenant_id = $1 AND provider = $2 AND lower(email) = lower($3)
+         AND status IN ('active', 'needs_reauth')
+       ORDER BY created_at ASC`,
+      [tenantId, provider, email.trim()],
+    );
+    return rows.map(mapGrant);
+  }
+
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
     await this.db.ensure();
     const rows = await this.db.sql.query<GrantRow>(
-      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+      `SELECT ${GRANT_COLUMNS}
        FROM grants
        WHERE provider = 'gmail' AND status = 'active' AND lower(email) = lower($1)
        ORDER BY created_at ASC`,
@@ -271,7 +292,7 @@ export class PostgresStore implements GrantStore {
   async listActiveGmailGrants(): Promise<Grant[]> {
     await this.db.ensure();
     const rows = await this.db.sql.query<GrantRow>(
-      `SELECT id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at
+      `SELECT ${GRANT_COLUMNS}
        FROM grants
        WHERE provider = 'gmail' AND status = 'active'
        ORDER BY created_at ASC`,
@@ -709,6 +730,7 @@ function mapGrant(row: GrantRow): Grant {
     scopes: asStringArray(row.scopes),
     createdAt: asIso(row.created_at),
     updatedAt: asIso(row.updated_at),
+    ...(row.replaced_by ? { replacedBy: row.replaced_by } : {}),
   };
 }
 

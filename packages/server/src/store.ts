@@ -79,6 +79,11 @@ export interface GrantStore {
   getGrant(id: string): Promise<Grant | undefined>;
   deleteGrant(id: string, tenantId: string): Promise<void>;
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
+  /**
+   * Grants of one tenant for one mailbox that still count as connected
+   * (`active` or `needs_reauth`), oldest first. Address match ignores case.
+   */
+  findLiveGrantsByAddress(tenantId: string, provider: Grant["provider"], email: string): Promise<Grant[]>;
   /** Active Gmail grants matching mailbox email (Pub/Sub push lookup). */
   findActiveGrantsByEmail(email: string): Promise<Grant[]>;
   /** All active Gmail grants (watch renewal sweep). */
@@ -217,6 +222,23 @@ export class MemoryStore implements GrantStore {
     return [...this.grants.values()].filter(
       (grant) => grant.tenantId === tenantId && grant.externalUserId === externalUserId,
     );
+  }
+
+  async findLiveGrantsByAddress(
+    tenantId: string,
+    provider: Grant["provider"],
+    email: string,
+  ): Promise<Grant[]> {
+    const needle = email.trim().toLowerCase();
+    return [...this.grants.values()]
+      .filter(
+        (grant) =>
+          grant.tenantId === tenantId &&
+          grant.provider === provider &&
+          (grant.status === "active" || grant.status === "needs_reauth") &&
+          grant.email.toLowerCase() === needle,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {

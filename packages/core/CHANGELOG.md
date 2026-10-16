@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-_Nothing yet._
+- `Grant.replacedBy?: string`: set on a grant that a later Connect of the same mailbox (same tenant, provider and address) took over; such a grant is `revoked`. Additive, no breaking change.
 
 ## 0.1.2
 
