@@ -116,6 +116,8 @@ Handle this on the **server** (or a BFF route). Do not exchange the public token
 
 On OAuth error, InboxLink shows an HTML error page instead of redirecting — your host redirect handler should treat a missing `public_token` as an incomplete connect (`parseConnectRedirect` throws a clear error in that case).
 
+**Start again.** When Google returns with an OAuth `state` that no longer matches a live session (the link was used already, or the session expired while the user was at Google), the error page offers a **Start again** button if InboxLink knows your `redirectUri` (from the session, or from a cookie set on the Connect page). The button sends the browser to your `redirectUri` with `error=connect_restart` (your own query parameters are kept). Handle it by creating a new link session and redirecting to its `connectUrl`; a host that ignores it should at least show a "connect again" prompt. The page never consumes or changes a session.
+
 ### 3. Exchange `public_token` → `grantId`
 
 SDK:

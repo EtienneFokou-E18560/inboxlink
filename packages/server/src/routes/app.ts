@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { createPkcePair, newId, randomToken } from "@inboxlink/core";
 import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
@@ -365,6 +366,7 @@ export function createApp(opts: CreateAppOptions) {
       session.codeVerifier = pkce.codeVerifier;
       await opts.store.saveSession(session);
     }
+    rememberConnectReturn(c, opts, session.redirectUri, session.expiresAt);
     const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
@@ -524,12 +526,14 @@ export function createApp(opts: CreateAppOptions) {
     }
     const session = await appOpts.store.consumeOAuthState(state);
     if (!session) {
+      const restartUrl = await connectRestartUrl(c, appOpts, state);
       log.warn("oauth_callback_failed", {
         reason: "unknown_oauth_state",
         store: appOpts.storeKind ?? "memory",
+        restart: restartUrl ? "offered" : "none",
       });
       return c.html(
-        renderConnectErrorPage({ kind: "oauth_unknown_state" }),
+        renderConnectErrorPage({ kind: "oauth_unknown_state", restartUrl }),
         connectErrorStatus("oauth_unknown_state"),
       );
     }
@@ -654,6 +658,7 @@ export function createApp(opts: CreateAppOptions) {
       });
     }
 
+    deleteCookie(c, CONNECT_RETURN_COOKIE, { path: CONNECT_RETURN_COOKIE_PATH });
     const redirect = new URL(session.redirectUri);
     redirect.searchParams.set("public_token", publicToken);
     redirect.searchParams.set("link_token", session.linkToken);
@@ -1362,3 +1367,52 @@ function applyHtmlSecurityHeaders(headers: Headers): void {
   headers.set("Referrer-Policy", "no-referrer");
 }
 
+/**
+ * Cookie that remembers the host `redirectUri` of the last Connect page this browser opened, so a
+ * callback whose OAuth `state` no longer matches a session can still offer "Start again". Scoped
+ * to the OAuth callback path; holds only the (already validated) host URL, never a token.
+ */
+const CONNECT_RETURN_COOKIE = "inboxlink_connect_return";
+const CONNECT_RETURN_COOKIE_PATH = "/v1/oauth";
+
+/** Query value hosts receive on their `redirectUri` when the user asks to start Connect again. */
+export const CONNECT_RESTART_ERROR = "connect_restart";
+
+function rememberConnectReturn(
+  c: Context<AppEnv>,
+  opts: CreateAppOptions,
+  redirectUri: string,
+  expiresAt: string,
+): void {
+  const seconds = Math.floor((Date.parse(expiresAt) - Date.now()) / 1000);
+  if (!Number.isFinite(seconds) || seconds <= 0) return;
+  setCookie(c, CONNECT_RETURN_COOKIE, redirectUri, {
+    path: CONNECT_RETURN_COOKIE_PATH,
+    httpOnly: true,
+    secure: opts.publicBaseUrl.startsWith("https:"),
+    sameSite: "Lax",
+    maxAge: seconds,
+  });
+}
+
+/**
+ * Where "Start again" should go after an unknown OAuth state: the host `redirectUri` of the
+ * session that owned the state (it may have expired while the user was at Google), else the one
+ * remembered by this browser's last Connect page. The host gets `error=connect_restart` and is
+ * expected to create a new link session. Read-only: never consumes or changes a session.
+ */
+async function connectRestartUrl(
+  c: Context<AppEnv>,
+  opts: CreateAppOptions,
+  state: string,
+): Promise<string | undefined> {
+  const owner = await opts.store.findSessionByOAuthState(state).catch(() => undefined);
+  const candidate = owner?.redirectUri ?? getCookie(c, CONNECT_RETURN_COOKIE);
+  const allowed = validateRedirectUri(candidate, opts.allowedRedirectOrigins ?? null);
+  if (!allowed) return undefined;
+  const url = new URL(allowed);
+  url.searchParams.delete("public_token");
+  url.searchParams.delete("link_token");
+  url.searchParams.set("error", CONNECT_RESTART_ERROR);
+  return url.toString();
+}
