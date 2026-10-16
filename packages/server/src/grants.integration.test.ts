@@ -187,7 +187,7 @@ describe("grants, vault, and Gmail OAuth", () => {
       `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     );
     assert.equal(replay.status, 400);
-    assert.match(await replay.text(), /does not match a live session|unknown or the Link session expired/i);
+    assert.match(await replay.text(), /could not be finished/i);
 
     const exchanged = await app.request("/v1/grants/exchange", {
       method: "POST",
@@ -514,5 +514,90 @@ describe("Connect page opened twice", () => {
 
     const after = await app.request(`/v1/connect/${encodeURIComponent(linkToken)}`);
     assert.notEqual(after.status, 200, "a finished session does not offer Google again");
+  });
+});
+
+describe("Unknown OAuth state", () => {
+  async function openSession(app: ReturnType<typeof buildApp>["app"], externalUserId: string) {
+    const created = await app.request("/v1/link/sessions", {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_SECRET}`, "content-type": "application/json" },
+      body: JSON.stringify({ externalUserId, redirectUri: "http://localhost:9999/done?from=settings" }),
+    });
+    const { linkToken } = (await created.json()) as { linkToken: string };
+    const page = await app.request(`/v1/connect/${encodeURIComponent(linkToken)}`);
+    assert.equal(page.status, 200);
+    const setCookie = page.headers.get("set-cookie") ?? "";
+    assert.match(setCookie, /inboxlink_connect_return=/);
+    assert.match(setCookie, /Path=\/v1\/oauth/);
+    assert.match(setCookie, /HttpOnly/);
+    const html = await page.text();
+    const cta = new URL(unescapeHtml(html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? ""));
+    const state = cta.searchParams.get("state");
+    assert.ok(state);
+    return { state, cookie: setCookie.split(";")[0] };
+  }
+
+  function restartHref(html: string): string | undefined {
+    const raw = html.match(/data-testid="connect-restart" href="([^"]+)"/)?.[1];
+    return raw ? unescapeHtml(raw) : undefined;
+  }
+
+  it("offers Start again back to the host and leaves the live session usable", async () => {
+    const { app, store } = buildApp();
+    const { state, cookie } = await openSession(app, "user-unknown-state");
+
+    const bogus = await app.request("/v1/oauth/gmail/callback?code=auth-code&state=not-a-live-state", {
+      headers: { cookie },
+    });
+    assert.equal(bogus.status, 400);
+    const html = await bogus.text();
+    assert.doesNotMatch(html, /Session mismatch/);
+    const href = restartHref(html);
+    assert.ok(href, "a Start again button is shown");
+    const restart = new URL(href);
+    assert.equal(restart.origin + restart.pathname, "http://localhost:9999/done");
+    assert.equal(restart.searchParams.get("error"), "connect_restart");
+    assert.equal(restart.searchParams.get("from"), "settings", "the host's own query is kept");
+    assert.equal(
+      [...store.sessions.values()].some((s) => s.oauthState === state),
+      true,
+      "the unknown state did not consume the live session",
+    );
+
+    const real = await app.request(`/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`);
+    assert.equal(real.status, 302, "the real Google return still finishes");
+    assert.match(real.headers.get("set-cookie") ?? "", /inboxlink_connect_return=;.*Max-Age=0/);
+  });
+
+  it("finds the host from the session when it expired while the user was at Google", async () => {
+    const { app, store } = buildApp();
+    const { state } = await openSession(app, "user-expired-at-google");
+    const session = [...store.sessions.values()].find((s) => s.oauthState === state);
+    assert.ok(session);
+    session.expiresAt = new Date(Date.now() - 1000).toISOString();
+
+    const res = await app.request(`/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`);
+    assert.equal(res.status, 400);
+    const href = restartHref(await res.text());
+    assert.ok(href);
+    assert.equal(new URL(href).searchParams.get("error"), "connect_restart");
+  });
+
+  it("shows plain guidance and no button when the host is unknown", async () => {
+    const { app } = buildApp();
+    const res = await app.request("/v1/oauth/gmail/callback?code=auth-code&state=never-issued");
+    assert.equal(res.status, 400);
+    const html = await res.text();
+    assert.equal(restartHref(html), undefined);
+    assert.match(html, /Go back to the app that sent you here/);
+  });
+
+  it("ignores a remembered host that is not on the redirect allowlist", async () => {
+    const { app } = buildApp();
+    const res = await app.request("/v1/oauth/gmail/callback?code=auth-code&state=never-issued", {
+      headers: { cookie: "inboxlink_connect_return=javascript%3Aalert(1)" },
+    });
+    assert.equal(restartHref(await res.text()), undefined);
   });
 });
