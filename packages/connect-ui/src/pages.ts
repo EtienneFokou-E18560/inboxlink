@@ -33,6 +33,11 @@ export type ConnectErrorPageProps = {
   providerError?: string;
   /** Session status string when kind is session_other. */
   sessionStatus?: string;
+  /**
+   * Host URL that starts Connect again (a "Start again" button). Only shown for kinds that
+   * support it (`oauth_unknown_state`).
+   */
+  restartUrl?: string;
 };
 
 function formatExpiry(iso: string): string {
@@ -79,11 +84,16 @@ export function renderConnectErrorPage(props: ConnectErrorPageProps): string {
     : copy.notice
       ? `<p class="${noticeClass}">${escapeHtml(copy.notice)}</p>`
       : "";
+  const restart =
+    props.restartUrl && props.kind === "oauth_unknown_state"
+      ? `<p><a class="cta" data-testid="connect-restart" href="${escapeHtml(props.restartUrl)}">Start again</a></p>`
+      : "";
   const body = `
     <p class="kicker">${escapeHtml(copy.kicker)}</p>
     <h1>${escapeHtml(copy.title)}</h1>
     <p class="lead">${escapeHtml(copy.lead)}</p>
     ${detail}
+    ${restart}
     <p class="meta">${escapeHtml(copy.meta)}</p>
   `;
   return renderShell({
@@ -169,11 +179,13 @@ function errorCopy(props: ConnectErrorPageProps): {
       };
     case "oauth_unknown_state":
       return {
-        kicker: "Session mismatch",
-        title: "This OAuth return does not match a live session",
-        lead: "The state token is unknown or the Link session expired while you were at Google.",
-        notice: "Return to the host app and open a fresh connect link.",
-        meta: "On multi-instance deploys, durable session storage (Postgres) is required.",
+        kicker: "Let's try that again",
+        title: "This sign-in could not be finished",
+        lead: "The connect link was used already, was opened again, or timed out while you were at Google. No mailbox was connected.",
+        notice: props.restartUrl
+          ? "Start again to get a fresh connect link. It only takes a moment."
+          : "Go back to the app that sent you here and connect again.",
+        meta: "Tip: open the connect link once and finish the Google step in the same tab.",
         tone: "warn",
       };
     case "oauth_exchange":
