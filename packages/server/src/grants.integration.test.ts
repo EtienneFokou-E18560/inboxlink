@@ -699,7 +699,9 @@ describe("one live grant per mailbox (#371)", () => {
     const { grants } = (await listed.json()) as { grants: Record<string, unknown>[] };
     assert.equal(grants.length, 1);
     assert.equal(grants[0]?.status, "revoked");
+    assert.equal(grants[0]?.replaced, true, "the host can tell it apart from a revoke");
     assert.equal("replacedBy" in (grants[0] ?? {}), false, "the new grant id is not shown");
+    assert.equal(JSON.stringify(grants).includes(googleGrant), false);
   });
 
   it("a reconnect by the same identity replaces its own earlier grant", async () => {
@@ -723,6 +725,7 @@ describe("one live grant per mailbox (#371)", () => {
         [second, "active"],
       ],
     );
+    assert.equal("replaced" in (grants[1] as object), false, "a live grant carries no flag");
   });
 
   it("still finishes Connect when retiring the old grant fails", async () => {

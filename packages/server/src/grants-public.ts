@@ -9,6 +9,8 @@ export type PublicGrant = {
   scopes: string[];
   createdAt: string;
   updatedAt: string;
+  /** True when a later Connect of the same mailbox retired this grant (it is `revoked`). The new grant's id is not shown. */
+  replaced?: true;
 };
 
 export function toPublicGrant(grant: Grant): PublicGrant {
@@ -20,6 +22,7 @@ export function toPublicGrant(grant: Grant): PublicGrant {
     scopes: grant.scopes,
     createdAt: grant.createdAt,
     updatedAt: grant.updatedAt,
+    ...(grant.replacedBy ? { replaced: true as const } : {}),
   };
 }
 
