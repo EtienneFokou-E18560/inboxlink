@@ -479,3 +479,40 @@ describe("Connect UI session errors", () => {
     assert.doesNotMatch(html, /Continue with Google/);
   });
 });
+
+describe("Connect page opened twice", () => {
+  it("keeps the first page's Google sign-in working (a reload or second tab must not cancel it)", async () => {
+    const { app, store } = buildApp();
+    const auth = { authorization: `Bearer ${API_SECRET}`, "content-type": "application/json" };
+    const created = await app.request("/v1/link/sessions", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ externalUserId: "user-twice", redirectUri: "http://localhost:9999/done" }),
+    });
+    const { linkToken } = (await created.json()) as { linkToken: string };
+
+    const ctaUrl = async () => {
+      const res = await app.request(`/v1/connect/${encodeURIComponent(linkToken)}`);
+      assert.equal(res.status, 200);
+      const html = await res.text();
+      return new URL(unescapeHtml(html.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? ""));
+    };
+    const first = await ctaUrl();
+    const second = await ctaUrl();
+    const state = first.searchParams.get("state");
+    assert.ok(state);
+    assert.equal(second.searchParams.get("state"), state, "the second visit keeps the state");
+    assert.equal(second.searchParams.get("code_challenge"), first.searchParams.get("code_challenge"));
+
+    lastTokenBody = "";
+    const callback = await app.request(`/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`);
+    assert.equal(callback.status, 302, "the callback from the first page succeeds");
+    const verifier = new URLSearchParams(lastTokenBody).get("code_verifier");
+    assert.ok(verifier);
+    assert.equal(createHash("sha256").update(verifier, "ascii").digest("base64url"), first.searchParams.get("code_challenge"));
+    assert.equal([...store.sessions.values()].some((s) => s.oauthState === state), false, "the state is used up");
+
+    const after = await app.request(`/v1/connect/${encodeURIComponent(linkToken)}`);
+    assert.notEqual(after.status, 200, "a finished session does not offer Google again");
+  });
+});
