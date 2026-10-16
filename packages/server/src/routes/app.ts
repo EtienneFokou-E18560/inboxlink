@@ -53,7 +53,7 @@ import {
   emitWebhookSafe,
   type WebhookBus,
 } from "../webhooks/deliver.js";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export type AppEnv = {
   Variables: {
@@ -348,11 +348,23 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus(kind),
       );
     }
-    const state = randomToken(16);
-    const { codeVerifier, codeChallenge } = createPkcePair();
-    session.oauthState = state;
-    session.codeVerifier = codeVerifier;
-    await opts.store.saveSession(session);
+    // A second visit (reload, a second tab, a link opened twice) must not cancel a Google sign-in
+    // already in progress: keep the pending session's state and verifier until the callback
+    // consumes them or the session expires.
+    let state: string;
+    let codeChallenge: string;
+    if (session.oauthState && session.codeVerifier) {
+      state = session.oauthState;
+      codeChallenge = createHash("sha256").update(session.codeVerifier, "ascii").digest("base64url");
+      log.info("connect_page_revisit", { sessionId: session.id });
+    } else {
+      state = randomToken(16);
+      const pkce = createPkcePair();
+      codeChallenge = pkce.codeChallenge;
+      session.oauthState = state;
+      session.codeVerifier = pkce.codeVerifier;
+      await opts.store.saveSession(session);
+    }
     const redirectUri = oauthRedirectUri(opts);
     const authUrl = opts.gmail.buildAuthorizationUrl({
       state,
