@@ -24,6 +24,12 @@ export type Grant = {
   scopes: string[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set when a later Connect of the same mailbox (same tenant, provider and
+   * address) took over: the id of the grant that replaced this one. A replaced
+   * grant is `revoked`, holds no token and no cached messages.
+   */
+  replacedBy?: string;
 };
 
 /** Attachment metadata from the message MIME tree — no bytes. */

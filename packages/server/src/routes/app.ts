@@ -38,6 +38,7 @@ import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
 import { getAccessTokenCache } from "../access-token-cache.js";
+import { inactiveGrantError, replaceEarlierGrants } from "../grants-replace.js";
 import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
 import { applyGmailPushNotification, parsePubSubPushBody } from "../sync/gmail-push.js";
 import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watch.js";
@@ -604,6 +605,21 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("vault_failed"),
       );
     }
+    // One live grant per mailbox: retire this tenant's earlier grants for the
+    // same address (any host user). Skipped when Google sent no address.
+    // A failure here must not fail a Connect whose token is already sealed:
+    // the duplicates stay (as before this rule) and the next Connect retries.
+    if (tokens.email) {
+      try {
+        await replaceEarlierGrants({ store: appOpts.store, vault: appOpts.vault, grant });
+      } catch (err) {
+        log.warn("grant_replace_failed", {
+          grantId,
+          tenantId: session.tenantId,
+          error: err instanceof Error ? err.message : "unknown",
+        });
+      }
+    }
     session.oauthState = undefined;
     session.codeVerifier = undefined;
     const publicToken = randomToken(24);
@@ -755,12 +771,12 @@ export function createApp(opts: CreateAppOptions) {
     if (cursor && cursor.length > 512) return c.json({ error: "invalid_cursor" }, 400);
 
     if (grant.provider === "imap") {
-      if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+      if (grant.status !== "active") return c.json({ error: inactiveGrantError(grant) }, 409);
       return listImapMessages(c, opts, imap, grant, limit, cursor);
     }
 
     if (grant.provider === "microsoft") {
-      if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+      if (grant.status !== "active") return c.json({ error: inactiveGrantError(grant) }, 409);
       if (!opts.microsoft) return c.json({ error: "unsupported_provider" }, 400);
       if (cursor && cursor.length > 2048) return c.json({ error: "invalid_cursor" }, 400);
       return listMicrosoftMessages(c, opts, opts.microsoft, grant, limit, cursor);
@@ -860,7 +876,7 @@ export function createApp(opts: CreateAppOptions) {
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
     if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
-    if (grant.status !== "active") return c.json({ error: "grant_inactive" }, 409);
+    if (grant.status !== "active") return c.json({ error: inactiveGrantError(grant) }, 409);
 
     let forceBootstrap = false;
     const contentType = c.req.header("content-type") ?? "";
@@ -1218,7 +1234,7 @@ async function readyGmailGrant(
   const grant = await opts.store.getGrant(grantId);
   if (!grant || grant.tenantId !== tenantId) return { ok: false, error: "not_found", status: 404 };
   if (grant.provider !== "gmail") return { ok: false, error: "unsupported_provider", status: 400 };
-  if (grant.status !== "active") return { ok: false, error: "grant_inactive", status: 409 };
+  if (grant.status !== "active") return { ok: false, error: inactiveGrantError(grant), status: 409 };
   return { ok: true, grant };
 }
 

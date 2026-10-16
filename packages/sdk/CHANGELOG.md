@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-_Nothing yet._
+- Servers that include the one-live-grant-per-mailbox rule answer **409 `grant_replaced`** on `messages.list`, `messages.get` and `grants.sync` for a grant that was retired because the same address was connected again (by the same or another `externalUserId`). Treat it like `grant_inactive`: stop polling and offer to reconnect. No SDK code change; the error surfaces as the usual `InboxLinkApiError` with `status: 409` and `code: "grant_replaced"`.
 
 ## 0.1.2
 
