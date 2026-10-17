@@ -14,6 +14,7 @@ Short guide for Production at `https://inboxlink-two.vercel.app`. No paid APM re
 | **Schema dump** | `GET /v1/schema.sql` requires Bearer in `multi` (Production) — not world-readable. |
 | **HTML headers** | Connect / landing / status / docs send CSP + `X-Content-Type-Options` + `X-Frame-Options` + `Referrer-Policy`. |
 | **Health smoke** | [production-health-smoke.yml](../.github/workflows/production-health-smoke.yml) + `scripts/smoke-health.sh` (expect `store: "postgres"`). |
+| **Dependencies** | No Dependabot version-update PRs. [dependency-report.yml](../.github/workflows/dependency-report.yml) writes a weekly read-only summary (`pnpm outdated`, `pnpm audit --prod`); updates are made by hand. Dependabot alerts (repo setting) still email the maintainer. |
 
 ## Health clarity
 

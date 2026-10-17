@@ -1,0 +1,72 @@
+name: Dependency report
+
+# Weekly, read-only report of outdated packages and production advisories.
+# Replaces Dependabot version-update PRs: nothing is opened or committed;
+# updates are made by hand from this report. Dependabot alerts (a repo
+# setting) still email the maintainer about vulnerable dependencies.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    name: Outdated and audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Outdated packages
+        run: pnpm outdated --recursive --format json > outdated.json || true
+
+      - name: Audit (production dependencies)
+        run: pnpm audit --prod --json > audit.json || true
+
+      - name: Write job summary
+        run: |
+          {
+            echo "## Dependency report"
+            echo
+            echo "Read-only. Update by hand: \`pnpm update <pkg>\` (or edit package.json), then run the gates and open a PR."
+            echo
+            echo "### Outdated packages"
+            echo
+            if [ -s outdated.json ] && jq -e 'type == "object" and length > 0' outdated.json > /dev/null 2>&1; then
+              echo "| Package | Current | Wanted | Latest | Type |"
+              echo "|---|---|---|---|---|"
+              jq -r 'to_entries[] | "| \(.key) | \(.value.current // "-") | \(.value.wanted // "-") | \(.value.latest // "-") | \(.value.dependencyType // "-") |"' outdated.json
+            else
+              echo "Nothing outdated (or the report could not be produced)."
+            fi
+            echo
+            echo "### Audit (production)"
+            echo
+            if [ -s audit.json ] && jq -e '.metadata.vulnerabilities' audit.json > /dev/null 2>&1; then
+              jq -r '.metadata.vulnerabilities | "Critical: \(.critical // 0), high: \(.high // 0), moderate: \(.moderate // 0), low: \(.low // 0), info: \(.info // 0)"' audit.json
+              echo
+              if jq -e '(.advisories // {}) | length > 0' audit.json > /dev/null; then
+                echo "| Severity | Package | Vulnerable | Patched | Advisory |"
+                echo "|---|---|---|---|---|"
+                jq -r '.advisories[] | "| \(.severity) | \(.module_name) | \(.vulnerable_versions) | \(.patched_versions) | \(.url) |"' audit.json
+              fi
+            else
+              echo "Audit output was not available."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
