@@ -6,9 +6,9 @@ import type { GrantStore } from "./store.js";
 /**
  * One mailbox, one live grant per tenant.
  *
- * Called after a new grant's token is sealed. Every other grant of the same
- * tenant, provider and address that is still `active` or `needs_reauth` is
- * retired inside InboxLink: its sealed token is destroyed, its cached messages
+ * Called after a new grant's token is sealed. Every grant of the same tenant,
+ * provider and address that is still `active` or `needs_reauth` and was
+ * created before the new one (tie-break on id) is retired inside InboxLink: its sealed token is destroyed, its cached messages
  * are deleted, and it becomes `revoked` with `replacedBy` pointing at the new
  * grant. The row stays, so a host that still holds the old id gets a clear
  * `grant_replaced` instead of a bare 404.
@@ -24,19 +24,19 @@ export async function replaceEarlierGrants(input: {
   now?: () => Date;
 }): Promise<string[]> {
   const { store, vault, grant } = input;
-  const earlier = await store.findLiveGrantsByAddress(grant.tenantId, grant.provider, grant.email);
+  // The status change is one conditional write that only takes grants created
+  // before this one, so a slower Connect for the same address finishing later
+  // cannot retire the newer grant. Tokens and cached messages are destroyed
+  // only for the grants this call actually retired.
+  const retired = await store.retireEarlierGrants(
+    grant,
+    (input.now?.() ?? new Date()).toISOString(),
+  );
   const replaced: string[] = [];
-  for (const old of earlier) {
-    if (old.id === grant.id) continue;
+  for (const old of retired) {
     await vault.destroy(old.id);
     getAccessTokenCache().invalidate(old.id);
     await store.deleteMessages(old.id);
-    await store.updateGrant({
-      ...old,
-      status: "revoked",
-      replacedBy: grant.id,
-      updatedAt: (input.now?.() ?? new Date()).toISOString(),
-    });
     replaced.push(old.id);
     // Ids only: never log the address or the host's user ids.
     log.info("grant_replaced", {

@@ -579,7 +579,7 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
     const grantId = newId("grant");
-    const now = new Date().toISOString();
+    const now = nextGrantCreatedAt();
     const grant: Grant = {
       id: grantId,
       tenantId: session.tenantId,
@@ -1224,6 +1224,19 @@ async function listMicrosoftMessages(
     }
     return c.json({ error: "microsoft_unavailable" }, 502);
   }
+}
+
+let lastGrantCreatedMs = 0;
+
+/**
+ * `createdAt` for a grant made by Connect: strictly later than the previous one
+ * this process made, so two Connects finishing in the same millisecond still
+ * order (one live grant per mailbox retires only older grants; across
+ * processes, equal timestamps fall back to the id tie-break).
+ */
+function nextGrantCreatedAt(): string {
+  lastGrantCreatedMs = Math.max(Date.now(), lastGrantCreatedMs + 1);
+  return new Date(lastGrantCreatedMs).toISOString();
 }
 
 async function readyGmailGrant(

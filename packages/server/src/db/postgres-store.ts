@@ -18,6 +18,7 @@ import type {
   SyncJobRecord,
   SyncJobStatus,
 } from "../store.js";
+import { compareCreated } from "../store.js";
 import { SCHEMA_SQL } from "./schema.js";
 import type { SqlExecutor } from "./sql.js";
 
@@ -206,12 +207,17 @@ export class PostgresStore implements GrantStore {
     );
   }
 
-  async updateGrant(grant: Grant): Promise<void> {
+  async updateGrant(grant: Grant): Promise<boolean> {
     await this.db.ensure();
-    await this.db.sql.query(
-      `UPDATE grants SET status = $2, updated_at = $3, replaced_by = $5 WHERE id = $1 AND tenant_id = $4`,
-      [grant.id, grant.status, grant.updatedAt, grant.tenantId, grant.replacedBy ?? null],
+    // Conditional: a retired (revoked) grant is never moved back, and
+    // `replaced_by` is written only by `retireEarlierGrants`.
+    const rows = await this.db.sql.query<{ id: string }>(
+      `UPDATE grants SET status = $2, updated_at = $3
+       WHERE id = $1 AND tenant_id = $4 AND status <> 'revoked'
+       RETURNING id`,
+      [grant.id, grant.status, grant.updatedAt, grant.tenantId],
     );
+    return rows.length > 0;
   }
 
   async putGrant(grant: Grant): Promise<void> {
@@ -275,6 +281,28 @@ export class PostgresStore implements GrantStore {
       [tenantId, provider, email.trim()],
     );
     return rows.map(mapGrant);
+  }
+
+  async retireEarlierGrants(grant: Grant, updatedAt: string): Promise<Grant[]> {
+    await this.db.ensure();
+    // One conditional statement: only rows still live and created before the
+    // new grant (created_at, then id) are retired, read from the stored row
+    // of the new grant so both sides compare at the same precision.
+    const rows = await this.db.sql.query<GrantRow>(
+      `WITH me AS (
+         SELECT id, created_at FROM grants WHERE id = $4 AND tenant_id = $1
+       )
+       UPDATE grants g
+       SET status = 'revoked', replaced_by = me.id, updated_at = $5
+       FROM me
+       WHERE g.tenant_id = $1 AND g.provider = $2 AND lower(g.email) = lower($3)
+         AND g.id <> me.id
+         AND g.status IN ('active', 'needs_reauth')
+         AND (g.created_at < me.created_at OR (g.created_at = me.created_at AND g.id < me.id))
+       RETURNING ${GRANT_COLUMNS.split(", ").map((c) => `g.${c}`).join(", ")}`,
+      [grant.tenantId, grant.provider, grant.email.trim(), grant.id, updatedAt],
+    );
+    return rows.map(mapGrant).sort(compareCreated);
   }
 
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
@@ -390,7 +418,7 @@ export class PostgresStore implements GrantStore {
       `INSERT INTO messages (
          id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at
        )
-       SELECT * FROM UNNEST(
+       SELECT t.* FROM UNNEST(
          $1::text[],
          $2::text[],
          $3::text[],
@@ -400,6 +428,9 @@ export class PostgresStore implements GrantStore {
          $7::jsonb[],
          $8::timestamptz[]
        ) AS t(id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at)
+       -- Only an active grant caches mail: a sync still running when its
+       -- grant was retired must not refill the cache retirement emptied.
+       WHERE EXISTS (SELECT 1 FROM grants g WHERE g.id = t.grant_id AND g.status = 'active')
        ON CONFLICT (grant_id, provider_message_id) DO UPDATE SET
          id = EXCLUDED.id,
          thread_id = EXCLUDED.thread_id,
