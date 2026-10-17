@@ -6,17 +6,27 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { CreateLinkSessionInput, Grant, Message } from "@inboxlink/core";
+import type { CreateLinkSessionInput, Grant as CoreGrant, Message } from "@inboxlink/core";
 
 export type {
   CreateLinkSessionInput,
   EmailAddress,
-  Grant,
   GrantStatus,
   Message,
   MessageAttachment,
   Provider,
 } from "@inboxlink/core";
+
+/** A grant as `grants.list` returns it. */
+export type Grant = CoreGrant & {
+  /**
+   * True when a later Connect of the same mailbox (same or another
+   * `externalUserId`) retired this grant; it is then `revoked`, and reads and
+   * syncs answer 409 `grant_replaced`. Absent on every other grant. The id of
+   * the grant that replaced it is never returned.
+   */
+  replaced?: boolean;
+};
 
 /** Documented Production origin. Used when `baseUrl` is omitted. */
 export const INBOXLINK_PRODUCTION_URL = "https://inboxlink-two.vercel.app";

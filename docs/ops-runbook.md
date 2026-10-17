@@ -71,7 +71,21 @@ When Gmail refresh fails or list returns 401/403, the grant is marked `needs_rea
 }
 ```
 
-**Fix:** create a new link session and complete Connect again (same `externalUserId` is fine). Do not reuse an old `public_token`. List grants should show `status: "needs_reauth"` until a new grant replaces it or you revoke.
+**Fix:** create a new link session and complete Connect again (same `externalUserId` is fine). Do not reuse an old `public_token`. List grants show `status: "needs_reauth"` until a new grant replaces it or you revoke. When the new Connect is for the same address, the old grant is retired automatically (next section).
+
+## `grant_replaced` (one live grant per mailbox)
+
+A finished Connect retires the tenant's `active` / `needs_reauth` grants for the same provider and address (case ignored) that were created before it (ties broken on grant id), whichever `externalUserId` owned them: token and cached messages deleted, status `revoked`, `replaced_by` set to the new grant id. Reads and syncs on the old id answer 409 `grant_replaced`; `GET /v1/grants` shows it `revoked` with `replaced: true`. Log event: `grant_replaced` (`grantId`, `replacedBy`, `tenantId`, `sameUser`; never the address). The old refresh token is not revoked at Google, because that would also end the new one.
+
+Races it is safe against: the retire step is one conditional `UPDATE ... RETURNING`, and only the grants it returned lose their token and cache, so a slow Connect finishing after a newer one never retires the newer grant. Status writes never touch a `revoked` row (a 401 in a sync that was running during the retirement does not turn it back into `needs_reauth` or clear `replaced_by`), and the message upsert only writes for `active` grants.
+
+Grants created before this rule are **not** cleaned up by a deploy. Find them with the read-only report:
+
+```bash
+psql "$DATABASE_URL" -f scripts/shared-address-report.sql
+```
+
+The first table counts, per tenant, addresses with more than one grant and those with more than one live grant (the ones to act on). The second lists the live grants on those addresses (grant id, an 8-character address key, identity kind `anonymous` / `google` / `account`, status, date, cached messages); no address is printed. The next Connect of that mailbox keeps only the newest grant. To clean up sooner, revoke the grants you don't want with `DELETE /v1/grants/:id` (or `il.grants.revoke`) using that tenant's secret; that is a manual owner decision, nothing does it automatically.
 
 ## Access-token cache
 
@@ -208,5 +222,7 @@ npm download counts include CI installs, mirrors and bots, so they do not show r
 ```bash
 psql "$DATABASE_URL" -f scripts/usage-report.sql
 ```
+
+For mailboxes connected more than once, see `scripts/shared-address-report.sql` under `grant_replaced` above.
 
 It lists, per host app (tenant): active and total connected mailboxes, distinct users, first and latest connect, syncs in the last 7 days and the last sync, plus daily syncs and weekly new grants. It reads counts only, never message content or tokens. It cannot see self-hosted installs.

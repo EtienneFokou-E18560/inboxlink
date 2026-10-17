@@ -11,6 +11,8 @@ import { MemoryTokenVault } from "./vault/memory-vault.js";
 const API_SECRET = "tenant-api-key-test";
 const REFRESH = "1//gmail-refresh-token-test";
 const EMAIL = "tester@gmail.com";
+/** Address the Google stub reports; tests that need another mailbox change it. */
+let googleEmail = EMAIL;
 
 let google: Server;
 let tokenUrl = "";
@@ -50,7 +52,7 @@ before(async () => {
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ email: EMAIL }));
+      res.end(JSON.stringify({ email: googleEmail }));
       return;
     }
     res.writeHead(404);
@@ -599,5 +601,162 @@ describe("Unknown OAuth state", () => {
       headers: { cookie: "inboxlink_connect_return=javascript%3Aalert(1)" },
     });
     assert.equal(restartHref(await res.text()), undefined);
+  });
+});
+
+/** Runs Connect end to end for one host user and returns the exchanged grant id. */
+async function connectAs(
+  app: ReturnType<typeof buildApp>["app"],
+  store: MemoryStore,
+  externalUserId: string,
+): Promise<string> {
+  const auth = { authorization: `Bearer ${API_SECRET}`, "content-type": "application/json" };
+  const created = await app.request("/v1/link/sessions", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({ externalUserId, redirectUri: "http://localhost:9999/done" }),
+  });
+  const { linkToken } = (await created.json()) as { linkToken: string };
+  const page = await (await app.request(`/v1/connect/${encodeURIComponent(linkToken)}`)).text();
+  const href = unescapeHtml(page.match(/data-testid="connect-cta"[^>]*href="([^"]+)"/)?.[1] ?? "");
+  const state = new URL(href).searchParams.get("state") ?? "";
+  const callback = await app.request(
+    `/v1/oauth/gmail/callback?code=auth-code&state=${encodeURIComponent(state)}`,
+  );
+  assert.equal(callback.status, 302);
+  const publicToken = new URL(callback.headers.get("location") ?? "").searchParams.get(
+    "public_token",
+  );
+  const exchanged = await app.request("/v1/grants/exchange", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({ publicToken }),
+  });
+  const { grantId } = (await exchanged.json()) as { grantId: string };
+  assert.ok(store.grants.get(grantId));
+  return grantId;
+}
+
+function cachedMessage(grantId: string, n: number) {
+  const at = "2026-10-01T12:00:00.000Z";
+  return {
+    id: `msg_${grantId}_${n}`,
+    grantId,
+    providerMessageId: `p${n}`,
+    subject: `Subject ${n}`,
+    snippet: "",
+    from: [{ email: "recruiter@example.com" }],
+    to: [{ email: EMAIL }],
+    sentAt: at,
+    receivedAt: at,
+    folderIds: ["INBOX"],
+    hasAttachments: false,
+  };
+}
+
+describe("one live grant per mailbox (#371)", () => {
+  const auth = { authorization: `Bearer ${API_SECRET}` };
+
+  it("the same address connected from a second identity replaces the first grant", async () => {
+    googleEmail = EMAIL;
+    const { app, vault, store } = buildApp();
+    const anonGrant = await connectAs(app, store, "anon_7f3c");
+    await store.upsertMessages([cachedMessage(anonGrant, 1), cachedMessage(anonGrant, 2)]);
+
+    googleEmail = "Tester@Gmail.com"; // Google's casing can differ between consents.
+    const googleGrant = await connectAs(app, store, "google:1234");
+    googleEmail = EMAIL;
+    assert.notEqual(googleGrant, anonGrant);
+
+    const old = store.grants.get(anonGrant);
+    assert.equal(old?.status, "revoked");
+    assert.equal(old?.replacedBy, googleGrant);
+    assert.equal(old?.externalUserId, "anon_7f3c");
+    assert.equal(await vault.getCiphertext(anonGrant), undefined, "old token is gone");
+    assert.deepEqual(await store.listMessageIds(anonGrant), [], "old cache is gone");
+
+    const fresh = store.grants.get(googleGrant);
+    assert.equal(fresh?.status, "active");
+    assert.equal(fresh?.externalUserId, "google:1234", "the new identity owns the mailbox");
+    assert.equal(fresh?.replacedBy, undefined);
+    assert.ok(await vault.getCiphertext(googleGrant));
+
+    const live = await store.findLiveGrantsByAddress("default", "gmail", EMAIL);
+    assert.deepEqual(live.map((g) => g.id), [googleGrant]);
+
+    // The old identity gets a code it can act on, not a 404 it would retry.
+    const read = await app.request(`/v1/grants/${anonGrant}/messages`, { headers: auth });
+    assert.equal(read.status, 409);
+    assert.deepEqual(await read.json(), { error: "grant_replaced" });
+    const sync = await app.request(`/v1/grants/${anonGrant}/sync`, {
+      method: "POST",
+      headers: auth,
+    });
+    assert.equal(sync.status, 409);
+    assert.deepEqual(await sync.json(), { error: "grant_replaced" });
+
+    const listed = await app.request("/v1/grants?externalUserId=anon_7f3c", { headers: auth });
+    const { grants } = (await listed.json()) as { grants: Record<string, unknown>[] };
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0]?.status, "revoked");
+    assert.equal(grants[0]?.replaced, true, "the host can tell it apart from a revoke");
+    assert.equal("replacedBy" in (grants[0] ?? {}), false, "the new grant id is not shown");
+    assert.equal(JSON.stringify(grants).includes(googleGrant), false);
+  });
+
+  it("a reconnect by the same identity replaces its own earlier grant", async () => {
+    googleEmail = EMAIL;
+    const { app, vault, store } = buildApp();
+    const first = await connectAs(app, store, "user-uuid-1");
+    store.grants.get(first)!.status = "needs_reauth"; // the usual reason to reconnect
+    const second = await connectAs(app, store, "user-uuid-1");
+
+    assert.equal(store.grants.get(first)?.status, "revoked");
+    assert.equal(store.grants.get(first)?.replacedBy, second);
+    assert.equal(await vault.getCiphertext(first), undefined);
+    assert.equal(store.grants.get(second)?.status, "active");
+
+    const listed = await app.request("/v1/grants?externalUserId=user-uuid-1", { headers: auth });
+    const { grants } = (await listed.json()) as { grants: { id: string; status: string }[] };
+    assert.deepEqual(
+      grants.map((g) => [g.id, g.status]),
+      [
+        [first, "revoked"],
+        [second, "active"],
+      ],
+    );
+    assert.equal("replaced" in (grants[1] as object), false, "a live grant carries no flag");
+  });
+
+  it("still finishes Connect when retiring the old grant fails", async () => {
+    googleEmail = EMAIL;
+    const { app, store } = buildApp();
+    const first = await connectAs(app, store, "user-1");
+    store.retireEarlierGrants = async () => {
+      throw new Error("db hiccup");
+    };
+    const second = await connectAs(app, store, "user-2");
+    assert.equal(store.grants.get(second)?.status, "active");
+    assert.equal(store.grants.get(first)?.status, "active", "left as before; next Connect retries");
+  });
+
+  it("leaves other addresses and already revoked grants alone", async () => {
+    const { app, vault, store } = buildApp();
+    googleEmail = "other@gmail.com";
+    const other = await connectAs(app, store, "user-a");
+    googleEmail = EMAIL;
+    const b = await connectAs(app, store, "user-b");
+    const c = await connectAs(app, store, "user-c");
+    const bAfterC = { ...store.grants.get(b)! };
+    const d = await connectAs(app, store, "user-d");
+
+    assert.equal(store.grants.get(other)?.status, "active");
+    assert.ok(await vault.getCiphertext(other));
+    // d replaces c (the live one); b, already replaced by c, is not rewritten.
+    assert.equal(store.grants.get(c)?.replacedBy, d);
+    assert.deepEqual(store.grants.get(b), bAfterC);
+    assert.equal(store.grants.get(b)?.replacedBy, c);
+    const live = await store.findLiveGrantsByAddress("default", "gmail", EMAIL);
+    assert.deepEqual(live.map((g) => g.id), [d]);
   });
 });

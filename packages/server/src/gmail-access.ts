@@ -65,8 +65,20 @@ export async function openGrantAccessToken(input: {
   }
 }
 
-export async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<void> {
-  grant.status = "needs_reauth";
-  grant.updatedAt = new Date().toISOString();
-  await store.updateGrant(grant);
+/**
+ * Mark a grant `needs_reauth` after its token was refused. Conditional: a
+ * grant retired meanwhile (a later Connect replaced it while this request or
+ * sync was running) stays `revoked` with its `replacedBy`. Returns whether the
+ * status changed; `grant` is updated in place only then.
+ */
+export async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<boolean> {
+  const updatedAt = new Date().toISOString();
+  const next: Grant = { ...grant, status: "needs_reauth", updatedAt };
+  delete next.replacedBy;
+  const changed = await store.updateGrant(next);
+  if (changed) {
+    grant.status = "needs_reauth";
+    grant.updatedAt = updatedAt;
+  }
+  return changed;
 }

@@ -75,10 +75,29 @@ export interface GrantStore {
   consumeOAuthState(state: string): Promise<StoredSession | undefined>;
   saveSession(session: StoredSession): Promise<void>;
   putGrant(grant: Grant): Promise<void>;
-  updateGrant(grant: Grant): Promise<void>;
+  /**
+   * Write a grant's `status` and `updatedAt`. Never touches a `revoked` grant
+   * (a retired grant stays retired, with its `replacedBy`): returns false when
+   * the grant is missing, belongs to another tenant, or is already revoked.
+   */
+  updateGrant(grant: Grant): Promise<boolean>;
   getGrant(id: string): Promise<Grant | undefined>;
   deleteGrant(id: string, tenantId: string): Promise<void>;
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
+  /**
+   * Grants of one tenant for one mailbox that still count as connected
+   * (`active` or `needs_reauth`), oldest first. Address match ignores case.
+   */
+  findLiveGrantsByAddress(tenantId: string, provider: Grant["provider"], email: string): Promise<Grant[]>;
+  /**
+   * Retire, in one conditional write, this tenant's grants for the same
+   * provider and address that are still live (`active` or `needs_reauth`) and
+   * were created before `grant` (by `createdAt`, then id as a tie-break): they
+   * become `revoked` with `replacedBy = grant.id`. A newer grant is never
+   * touched, so two Connects finishing at the same time cannot retire each
+   * other. Returns only the grants this call retired, oldest first.
+   */
+  retireEarlierGrants(grant: Grant, updatedAt: string): Promise<Grant[]>;
   /** Active Gmail grants matching mailbox email (Pub/Sub push lookup). */
   findActiveGrantsByEmail(email: string): Promise<Grant[]>;
   /** All active Gmail grants (watch renewal sweep). */
@@ -197,10 +216,17 @@ export class MemoryStore implements GrantStore {
     this.grants.set(grant.id, grant);
   }
 
-  async updateGrant(grant: Grant): Promise<void> {
+  async updateGrant(grant: Grant): Promise<boolean> {
     const existing = this.grants.get(grant.id);
-    if (!existing || existing.tenantId !== grant.tenantId) return;
-    this.grants.set(grant.id, grant);
+    if (!existing || existing.tenantId !== grant.tenantId) return false;
+    if (existing.status === "revoked") return false;
+    // Only status and timestamps move here; `replacedBy` is set by
+    // `retireEarlierGrants` alone.
+    const next: Grant = { ...grant };
+    delete next.replacedBy;
+    if (existing.replacedBy) next.replacedBy = existing.replacedBy;
+    this.grants.set(grant.id, next);
+    return true;
   }
 
   async getGrant(id: string): Promise<Grant | undefined> {
@@ -217,6 +243,36 @@ export class MemoryStore implements GrantStore {
     return [...this.grants.values()].filter(
       (grant) => grant.tenantId === tenantId && grant.externalUserId === externalUserId,
     );
+  }
+
+  async findLiveGrantsByAddress(
+    tenantId: string,
+    provider: Grant["provider"],
+    email: string,
+  ): Promise<Grant[]> {
+    const needle = email.trim().toLowerCase();
+    return [...this.grants.values()]
+      .filter(
+        (grant) =>
+          grant.tenantId === tenantId &&
+          grant.provider === provider &&
+          (grant.status === "active" || grant.status === "needs_reauth") &&
+          grant.email.toLowerCase() === needle,
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  async retireEarlierGrants(grant: Grant, updatedAt: string): Promise<Grant[]> {
+    const self = this.grants.get(grant.id);
+    if (!self || self.tenantId !== grant.tenantId) return [];
+    const retired: Grant[] = [];
+    for (const old of await this.findLiveGrantsByAddress(grant.tenantId, grant.provider, grant.email)) {
+      if (old.id === self.id || !createdBefore(old, self)) continue;
+      const next: Grant = { ...old, status: "revoked", replacedBy: self.id, updatedAt };
+      this.grants.set(old.id, next);
+      retired.push(next);
+    }
+    return retired.sort(compareCreated);
   }
 
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
@@ -274,6 +330,9 @@ export class MemoryStore implements GrantStore {
 
   async upsertMessages(messages: Message[]): Promise<void> {
     for (const message of messages) {
+      // Only an active grant caches mail: a sync still running when its grant
+      // was retired must not refill the cache that retirement emptied.
+      if (this.grants.get(message.grantId)?.status !== "active") continue;
       const existing = this.messages.get(message.grantId) ?? [];
       const index = existing.findIndex(
         (row) => row.providerMessageId === message.providerMessageId,
@@ -371,4 +430,14 @@ export class MemoryStore implements GrantStore {
     job.updatedAt = now;
     return job;
   }
+}
+
+/** Oldest first: `createdAt`, then id (the tie-break `retireEarlierGrants` uses). */
+export function compareCreated(a: Grant, b: Grant): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function createdBefore(a: Grant, b: Grant): boolean {
+  return compareCreated(a, b) < 0;
 }
