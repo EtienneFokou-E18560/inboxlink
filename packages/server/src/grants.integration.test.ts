@@ -732,7 +732,7 @@ describe("one live grant per mailbox (#371)", () => {
     googleEmail = EMAIL;
     const { app, store } = buildApp();
     const first = await connectAs(app, store, "user-1");
-    store.findLiveGrantsByAddress = async () => {
+    store.retireEarlierGrants = async () => {
       throw new Error("db hiccup");
     };
     const second = await connectAs(app, store, "user-2");

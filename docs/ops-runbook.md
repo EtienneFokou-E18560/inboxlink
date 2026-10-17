@@ -75,7 +75,9 @@ When Gmail refresh fails or list returns 401/403, the grant is marked `needs_rea
 
 ## `grant_replaced` (one live grant per mailbox)
 
-A finished Connect retires the tenant's earlier `active` / `needs_reauth` grants for the same provider and address (case ignored), whichever `externalUserId` owned them: token and cached messages deleted, status `revoked`, `replaced_by` set to the new grant id. Reads and syncs on the old id answer 409 `grant_replaced`; `GET /v1/grants` shows it `revoked` with `replaced: true`. Log event: `grant_replaced` (`grantId`, `replacedBy`, `tenantId`, `sameUser`; never the address). The old refresh token is not revoked at Google, because that would also end the new one.
+A finished Connect retires the tenant's `active` / `needs_reauth` grants for the same provider and address (case ignored) that were created before it (ties broken on grant id), whichever `externalUserId` owned them: token and cached messages deleted, status `revoked`, `replaced_by` set to the new grant id. Reads and syncs on the old id answer 409 `grant_replaced`; `GET /v1/grants` shows it `revoked` with `replaced: true`. Log event: `grant_replaced` (`grantId`, `replacedBy`, `tenantId`, `sameUser`; never the address). The old refresh token is not revoked at Google, because that would also end the new one.
+
+Races it is safe against: the retire step is one conditional `UPDATE ... RETURNING`, and only the grants it returned lose their token and cache, so a slow Connect finishing after a newer one never retires the newer grant. Status writes never touch a `revoked` row (a 401 in a sync that was running during the retirement does not turn it back into `needs_reauth` or clear `replaced_by`), and the message upsert only writes for `active` grants.
 
 Grants created before this rule are **not** cleaned up by a deploy. Find them with the read-only report:
 

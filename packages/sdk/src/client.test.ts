@@ -175,6 +175,23 @@ describe("InboxLink SDK", () => {
     assert.equal(url.searchParams.get("includeSpamTrash"), "true");
   });
 
+  it("grants.list types the replaced flag on a retired grant", async () => {
+    const body = {
+      grants: [
+        { id: "grant_old", provider: "gmail", email: "a@gmail.com", status: "revoked", scopes: [], createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-02T00:00:00.000Z", replaced: true },
+        { id: "grant_new", provider: "gmail", email: "a@gmail.com", status: "active", scopes: [], createdAt: "2026-10-02T00:00:00.000Z", updatedAt: "2026-10-02T00:00:00.000Z" },
+      ],
+    };
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      fetch: async () =>
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+    const { grants } = await il.grants.list("user-1");
+    const replaced: Array<boolean | undefined> = grants.map((g) => g.replaced);
+    assert.deepEqual(replaced, [true, undefined]);
+  });
+
   it("gets a message by id with attachment metadata wrapper", async () => {
     const calls: string[] = [];
     const fetchMock: typeof fetch = async (input) => {

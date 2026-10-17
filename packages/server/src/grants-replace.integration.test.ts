@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { createServer, type Server } from "node:http";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
-import type { Grant } from "@inboxlink/core";
+import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import type { Grant, Message, TokenVault } from "@inboxlink/core";
+import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
+import { markNeedsReauth, type CiphertextVault } from "./gmail-access.js";
 import { replaceEarlierGrants } from "./grants-replace.js";
+import { MemoryStore, type GrantStore } from "./store.js";
+import { syncGmailGrant } from "./sync/gmail-sync.js";
+import { MemoryTokenVault } from "./vault/memory-vault.js";
 
 class PgliteExecutor implements SqlExecutor {
   constructor(private readonly db: PGlite) {}
@@ -109,3 +116,218 @@ describe("shared-address report and replacement on Postgres (#371)", () => {
     assert.equal((await store.getGrant("grant_5"))?.replacedBy, undefined);
   });
 });
+
+type Backend = {
+  name: string;
+  make(): Promise<{ store: GrantStore; vault: TokenVault & CiphertextVault }>;
+};
+
+const BACKENDS: Backend[] = [
+  {
+    name: "memory",
+    async make() {
+      return { store: new MemoryStore(), vault: new MemoryTokenVault("test-master-key-at-least-16") };
+    },
+  },
+  {
+    name: "postgres",
+    async make() {
+      const db = new PgDatabase(new PgliteExecutor(new PGlite()));
+      const store = new PostgresStore(db);
+      await store.ready();
+      return { store, vault: new PostgresTokenVault(db, "test-master-key-at-least-16") };
+    },
+  },
+];
+
+const ADDRESS = "owner@gmail.com";
+
+function cached(grantId: string, n: number): Message {
+  const at = "2026-10-01T12:00:00.000Z";
+  return {
+    id: `msg_${grantId}_${n}`,
+    grantId,
+    providerMessageId: `p${n}`,
+    subject: `Subject ${n}`,
+    snippet: "",
+    from: [{ email: "recruiter@example.com" }],
+    to: [{ email: ADDRESS }],
+    sentAt: at,
+    receivedAt: at,
+    folderIds: ["INBOX"],
+    hasAttachments: false,
+  };
+}
+
+async function liveGrant(
+  store: GrantStore,
+  vault: TokenVault,
+  id: string,
+  externalUserId: string,
+): Promise<Grant> {
+  const g = grant(id, externalUserId, "active", ADDRESS);
+  await store.putGrant(g);
+  await vault.seal(`1//refresh-${id}`, { grantId: id, tenantId: "default" });
+  return g;
+}
+
+for (const backend of BACKENDS) {
+  describe(`concurrent Connects for one address (${backend.name})`, () => {
+    it("a late retire step of the older Connect does not retire the newer grant", async () => {
+      const { store, vault } = await backend.make();
+      // A's callback saved grant A and is still sealing; B's callback saves B
+      // and retires A; then A's retire step runs.
+      const a = await liveGrant(store, vault, "grant_1", "anon_1");
+      const b = await liveGrant(store, vault, "grant_2", "google:1");
+      await store.upsertMessages([cached(b.id, 1)]);
+
+      assert.deepEqual(await replaceEarlierGrants({ store, vault, grant: b }), [a.id]);
+      assert.deepEqual(await replaceEarlierGrants({ store, vault, grant: a }), [], "A retires nothing");
+
+      const live = await store.findLiveGrantsByAddress("default", "gmail", ADDRESS);
+      assert.deepEqual(live.map((g) => g.id), [b.id], "exactly one live grant: B");
+      assert.equal((await store.getGrant(b.id))?.replacedBy, undefined);
+      assert.ok(await vault.getCiphertext(b.id), "B keeps its token");
+      assert.deepEqual(await store.listMessageIds(b.id), ["p1"], "B keeps its cache");
+      assert.equal((await store.getGrant(a.id))?.replacedBy, b.id);
+      assert.equal(await vault.getCiphertext(a.id), undefined);
+    });
+
+    it("breaks a createdAt tie on id, in both orders", async () => {
+      const { store, vault } = await backend.make();
+      const at = "2026-10-05T10:00:00.000Z";
+      const low: Grant = { ...grant("grant_1", "u1", "active", ADDRESS), id: "grant_aaa", createdAt: at };
+      const high: Grant = { ...grant("grant_1", "u2", "active", ADDRESS), id: "grant_zzz", createdAt: at };
+      for (const g of [low, high]) {
+        await store.putGrant(g);
+        await vault.seal("1//r", { grantId: g.id, tenantId: "default" });
+      }
+      assert.deepEqual(await replaceEarlierGrants({ store, vault, grant: low }), []);
+      assert.deepEqual(await replaceEarlierGrants({ store, vault, grant: high }), [low.id]);
+      const live = await store.findLiveGrantsByAddress("default", "gmail", ADDRESS);
+      assert.deepEqual(live.map((g) => g.id), [high.id]);
+    });
+  });
+
+  describe(`a sync running while its grant is retired (${backend.name})`, () => {
+    let server: Server;
+    let base = "";
+    /** Runs while Gmail is answering the sync's message list, i.e. mid-sync. */
+    let duringList: () => Promise<void> = async () => {};
+    let listStatus = 200;
+
+    before(async () => {
+      server = createServer(async (req, res) => {
+        const url = req.url ?? "/";
+        req.resume();
+        const json = (status: number, body: unknown) => {
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(body));
+        };
+        if (url.startsWith("/token")) return json(200, { access_token: "ya29.x", expires_in: 3600 });
+        if (url.startsWith("/gmail/v1/users/me/profile")) {
+          return json(200, { emailAddress: ADDRESS, historyId: "100" });
+        }
+        if (url.startsWith("/gmail/v1/users/me/messages/")) {
+          const id = decodeURIComponent(url.split("/messages/")[1]!.split("?")[0]!);
+          return json(200, {
+            id,
+            threadId: id,
+            labelIds: ["INBOX"],
+            snippet: "late",
+            internalDate: "1710000000000",
+            payload: {
+              mimeType: "text/plain",
+              headers: [
+                { name: "From", value: "sender@example.com" },
+                { name: "Subject", value: "late" },
+              ],
+              body: { data: Buffer.from("late").toString("base64url") },
+            },
+          });
+        }
+        if (url.startsWith("/gmail/v1/users/me/messages")) {
+          await duringList();
+          if (listStatus !== 200) {
+            return json(listStatus, { error: { code: listStatus, message: "unauthorized" } });
+          }
+          return json(200, { messages: [{ id: "late-1" }, { id: "late-2" }] });
+        }
+        res.writeHead(404);
+        res.end();
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    });
+
+    after(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    beforeEach(() => {
+      resetAccessTokenCacheForTests();
+      duringList = async () => {};
+      listStatus = 200;
+    });
+
+    function gmail() {
+      return new GmailAdapter({
+        clientId: "test-client-id.apps.googleusercontent.com",
+        clientSecret: "test-client-secret",
+        redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
+        tokenUrl: `${base}/token`,
+        gmailApiBaseUrl: `${base}/gmail/v1`,
+      });
+    }
+
+    async function setup() {
+      const { store, vault } = await backend.make();
+      await liveGrant(store, vault, "grant_1", "anon_1");
+      // The sync holds the grant as it was loaded, before the retirement.
+      const loaded = (await store.getGrant("grant_1"))!;
+      duringList = async () => {
+        const b = await liveGrant(store, vault, "grant_2", "google:1");
+        await replaceEarlierGrants({ store, vault, grant: b });
+      };
+      return { store, vault, loaded };
+    }
+
+    it("a 401 after retirement keeps the grant revoked with replacedBy", async () => {
+      const { store, vault, loaded } = await setup();
+      listStatus = 401;
+      // The token is fetched before the list call, so the sync gets that far.
+      const result = await syncGmailGrant({ store, vault, gmail: gmail(), grant: loaded, forceBootstrap: true });
+      assert.equal(result.error, "needs_reauth", "Gmail refused the token mid-sync");
+
+      const old = await store.getGrant("grant_1");
+      assert.equal(old?.status, "revoked", "not moved back to needs_reauth");
+      assert.equal(old?.replacedBy, "grant_2", "replacedBy not cleared");
+      const live = await store.findLiveGrantsByAddress("default", "gmail", ADDRESS);
+      assert.deepEqual(live.map((g) => g.id), ["grant_2"]);
+      assert.equal(await markNeedsReauth(store, loaded), false, "direct call is a no-op too");
+      assert.equal((await store.getGrant("grant_1"))?.status, "revoked");
+    });
+
+    it("messages fetched after retirement are not cached on the retired grant", async () => {
+      const { store, vault, loaded } = await setup();
+      const result = await syncGmailGrant({ store, vault, gmail: gmail(), grant: loaded, forceBootstrap: true });
+      assert.equal(result.status, "ok");
+      assert.deepEqual(await store.listMessageIds("grant_1"), [], "no rows on a revoked grant");
+      assert.equal((await store.getGrant("grant_1"))?.status, "revoked");
+
+      // The live grant still caches normally.
+      await store.upsertMessages([cached("grant_2", 1)]);
+      assert.deepEqual(await store.listMessageIds("grant_2"), ["p1"]);
+    });
+
+    it("needs_reauth still applies to a grant that was not retired", async () => {
+      const { store, vault } = await backend.make();
+      await liveGrant(store, vault, "grant_1", "anon_1");
+      const loaded = (await store.getGrant("grant_1"))!;
+      listStatus = 401;
+      const result = await syncGmailGrant({ store, vault, gmail: gmail(), grant: loaded, forceBootstrap: true });
+      assert.equal(result.status, "needs_reauth");
+      assert.equal((await store.getGrant("grant_1"))?.status, "needs_reauth");
+    });
+  });
+}
