@@ -69,6 +69,7 @@ export const grants = pgTable(
     scopes: jsonb("scopes").$type<string[]>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    replacedBy: text("replaced_by"),
   },
   (t) => [
     index("grants_tenant_user_idx").on(t.tenantId, t.externalUserId),
@@ -205,6 +206,8 @@ CREATE TABLE IF NOT EXISTS grants (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS grants_tenant_user_idx ON grants(tenant_id, external_user_id);
+ALTER TABLE grants ADD COLUMN IF NOT EXISTS replaced_by TEXT;
+CREATE INDEX IF NOT EXISTS grants_tenant_address_idx ON grants (tenant_id, provider, lower(email));
 
 CREATE TABLE IF NOT EXISTS token_vault (
   grant_id TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE,

@@ -153,6 +153,22 @@ Default list reads the **synced store**. Pass `source: "live"` for live Gmail + 
 
 Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.revoke(grantId)`.
 
+### One mailbox, one live grant (identities)
+
+InboxLink keys a grant to **your** `externalUserId`, but it treats the mailbox itself (tenant + provider + address, case ignored) as the thing that can only be connected once. When Connect finishes for an address this tenant already has a live grant for (`active` or `needs_reauth`), the **new grant wins**:
+
+- The new grant belongs to the `externalUserId` that just connected.
+- Each earlier grant for that address (created before the new one) is retired inside InboxLink: its sealed token and cached messages are deleted and it becomes `revoked`. It still appears in `grants.list` for its old user with `"replaced": true`, so you can tell it apart from a grant you never had or one that was simply revoked (the new grant's id is not shown).
+- Reads and syncs on a retired grant answer **409 `{ "error": "grant_replaced" }`** (other inactive grants still answer `grant_inactive`). Show "connected under another sign-in" or ask the user to reconnect; do not retry, and do not poll it.
+- The old token is **not** revoked at Google: Google's revoke ends the whole authorization for that account, which would also kill the token that was just issued.
+- Two Connects for the same address finishing at the same time (two tabs or devices) cannot retire each other: a Connect only retires grants older than its own, so the newest grant is the one that stays live. A sync that was already running on the retired grant cannot bring it back: a token refusal during that sync leaves it `revoked` (with `replaced: true`), and messages it fetches are not cached.
+
+This covers the case where one person reaches your app under several identities: for example an anonymous id before sign-up (`anon_…`), a Google sign-in (`google:…`) and an email/password account (a uuid). InboxLink does not know these are the same person and does not link them; your app decides which identity a mailbox belongs to by which one runs Connect. If you merge identities on your side, move the `grantId` to the surviving user rather than connecting again, or connect again from the surviving user and let the rule above retire the old grant.
+
+A reconnect by the same user (the usual fix for `needs_reauth`) follows the same rule: the old grant is retired, so store the new `grantId` and drop the old one.
+
+To see whether a database already has mailboxes connected more than once (grants created before this rule), run `scripts/shared-address-report.sql` (see the ops runbook). It prints counts and grant ids, never addresses.
+
 ---
 
 ## Host webhooks (signed events)
@@ -234,6 +250,7 @@ OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; th
 - [ ] Exchange `public_token` server-side, once  
 - [ ] Handle missing/invalid token on the redirect route  
 - [ ] Handle `needs_reauth` / `grant_inactive` from messages by sending the user through Connect again  
+- [ ] Handle `grant_replaced`: the mailbox was connected again (maybe by another of your users); stop polling that `grantId` and offer to reconnect  
 - [ ] Optional: receive webhooks — set `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET` on InboxLink; verify with `webhooks.verify`  
 - [ ] Never ship `INBOXLINK_API_SECRET` / `apiSecret` to browsers  
 - [ ] Do **not** set `GOOGLE_*`, Postgres, or vault keys in the host app  
