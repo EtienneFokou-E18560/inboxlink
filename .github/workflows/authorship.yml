@@ -1,0 +1,89 @@
+name: Authorship
+
+# Only the maintainer may appear as a commit author or co-author. Every commit
+# in the pull request must be authored and committed by one of the addresses
+# below (GitHub's own noreply@github.com is accepted as committer only, for
+# merges and web edits GitHub makes), and no commit message may carry a
+# co-author trailer or an agent "Generated with/by" line.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+env:
+  # The one allow-list. Space separated, compared case-insensitively.
+  ALLOWED_EMAILS: >-
+    fokou.etienne@gmail.com
+    etiennefk@gmail.com
+    EtienneFokou-E18560@users.noreply.github.com
+    49994386+EtienneFokou-E18560@users.noreply.github.com
+  # Accepted as committer only (merges and web edits made by GitHub).
+  ALLOWED_COMMITTER_ONLY: noreply@github.com
+
+jobs:
+  check:
+    name: Commit authors and trailers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check every commit in the pull request
+        env:
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          allowed=" $(echo "$ALLOWED_EMAILS" | tr '[:upper:]' '[:lower:]' | tr -s ' \n' ' ') "
+          committer_only=" $(echo "$ALLOWED_COMMITTER_ONLY" | tr '[:upper:]' '[:lower:]') "
+          failed=0
+          commits=$(git log --format=%H "origin/${BASE}..HEAD")
+          if [ -z "$commits" ]; then
+            echo "No commits to check."
+            exit 0
+          fi
+          for sha in $commits; do
+            short=${sha:0:7}
+            author=$(git log -1 --format=%ae "$sha" | tr '[:upper:]' '[:lower:]')
+            committer=$(git log -1 --format=%ce "$sha" | tr '[:upper:]' '[:lower:]')
+            msg=$(git log -1 --format=%B "$sha")
+            if [[ "$allowed" != *" $author "* ]]; then
+              echo "::error::$short: author <$author> is not the maintainer."
+              failed=1
+            fi
+            if [[ "$allowed" != *" $committer "* && "$committer_only" != *" $committer "* ]]; then
+              echo "::error::$short: committer <$committer> is not the maintainer."
+              failed=1
+            fi
+            if printf '%s\n' "$msg" | grep -qiE '^[[:space:]]*co-authored-by:'; then
+              echo "::error::$short: commit message has a Co-authored-by trailer."
+              failed=1
+            fi
+            if printf '%s\n' "$msg" | grep -qiE 'generated (with|by) \[?claude code'; then
+              echo "::error::$short: commit message has a 'Generated with/by Claude Code' line."
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            cat <<'HELP'
+
+          Only the maintainer may author commits here (see CONTRIBUTING.md, "Authorship").
+          To fix the commits on this branch:
+            git config user.name  "Etienne Fokou"
+            git config user.email fokou.etienne@gmail.com
+            # last commit only:
+            git commit --amend --reset-author --no-edit
+            # every commit in the branch (also lets you delete trailer lines in each message):
+            git rebase -i origin/main --exec 'git commit --amend --reset-author --no-edit'
+          Remove any Co-authored-by: trailer and any "Generated with/by Claude Code" line from
+          the messages (git commit --amend, or "reword" in the rebase), then push with
+          git push --force-with-lease to this pull request branch.
+          HELP
+            exit 1
+          fi
+          echo "All commits are authored by the maintainer, with no co-author trailers."

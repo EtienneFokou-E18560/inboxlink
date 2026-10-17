@@ -83,6 +83,13 @@ Microsoft Graph, IMAP, and career-workspace integration are **deferred**. npm re
 - Do not put Production URLs with live tokens, grant IDs tied to real mailboxes, or secret values in the PR body.
 - Document stub vs production behavior in the PR body when touching OAuth or vault code.
 
+## Authorship
+
+- Every commit is authored and committed by the maintainer (Etienne Fokou, `fokou.etienne@gmail.com`). The [Authorship check](.github/workflows/authorship.yml) fails a PR otherwise; its allow-list is at the top of that file.
+- No `Co-authored-by:` trailers and no "Generated with/by Claude Code" lines in commit messages.
+- Dependency updates are done by hand from the weekly [dependency report](.github/workflows/dependency-report.yml); there are no Dependabot version-update PRs.
+- Cursor, Claude Code and other agents must commit with the maintainer's identity (for example `git -c user.name="Etienne Fokou" -c user.email=fokou.etienne@gmail.com commit ...`). The project [`.claude/settings.json`](.claude/settings.json) turns Claude Code attribution off.
+
 ## Suggested merge hierarchy (optional slices)
 
 Core connect + messages (and Gmail-complete work) land first. Host-integration docs/examples ([docs/host-integration.md](docs/host-integration.md), Slice J) are **optional and last** — merge only when you want a host product path. They must not introduce a dependency on career-workspace or any other host app.
