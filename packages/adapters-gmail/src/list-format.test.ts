@@ -8,6 +8,16 @@ type Hit = { method: string; url: string };
 const ACCESS = "ya29.adapter-test-token";
 const GRANT = "grant_adapter_list";
 
+/** Bulk-mail headers each fake message carries: m1 all three, m2 only Precedence, m3 none. */
+const BULK_HEADERS: Record<string, { name: string; value: string }[]> = {
+  m1: [
+    { name: "List-Unsubscribe", value: "<https://example.com/u/1>, <mailto:u@example.com>" },
+    { name: "Precedence", value: "bulk" },
+    { name: "Auto-Submitted", value: "auto-generated" },
+  ],
+  m2: [{ name: "Precedence", value: "list" }],
+};
+
 function metadataResource(id: string) {
   return {
     id,
@@ -23,7 +33,20 @@ function metadataResource(id: string) {
         { name: "Cc", value: "cc@example.com" },
         { name: "Subject", value: `Subject ${id}` },
         { name: "Date", value: "Tue, 10 Mar 2026 12:00:00 +0000" },
+        ...(BULK_HEADERS[id] ?? []),
       ],
+    },
+  };
+}
+
+/** Like Gmail: `format=metadata` returns only the headers named in `metadataHeaders`. */
+function onlyRequestedHeaders(resource: ReturnType<typeof metadataResource>, requested: string[]) {
+  const wanted = new Set(requested.map((name) => name.toLowerCase()));
+  return {
+    ...resource,
+    payload: {
+      ...resource.payload,
+      headers: resource.payload.headers.filter((header) => wanted.has(header.name.toLowerCase())),
     },
   };
 }
@@ -71,9 +94,16 @@ describe("GmailAdapter list/get formats", () => {
       if (url.startsWith("/gmail/v1/users/me/messages/")) {
         const path = url.split("?")[0] ?? "";
         const id = decodeURIComponent(path.split("/messages/")[1] ?? "");
-        const format = new URL(url, "http://gmail.local").searchParams.get("format");
+        const params = new URL(url, "http://gmail.local").searchParams;
+        const format = params.get("format");
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(format === "full" ? fullResource(id) : metadataResource(id)));
+        res.end(
+          JSON.stringify(
+            format === "full"
+              ? fullResource(id)
+              : onlyRequestedHeaders(metadataResource(id), params.getAll("metadataHeaders")),
+          ),
+        );
         return;
       }
 
@@ -129,6 +159,8 @@ describe("GmailAdapter list/get formats", () => {
     assert.equal(page.messages[0]?.snippet, "Snippet m1");
     assert.equal(page.messages[0]?.body, undefined);
     assert.equal(page.messages[0]?.attachments, undefined);
+    // Bulk headers are opt-in: not requested, not returned.
+    assert.equal(page.messages[0]?.headers, undefined);
 
     const listHit = hits.find((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?"));
     assert.ok(listHit);
@@ -159,6 +191,45 @@ describe("GmailAdapter list/get formats", () => {
     assert.equal(hits.length, 4);
   });
 
+  it("with bulkHeaders, asks for the bulk headers in the same metadata get and returns raw values", async () => {
+    hits = [];
+    const page = await adapter.listMessages({
+      accessToken: ACCESS,
+      grantId: GRANT,
+      maxResults: 3,
+      bulkHeaders: true,
+    });
+
+    const byId = new Map(page.messages.map((message) => [message.providerMessageId, message]));
+    assert.deepEqual(byId.get("m1")?.headers, {
+      listUnsubscribe: "<https://example.com/u/1>, <mailto:u@example.com>",
+      precedence: "bulk",
+      autoSubmitted: "auto-generated",
+    });
+    assert.deepEqual(byId.get("m2")?.headers, { precedence: "list" });
+    assert.equal(byId.get("m3")?.headers, undefined);
+    assert.equal("headers" in (byId.get("m3") ?? {}), false);
+
+    const detailHits = hits.filter((hit) => hit.url.includes("/messages/m"));
+    assert.equal(detailHits.length, 3);
+    for (const hit of detailHits) {
+      const detailUrl = new URL(hit.url, "http://gmail.local");
+      assert.equal(detailUrl.searchParams.get("format"), "metadata");
+      assert.deepEqual(detailUrl.searchParams.getAll("metadataHeaders").sort(), [
+        "Auto-Submitted",
+        "Cc",
+        "Date",
+        "From",
+        "List-Unsubscribe",
+        "Precedence",
+        "Subject",
+        "To",
+      ]);
+    }
+    // Still one list + one metadata get per message: no extra call, no body read.
+    assert.equal(hits.length, 4);
+  });
+
   it("gets one message with format=full including body and attachments", async () => {
     hits = [];
     const message = await adapter.getMessage({
@@ -178,5 +249,7 @@ describe("GmailAdapter list/get formats", () => {
     const getUrl = new URL(hits[0]!.url, "http://gmail.local");
     assert.equal(getUrl.searchParams.get("format"), "full");
     assert.equal(getUrl.searchParams.has("metadataHeaders"), false);
+    // Single-message get keeps its shape: no `headers`, even though format=full carries them.
+    assert.equal(message.headers, undefined);
   });
 });

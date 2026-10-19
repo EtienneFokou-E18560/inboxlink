@@ -1,6 +1,6 @@
 {
   "name": "@inboxlink/sdk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Host-app client for InboxLink HTTP API",
   "license": "MIT",
   "type": "module",
@@ -21,9 +21,9 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "typecheck": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json",
     "lint": "tsc -b tsconfig.json",
-    "test": "node --import tsx --test src/client.test.ts",
+    "test": "node --import tsx --test src/client.test.ts src/message-type.test.ts",
     "prepack": "pnpm run build"
   },
   "dependencies": {

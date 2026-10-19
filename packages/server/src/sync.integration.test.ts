@@ -32,6 +32,7 @@ function messageResource(id: string, subject: string) {
         { name: "To", value: "me@example.com" },
         { name: "Subject", value: subject },
         { name: "Date", value: "Tue, 10 Mar 2026 12:00:00 +0000" },
+        { name: "Precedence", value: "bulk" },
       ],
       body: { data: plain },
     },
@@ -245,6 +246,13 @@ describe("Gmail history sync watermark", () => {
     assert.equal(cursor?.value, "10001");
     const cached = await store.listMessages(grant.id);
     assert.equal(cached.length, 2);
+    // The store keeps its shape: bulk headers are a live-list field only.
+    assert.ok(cached.every((message) => message.headers === undefined));
+    assert.ok(
+      hits
+        .filter((hit) => hit.url.startsWith("/gmail/v1/users/me/messages/"))
+        .every((hit) => !new URL(hit.url, "http://gmail.local").searchParams.getAll("metadataHeaders").includes("Precedence")),
+    );
     assert.ok(hits.some((hit) => hit.url.startsWith("/gmail/v1/users/me/profile")));
     assert.ok(hits.some((hit) => hit.url.startsWith("/gmail/v1/users/me/messages?")));
   });

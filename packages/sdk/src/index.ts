@@ -14,6 +14,7 @@ export type {
   GrantStatus,
   Message,
   MessageAttachment,
+  MessageHeaders,
   Provider,
 } from "@inboxlink/core";
 

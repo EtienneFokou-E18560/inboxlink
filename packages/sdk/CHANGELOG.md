@@ -1,7 +1,11 @@
 # `@inboxlink/sdk` changelog
 
-## Unreleased
+## 0.1.3
 
+Patch release, additive only: hosts on `0.1.2` keep working and simply ignore the new fields.
+
+- `Message.headers?: { listUnsubscribe?, precedence?, autoSubmitted? }` (new exported type `MessageHeaders`): on every message of `messages.list(grantId, { source: "live" })` the server returns the raw `List-Unsubscribe`, `Precedence` and `Auto-Submitted` values. A field is absent when the message has no such header, and `headers` is absent when it has none of the three. Read in the same Gmail `messages.get` (`format=metadata`) call the live list already makes per message: no new scope, no body read. Not filled on the store list (`source: "store"`, the default) or on `messages.get`.
+- `Message.labels` is documented as Gmail's `labelIds` exactly as Gmail returns them (`INBOX`, `UNREAD`, `CATEGORY_PROMOTIONS`, user labels by id), on live and store reads; `folderIds` is the folder-like subset (`INBOX`, `SENT`, `TRASH`, `SPAM`, ... and every `CATEGORY_*`). No behaviour change: both were already filled.
 - Servers that include the one-live-grant-per-mailbox rule answer **409 `grant_replaced`** on `messages.list`, `messages.get` and `grants.sync` for a grant that was retired because the same address was connected again (by the same or another `externalUserId`). Treat it like `grant_inactive`: stop polling and offer to reconnect. `grants.list` returns such a grant as `status: "revoked"` with an extra `replaced: true`. The id of the grant that replaced it is never returned. The error surfaces as the usual `InboxLinkApiError` with `status: 409` and `code: "grant_replaced"`.
 - `Grant` (as returned by `grants.list`) gains `replaced?: boolean`, typed for the flag above. Additive, no breaking change.
 

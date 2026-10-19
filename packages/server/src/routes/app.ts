@@ -831,6 +831,7 @@ export function createApp(opts: CreateAppOptions) {
         q: parsedFilters.filters.q,
         labelIds: parsedFilters.filters.labelIds,
         includeSpamTrash: parsedFilters.filters.includeSpamTrash,
+        bulkHeaders: true,
       });
       return c.json({
         messages: page.messages,

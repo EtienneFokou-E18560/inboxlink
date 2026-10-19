@@ -57,9 +57,13 @@ function gmailResource() {
   };
 }
 
-/** Gmail `format=metadata` — headers only, no MIME body parts. */
-function gmailMetadataResource() {
+/** Extra headers the fake message carries; `format=metadata` returns only those requested. */
+let extraHeaders: { name: string; value: string }[] = [];
+
+/** Gmail `format=metadata` — only the requested headers, no MIME body parts. */
+function gmailMetadataResource(requested: string[] = []) {
   const full = gmailResource();
+  const wanted = new Set(requested.map((name) => name.toLowerCase()));
   return {
     id: full.id,
     threadId: full.threadId,
@@ -68,7 +72,9 @@ function gmailMetadataResource() {
     internalDate: full.internalDate,
     payload: {
       mimeType: "multipart/mixed",
-      headers: full.payload.headers,
+      headers: [...full.payload.headers, ...extraHeaders].filter(
+        (header) => wanted.size === 0 || wanted.has(header.name.toLowerCase()),
+      ),
     },
   };
 }
@@ -118,9 +124,14 @@ before(async () => {
         res.end(JSON.stringify({ error: { code: 404 } }));
         return;
       }
-      const format = new URL(url, "http://gmail.local").searchParams.get("format") ?? "full";
+      const params = new URL(url, "http://gmail.local").searchParams;
+      const format = params.get("format") ?? "full";
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(format === "metadata" ? gmailMetadataResource() : gmailResource()));
+      res.end(
+        JSON.stringify(
+          format === "metadata" ? gmailMetadataResource(params.getAll("metadataHeaders")) : gmailResource(),
+        ),
+      );
       return;
     }
     if (url.startsWith("/gmail/v1/users/me/messages")) {
@@ -379,6 +390,59 @@ describe("Gmail message list", () => {
     const again = await app.request(`/v1/grants/${grant.id}/messages?source=live`);
     const firstPage = (await again.json()) as { nextCursor?: string };
     assert.equal(firstPage.nextCursor, "page-2");
+  });
+
+  it("returns bulk headers and Gmail labelIds on source=live, absent headers when there are none", async () => {
+    hits = [];
+    refreshStatus = 200;
+    listStatus = 200;
+    getStatus = 200;
+    const store = new MemoryStore();
+    const vault = new MemoryTokenVault(MASTER);
+    const grant = activeGrant("grant_live_headers");
+    await store.putGrant(grant);
+    await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
+    const app = appFor(store, vault);
+
+    extraHeaders = [
+      { name: "List-Unsubscribe", value: "<https://shop.example/u/1>, <mailto:unsub@shop.example>" },
+      { name: "Precedence", value: "bulk" },
+      { name: "Auto-Submitted", value: "auto-generated" },
+      { name: "X-Unrelated", value: "ignored" },
+    ];
+    try {
+      const withHeaders = await app.request(`/v1/grants/${grant.id}/messages?source=live`);
+      assert.equal(withHeaders.status, 200);
+      const body = (await withHeaders.json()) as { messages: Message[] };
+      const message = body.messages[0];
+      assert.ok(message);
+      assert.deepEqual(message.headers, {
+        listUnsubscribe: "<https://shop.example/u/1>, <mailto:unsub@shop.example>",
+        precedence: "bulk",
+        autoSubmitted: "auto-generated",
+      });
+      // `labels` is Gmail's labelIds unchanged; `folderIds` is the folder-like subset.
+      assert.deepEqual(message.labels, ["INBOX", "UNREAD", "CATEGORY_PERSONAL"]);
+      assert.deepEqual(message.folderIds, ["INBOX", "CATEGORY_PERSONAL"]);
+      assert.equal(message.body, undefined);
+
+      const fetched = hits.find((hit) => hit.url.includes("/messages/18c1abc"));
+      assert.ok(fetched);
+      const fetchedUrl = new URL(fetched.url, "http://gmail.local");
+      assert.equal(fetchedUrl.searchParams.get("format"), "metadata");
+      const requested = fetchedUrl.searchParams.getAll("metadataHeaders");
+      for (const name of ["List-Unsubscribe", "Precedence", "Auto-Submitted"]) {
+        assert.ok(requested.includes(name), name);
+      }
+
+      extraHeaders = [];
+      const without = await app.request(`/v1/grants/${grant.id}/messages?source=live`);
+      const plainBody = (await without.json()) as { messages: Message[] };
+      assert.ok(plainBody.messages[0]);
+      assert.equal("headers" in plainBody.messages[0], false);
+    } finally {
+      extraHeaders = [];
+    }
   });
 
   it("does not call Gmail for an inactive grant and marks a rejected refresh on live", async () => {

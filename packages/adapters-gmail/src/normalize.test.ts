@@ -82,3 +82,44 @@ describe("body charset", () => {
     assert.equal(m.body?.text, "Plain ASCII and ünïcode ✓");
   });
 });
+
+describe("bulk headers", () => {
+  const withHeaders = (extra: { name: string; value: string }[]) =>
+    resource({
+      payload: {
+        mimeType: "text/plain",
+        headers: [{ name: "From", value: "Shop <deals@shop.example>" }, ...extra],
+        body: { data: b64("Hello") },
+      },
+    });
+
+  it("keeps the raw values, matching header names case-insensitively", () => {
+    const m = normalizeGmailMessage(
+      withHeaders([
+        { name: "list-unsubscribe", value: " <https://shop.example/u?id=1> " },
+        { name: "PRECEDENCE", value: "Bulk" },
+        { name: "Auto-Submitted", value: "no" },
+      ]),
+      "g1",
+      { bulkHeaders: true },
+    )!;
+    assert.deepEqual(m.headers, {
+      listUnsubscribe: " <https://shop.example/u?id=1> ",
+      precedence: "Bulk",
+      autoSubmitted: "no",
+    });
+  });
+
+  it("is absent when the message has none of them, or only empty values", () => {
+    assert.equal(normalizeGmailMessage(withHeaders([]), "g1", { bulkHeaders: true })!.headers, undefined);
+    const blank = normalizeGmailMessage(withHeaders([{ name: "Precedence", value: "  " }]), "g1", {
+      bulkHeaders: true,
+    })!;
+    assert.equal("headers" in blank, false);
+  });
+
+  it("is not filled unless asked for", () => {
+    const m = normalizeGmailMessage(withHeaders([{ name: "Precedence", value: "bulk" }]), "g1")!;
+    assert.equal(m.headers, undefined);
+  });
+});
