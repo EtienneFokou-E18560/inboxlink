@@ -66,7 +66,7 @@ const il = new InboxLink({
 | Messages | `messages.list`, `messages.get`, `messages.iterate` | `/v1/grants/:id/messages…` |
 | Webhooks | `webhooks.verify` | local HMAC check for server-delivered events |
 
-- `messages.list` → **synced store** by default (`source: "store"`); response may include `syncedAt` / `historyId` from the last sync cursor. Pass `source: "live"` for live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`)
+- `messages.list` → **synced store** by default (`source: "store"`); response may include `syncedAt` / `historyId` from the last sync cursor. Pass `source: "live"` for live Gmail list via `format=metadata` (headers/snippet/labels; optional filters: `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash`). Live messages carry optional `headers: { listUnsubscribe?, precedence?, autoSubmitted? }` (raw values, absent when the message has none; since 0.1.3). `labels` is Gmail's `labelIds` unchanged; `folderIds` is its folder-like subset
 - `messages.get` → `{ message }` with `format=full`, including optional `body` and attachment metadata (`id`, `filename`, `mimeType`, `size`) — not bytes
 - `grants.sync` → enqueue durable sync job (`202` + `jobId`); poll `grants.getSyncJob` or wait for `sync.completed`
 

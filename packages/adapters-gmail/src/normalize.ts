@@ -1,4 +1,4 @@
-import type { EmailAddress, Message, MessageAttachment } from "@inboxlink/core";
+import type { EmailAddress, Message, MessageAttachment, MessageHeaders } from "@inboxlink/core";
 import { charsetOf, decodeHtmlEntities, decodeWithCharset } from "./text.js";
 
 export type GmailMessageResource = {
@@ -32,8 +32,20 @@ const FOLDER_LABELS = new Set([
   "CHAT",
 ]);
 
+export type NormalizeGmailOptions = {
+  /**
+   * Fill `message.headers` from `List-Unsubscribe`, `Precedence` and `Auto-Submitted`.
+   * Only the live list asks for these headers (see `BULK_METADATA_HEADERS`), so only it sets this.
+   */
+  bulkHeaders?: boolean;
+};
+
 /** Map a Gmail users.messages resource onto the InboxLink message shape. */
-export function normalizeGmailMessage(raw: GmailMessageResource, grantId: string): Message | undefined {
+export function normalizeGmailMessage(
+  raw: GmailMessageResource,
+  grantId: string,
+  options: NormalizeGmailOptions = {},
+): Message | undefined {
   if (!raw.id) return undefined;
   const headers = headerMap(raw.payload?.headers);
   const labels = raw.labelIds ?? [];
@@ -59,6 +71,10 @@ export function normalizeGmailMessage(raw: GmailMessageResource, grantId: string
   const cc = parseAddressList(headers.get("cc"));
   if (cc.length) message.cc = cc;
   if (attachments.length) message.attachments = attachments;
+  if (options.bulkHeaders) {
+    const bulk = bulkHeaders(headers);
+    if (bulk) message.headers = bulk;
+  }
   if (body.text || body.html) {
     message.body = {};
     if (body.text) message.body.text = body.text;
@@ -87,6 +103,18 @@ function walkAttachments(part: GmailPart | undefined, out: MessageAttachment[]):
     });
   }
   for (const child of part.parts ?? []) walkAttachments(child, out);
+}
+
+/** Raw values of the bulk-mail headers; undefined when the message has none of them. */
+function bulkHeaders(headers: Map<string, string>): MessageHeaders | undefined {
+  const out: MessageHeaders = {};
+  const listUnsubscribe = headers.get("list-unsubscribe");
+  const precedence = headers.get("precedence");
+  const autoSubmitted = headers.get("auto-submitted");
+  if (listUnsubscribe?.trim()) out.listUnsubscribe = listUnsubscribe;
+  if (precedence?.trim()) out.precedence = precedence;
+  if (autoSubmitted?.trim()) out.autoSubmitted = autoSubmitted;
+  return Object.keys(out).length ? out : undefined;
 }
 
 function headerMap(headers: GmailPart["headers"]): Map<string, string> {

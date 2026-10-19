@@ -17,7 +17,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Durable **Postgres sync_jobs** queue (202 + status API; Redis unused)
 
-`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.1.2`** and **`@inboxlink/core@0.1.2`** are published on npm (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.1.3`** and **`@inboxlink/core@0.1.3`** are published on npm (`npm i @inboxlink/sdk`).
 
 **IMAP (draft / parked):** `POST /v1/connect/:linkToken/imap` seals password/app-password credentials; list is **INBOX** via [imapflow](https://github.com/postalsys/imapflow) (**MIT**). CI uses a mock transport. Limitations: password/app-password only (no XOAUTH2), INBOX only, best-effort MIME, no IDLE/UID sync, Connect UI is Gmail-first (IMAP is API-only until unparked). Do **not** fork EmailEngine or RustMailer (commercial licenses).
 
@@ -57,7 +57,7 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 | Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL + PKCE, token exchange/refresh, list + normalize |
 | Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
 | Connect UI | `@inboxlink/connect-ui` | Hosted Connect + error pages (CSP + security headers) |
-| SDK | `@inboxlink/sdk` **0.1.2** (npm) | Host HTTP client (Gmail list/get/sync) |
+| SDK | `@inboxlink/sdk` **0.1.3** (npm) | Host HTTP client (Gmail list/get/sync) |
 | Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
 **Standing rules:** no Production secrets in git; MIT/Apache-compatible only; no career-workspace imports, shared DB, or shared types.
@@ -206,7 +206,7 @@ Get one message with attachment metadata:
 curl -sS "http://localhost:8787/v1/grants/GRANT_ID/messages/msg_PROVIDER_MESSAGE_ID"
 ```
 
-`limit` is 1–25 (default 20). Default list reads the synced cache (newest first); `cursor` is a decimal offset and `syncedAt` / `historyId` reflect the last successful `POST …/sync`. With `source=live`, `cursor` is Gmail’s `nextPageToken` and filters are forwarded to `users.messages.list` (`format=metadata`). Use get-by-id for `body` and attachment metadata. The JSON never includes the refresh token.
+`limit` is 1–25 (default 20). Default list reads the synced cache (newest first); `cursor` is a decimal offset and `syncedAt` / `historyId` reflect the last successful `POST …/sync`. With `source=live`, `cursor` is Gmail’s `nextPageToken` and filters are forwarded to `users.messages.list` (`format=metadata`). Each live message also carries optional `headers: { listUnsubscribe?, precedence?, autoSubmitted? }`: the raw `List-Unsubscribe`, `Precedence` and `Auto-Submitted` values (read in the same metadata call; a field is absent when the message has no such header). The store list and get-by-id do not return `headers`. On every read, `labels` is Gmail’s `labelIds` unchanged and `folderIds` is its folder-like subset (`INBOX`, `SENT`, `TRASH`, `SPAM`, … and every `CATEGORY_*`). Use get-by-id for `body` and attachment metadata. The JSON never includes the refresh token.
 
 ### Host SDK (`@inboxlink/sdk`)
 

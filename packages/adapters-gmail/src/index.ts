@@ -192,6 +192,12 @@ export class GmailAdapter implements MailboxAdapter {
     /** Gmail label ids (`labelIds`). */
     labelIds?: string[];
     includeSpamTrash?: boolean;
+    /**
+     * Also request `List-Unsubscribe`, `Precedence` and `Auto-Submitted` in the same
+     * `format=metadata` get, and return them as `message.headers`. Set by the live list route;
+     * sync leaves it off so the store keeps its shape.
+     */
+    bulkHeaders?: boolean;
   }): Promise<{ messages: Message[]; nextCursor?: string }> {
     const base = gmailBase(this.config.gmailApiBaseUrl);
     const listUrl = new URL(`${base}/users/me/messages`);
@@ -211,7 +217,9 @@ export class GmailAdapter implements MailboxAdapter {
     const ids = (listed.messages ?? []).map((item) => item.id).filter(Boolean);
     const fetched = await Promise.all(
       ids.map((id) =>
-        this.fetchNormalizedMessage(base, input.accessToken, input.grantId, id, "metadata"),
+        this.fetchNormalizedMessage(base, input.accessToken, input.grantId, id, "metadata", {
+          bulkHeaders: input.bulkHeaders === true,
+        }),
       ),
     );
     const messages = fetched.filter((message): message is Message => message !== undefined);
@@ -293,16 +301,19 @@ export class GmailAdapter implements MailboxAdapter {
     grantId: string,
     messageId: string,
     format: GmailMessageFormat,
+    options: { bulkHeaders?: boolean } = {},
   ): Promise<Message | undefined> {
     const getUrl = new URL(`${base}/users/me/messages/${encodeURIComponent(messageId)}`);
     getUrl.searchParams.set("format", format);
+    const bulk = format === "metadata" && options.bulkHeaders === true;
     if (format === "metadata") {
-      for (const header of LIST_METADATA_HEADERS) {
+      const names = bulk ? [...LIST_METADATA_HEADERS, ...BULK_METADATA_HEADERS] : LIST_METADATA_HEADERS;
+      for (const header of names) {
         getUrl.searchParams.append("metadataHeaders", header);
       }
     }
     const raw = await gmailJson<GmailMessageResource>(getUrl, accessToken);
-    return normalizeGmailMessage(raw, grantId);
+    return normalizeGmailMessage(raw, grantId, { bulkHeaders: bulk });
   }
 }
 
@@ -311,6 +322,9 @@ export type GmailMessageFormat = "full" | "metadata";
 
 /** Headers required to normalize list rows without MIME body parts. */
 const LIST_METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"] as const;
+
+/** Extra headers the live list asks for: they mark bulk or automated mail (`message.headers`). */
+const BULK_METADATA_HEADERS = ["List-Unsubscribe", "Precedence", "Auto-Submitted"] as const;
 
 function gmailBase(configured: string | undefined): string {
   return (configured ?? "https://gmail.googleapis.com/gmail/v1").replace(/\/$/, "");

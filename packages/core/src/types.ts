@@ -42,6 +42,19 @@ export type MessageAttachment = {
   size: number;
 };
 
+/**
+ * Raw mail headers that mark bulk or automated mail. Each value is the header as sent,
+ * untrimmed and unparsed; a field is absent when the message has no such header.
+ */
+export type MessageHeaders = {
+  /** `List-Unsubscribe`, e.g. `<https://…>, <mailto:…>`. */
+  listUnsubscribe?: string;
+  /** `Precedence`, e.g. `bulk`, `list`, `junk`. */
+  precedence?: string;
+  /** `Auto-Submitted`, e.g. `auto-generated`, `auto-replied`; `no` means a person sent it. */
+  autoSubmitted?: string;
+};
+
 export type Message = {
   id: string;
   grantId: string;
@@ -54,8 +67,22 @@ export type Message = {
   cc?: EmailAddress[];
   sentAt: string;
   receivedAt: string;
+  /**
+   * Gmail: the folder-like subset of `labelIds` (`INBOX`, `SENT`, `DRAFT`, `TRASH`, `SPAM`,
+   * `STARRED`, `IMPORTANT`, `CHAT` and every `CATEGORY_*`). Not the full list: use `labels`.
+   */
   folderIds: string[];
+  /**
+   * Gmail: `labelIds` exactly as Gmail returns them (system labels such as `INBOX`, `UNREAD`,
+   * `CATEGORY_PROMOTIONS`, and user labels by id), on live reads (`source=live`, single-message
+   * get) and on store reads alike.
+   */
   labels?: string[];
+  /**
+   * Bulk/automated-mail headers. Filled on the live list (`GET /v1/grants/:id/messages?source=live`)
+   * only; absent on store reads and single-message gets, and absent when the message has none.
+   */
+  headers?: MessageHeaders;
   hasAttachments: boolean;
   /** Present when the MIME tree has one or more downloadable attachments. */
   attachments?: MessageAttachment[];

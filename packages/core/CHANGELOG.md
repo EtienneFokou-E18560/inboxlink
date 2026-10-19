@@ -1,7 +1,11 @@
 # `@inboxlink/core` changelog
 
-## Unreleased
+## 0.1.3
 
+Companion release with `@inboxlink/sdk@0.1.3`. Additive only.
+
+- `MessageHeaders` and `Message.headers?: MessageHeaders`: raw `List-Unsubscribe`, `Precedence` and `Auto-Submitted` values, filled on the live messages list only (see the SDK changelog).
+- `Message.folderIds` and `Message.labels` now document which carries Gmail's `labelIds` (`labels`, unchanged) and which is the folder-like subset (`folderIds`).
 - `Grant.replacedBy?: string`: set on a grant that a later Connect of the same mailbox (same tenant, provider and address) took over; such a grant is `revoked`. Additive, no breaking change.
 
 ## 0.1.2
