@@ -8,8 +8,8 @@ describe("renderLandingPage", () => {
     assert.match(html, /<title>InboxLink<\/title>/);
     assert.match(html, /Inbox<span>Link<\/span>/);
     assert.match(html, /Connect mailboxes without holding tokens/);
-    assert.match(html, /data-testid="landing-website" href="https:\/\/getinboxlink\.vercel\.app"/);
-    assert.match(html, /href="https:\/\/getinboxlink\.vercel\.app\/for-mailbox-owners\/"/);
+    assert.match(html, /data-testid="landing-website" href="https:\/\/inboxlink\.cieltd\.org"/);
+    assert.match(html, /href="https:\/\/inboxlink\.cieltd\.org\/for-mailbox-owners\/"/);
     assert.match(html, /data-testid="landing-github" href="https:\/\/github\.com\/EtienneFokou-E18560\/inboxlink"/);
     assert.match(html, /data-testid="landing-npm" href="https:\/\/www\.npmjs\.com\/package\/@inboxlink\/sdk"/);
     assert.match(html, /npm i @inboxlink\/sdk/);

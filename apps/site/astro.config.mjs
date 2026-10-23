@@ -6,7 +6,7 @@ import starlightLlmsTxt from "starlight-llms-txt";
 const repo = "https://github.com/EtienneFokou-E18560/inboxlink";
 
 export default defineConfig({
-  site: "https://getinboxlink.vercel.app",
+  site: "https://inboxlink.cieltd.org",
   integrations: [
     starlight({
       title: "InboxLink",
