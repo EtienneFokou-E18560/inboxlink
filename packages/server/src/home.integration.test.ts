@@ -31,12 +31,19 @@ function buildApp() {
 }
 
 describe("GET /home and /docs", () => {
-  it("redirect to the website without changing health JSON", async () => {
+  it("keeps /home on this domain, redirects /docs, and leaves health JSON alone", async () => {
     const app = buildApp();
 
+    for (const path of ["/home", "/home/"]) {
+      const res = await app.request(path);
+      assert.equal(res.status, 200, path);
+      assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+      const html = await res.text();
+      assert.match(html, /Connect mailboxes without holding tokens/);
+      assert.match(html, /href="\/privacy"/);
+    }
+
     for (const [path, target] of [
-      ["/home", "https://getinboxlink.vercel.app/"],
-      ["/home/", "https://getinboxlink.vercel.app/"],
       ["/docs", "https://getinboxlink.vercel.app/quick-start/"],
       ["/docs/", "https://getinboxlink.vercel.app/quick-start/"],
     ] as const) {
@@ -67,7 +74,8 @@ describe("legal pages", () => {
       assert.match(res.headers.get("content-type") ?? "", /text\/html/);
       const html = await res.text();
       assert.match(html, new RegExp(`<h1>${heading}</h1>`));
-      assert.match(html, /<a href="https:\/\/getinboxlink\.vercel\.app">Home<\/a>/);
+      assert.match(html, /<a href="\/home">Home<\/a> · <a href="https:\/\/getinboxlink\.vercel\.app">Docs<\/a>/);
+      assert.match(html, /<a href="mailto:efokou@cieltd\.org">efokou@cieltd\.org<\/a>/);
     }
   });
 });

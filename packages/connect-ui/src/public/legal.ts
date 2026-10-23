@@ -8,8 +8,8 @@ export type LegalPageOptions = {
   updated?: string;
 };
 
-const DEFAULT_CONTACT = "https://github.com/EtienneFokou-E18560/inboxlink/security/advisories/new";
-const UPDATED = "2026-10-08";
+const DEFAULT_CONTACT = "mailto:efokou@cieltd.org";
+const UPDATED = "2026-10-23";
 
 const LEGAL_STYLES = `
   .legal { max-width: 46rem; margin: 0 auto; line-height: 1.6; }
@@ -30,8 +30,8 @@ function page(title: string, intro: string, sections: Array<[string, string]>, o
       <p>${intro}</p>
       ${sections.map(([h, html]) => `<h2>${escapeHtml(h)}</h2>${html}`).join("\n")}
       <h2>Contact</h2>
-      <p>Questions, security reports, or requests to delete data: <a href="${contact}">${contact}</a>.</p>
-      <nav><a href="${INBOXLINK_WEBSITE_URL}">Home</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/status">Status</a></nav>
+      <p>Questions, security reports, or requests to delete data: <a href="${contact}">${contact.replace(/^mailto:/, "")}</a>.</p>
+      <nav><a href="/home">Home</a> · <a href="${INBOXLINK_WEBSITE_URL}">Docs</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/status">Status</a></nav>
     </main>`;
   return renderPublicDocument({ title: `${title} · InboxLink`, body, extraStyles: LEGAL_STYLES });
 }

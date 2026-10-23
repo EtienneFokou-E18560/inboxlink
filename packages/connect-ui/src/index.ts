@@ -11,9 +11,12 @@ export {
 } from "./pages.js";
 export {
   renderPublicDocument,
+  LANDING_STYLES,
+  renderLandingPage,
   renderPrivacyPage,
   renderTermsPage,
   INBOXLINK_WEBSITE_URL,
   type LegalPageOptions,
   type PublicDocumentOptions,
+  type LandingPageLinks,
 } from "./public/index.js";
