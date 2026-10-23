@@ -14,10 +14,10 @@ Microsoft Graph and IMAP adapters are parked and out of scope for security suppo
 
 **Do not open a public GitHub issue for security reports** (especially anything involving OAuth tokens, vault keys, API secrets, or access to mailbox data).
 
-Prefer **GitHub Private Vulnerability Reporting** on this repository:
+Report privately, either by email to **efokou@cieltd.org** or through **GitHub Private Vulnerability Reporting** on this repository:
 
 1. Open the repository **Security** tab → **Advisories** → **Report a vulnerability**  
-   (or enable Private Vulnerability Reporting in Settings if the button is missing).
+   (if the button is missing, use the email address above).
 2. Include: impact, affected component (SDK vs server vs Connect), reproduction steps, and whether Production or a self-host was involved.
 3. Do **not** attach live refresh tokens, master keys, or full message bodies.
 

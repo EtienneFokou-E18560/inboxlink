@@ -1,5 +1,6 @@
 import { CONNECT_STYLES } from "./styles.js";
 import { escapeHtml } from "./escape.js";
+import { INBOXLINK_WEBSITE_URL } from "./public/website.js";
 
 export type ShellOptions = {
   title: string;
@@ -37,7 +38,7 @@ export function renderShell(opts: ShellOptions): string {
         ${opts.body}
       </div>
     </main>
-    <footer class="footer">Mailbox connection infrastructure · read-only access · host never holds your refresh token</footer>
+    <footer class="footer">Mailbox connection infrastructure · read-only access · host never holds your refresh token · <a href="${INBOXLINK_WEBSITE_URL}/for-mailbox-owners/" target="_blank" rel="noopener">What is InboxLink?</a></footer>
   </div>
 </body>
 </html>`;

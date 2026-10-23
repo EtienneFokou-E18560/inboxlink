@@ -32,6 +32,18 @@ export const LANDING_STYLES = /* css */ `
   animation: rise 640ms 60ms ease-out both;
 }
 
+.shell-landing .landing-lead {
+  margin: 0;
+  max-width: 38rem;
+  line-height: 1.55;
+  color: var(--muted);
+  animation: rise 680ms 80ms ease-out both;
+}
+
+.shell-landing .landing-lead a {
+  color: var(--accent);
+}
+
 .shell-landing .cta-row {
   display: flex;
   flex-wrap: wrap;
@@ -112,6 +124,7 @@ export const LANDING_STYLES = /* css */ `
 @media (prefers-reduced-motion: reduce) {
   .shell-landing .brand-hero,
   .shell-landing .promise,
+  .shell-landing .landing-lead,
   .shell-landing .cta-row,
   .shell-landing .flow,
   .shell-landing .landing-footer {

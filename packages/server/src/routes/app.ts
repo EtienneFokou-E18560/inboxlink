@@ -16,11 +16,11 @@ import {
   connectErrorStatus,
   renderConnectErrorPage,
   renderConnectPage,
+  INBOXLINK_WEBSITE_URL,
   renderLandingPage,
   renderPrivacyPage,
   renderTermsPage,
 } from "@inboxlink/connect-ui";
-import { mountDocsHub } from "../docs-hub/mount.js";
 import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.js";
 import {
   buildCorsOriginAllowlist,
@@ -213,14 +213,14 @@ export function createApp(opts: CreateAppOptions) {
   app.get("/status", healthHtml);
   app.get("/status/", healthHtml);
 
-  /** Developer landing — human HTML; does not replace `/` or `/health` JSON. */
+  /** Home page named on Google's OAuth consent screen: keep it on this domain. */
   app.get("/home", (c) => c.html(renderLandingPage()));
   app.get("/home/", (c) => c.html(renderLandingPage()));
+  // The docs moved to the website (apps/site); old links keep working.
+  // 302 rather than 301 so browsers do not cache it while the site may still change domain.
+  for (const path of ["/docs", "/docs/"]) app.get(path, (c) => c.redirect(`${INBOXLINK_WEBSITE_URL}/quick-start/`, 302));
   app.get("/privacy", (c) => c.html(renderPrivacyPage()));
   app.get("/terms", (c) => c.html(renderTermsPage()));
-
-  // Public host docs hub (Connect brand + Link-stripe IA). Own module: docs-hub/.
-  mountDocsHub(app);
 
   app.use("/v1/*", async (c, next) => {
     // OAuth browser callback must remain public (state-bound).

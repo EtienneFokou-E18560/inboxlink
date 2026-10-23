@@ -3,51 +3,33 @@ import { describe, it } from "node:test";
 import { renderLandingPage } from "./landing.js";
 
 describe("renderLandingPage", () => {
-  it("is brand-first with promise and default CTAs", () => {
+  it("is brand-first and sends people to the website, GitHub and npm", () => {
     const html = renderLandingPage();
     assert.match(html, /<title>InboxLink<\/title>/);
-    assert.match(html, /class="brand-hero"/);
     assert.match(html, /Inbox<span>Link<\/span>/);
     assert.match(html, /Connect mailboxes without holding tokens/);
-    assert.match(html, /data-testid="landing-github"/);
-    assert.match(
-      html,
-      /href="https:\/\/github\.com\/EtienneFokou-E18560\/inboxlink"/,
-    );
-    assert.match(html, /data-testid="landing-docs"/);
-    assert.match(html, /href="\/docs"/);
-    assert.match(html, /data-testid="landing-wiki"/);
-    assert.match(html, /inboxlink\/wiki/);
-    assert.match(html, /data-testid="landing-npm"/);
-    assert.match(html, /@inboxlink\/core\/v\/0\.1\.1/);
-    assert.match(html, /npm core@0\.1\.1/);
-    assert.match(html, /npm i @inboxlink\/core @inboxlink\/sdk/);
-    assert.doesNotMatch(html, /0\.1\.0 today/);
-    assert.doesNotMatch(html, /SDK helpers pending/);
+    assert.match(html, /data-testid="landing-website" href="https:\/\/getinboxlink\.vercel\.app"/);
+    assert.match(html, /href="https:\/\/getinboxlink\.vercel\.app\/for-mailbox-owners\/"/);
+    assert.match(html, /data-testid="landing-github" href="https:\/\/github\.com\/EtienneFokou-E18560\/inboxlink"/);
+    assert.match(html, /data-testid="landing-npm" href="https:\/\/www\.npmjs\.com\/package\/@inboxlink\/sdk"/);
+    assert.match(html, /npm i @inboxlink\/sdk/);
     assert.match(html, /href="\/privacy"/);
     assert.match(html, /href="\/terms"/);
-    assert.match(html, /session → connect → grantId → messages/);
     assert.match(html, /href="\/health"/);
-    assert.match(html, /Fraunces/);
-    assert.match(html, /--accent:/);
-    assert.doesNotMatch(html, /grant console/i);
+    // No pinned versions or retired destinations that go stale.
+    assert.doesNotMatch(html, /0\.1\.1|\/wiki|href="\/docs"/);
   });
 
   it("escapes custom link URLs", () => {
     const html = renderLandingPage({
       githubUrl: 'https://example.com/"onclick=alert(1)',
-      docsHubUrl: "https://docs.example/<script>",
-      wikiUrl: 'https://wiki.example/"x',
-      npmCoreUrl: "https://npm.example/<bad>",
+      websiteUrl: "https://site.example/<script>",
+      npmUrl: "https://npm.example/<bad>",
       healthPath: '/health?"x',
     });
     assert.doesNotMatch(html, /<script>/i);
-    assert.match(
-      html,
-      /href="https:\/\/example\.com\/&quot;onclick=alert\(1\)"/,
-    );
-    assert.match(html, /href="https:\/\/docs\.example\/&lt;script&gt;"/);
-    assert.match(html, /href="https:\/\/wiki\.example\/&quot;x"/);
+    assert.match(html, /href="https:\/\/example\.com\/&quot;onclick=alert\(1\)"/);
+    assert.match(html, /href="https:\/\/site\.example\/&lt;script&gt;"/);
     assert.match(html, /href="https:\/\/npm\.example\/&lt;bad&gt;"/);
     assert.match(html, /href="\/health\?&quot;x"/);
   });
