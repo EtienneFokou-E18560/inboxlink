@@ -1,5 +1,6 @@
 import { escapeHtml } from "../escape.js";
 import { renderPublicDocument } from "./document.js";
+import { INBOXLINK_WEBSITE_URL } from "./website.js";
 
 export type LegalPageOptions = {
   /** Where people report issues or ask for deletion (a URL or mailto:). */
@@ -30,7 +31,7 @@ function page(title: string, intro: string, sections: Array<[string, string]>, o
       ${sections.map(([h, html]) => `<h2>${escapeHtml(h)}</h2>${html}`).join("\n")}
       <h2>Contact</h2>
       <p>Questions, security reports, or requests to delete data: <a href="${contact}">${contact}</a>.</p>
-      <nav><a href="/home">Home</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/status">Status</a></nav>
+      <nav><a href="${INBOXLINK_WEBSITE_URL}">Home</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/status">Status</a></nav>
     </main>`;
   return renderPublicDocument({ title: `${title} · InboxLink`, body, extraStyles: LEGAL_STYLES });
 }

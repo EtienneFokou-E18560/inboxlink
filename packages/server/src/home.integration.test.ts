@@ -30,26 +30,19 @@ function buildApp() {
   });
 }
 
-describe("GET /home landing", () => {
-  it("serves Vault door HTML without changing health JSON", async () => {
+describe("GET /home and /docs", () => {
+  it("redirect to the website without changing health JSON", async () => {
     const app = buildApp();
 
-    for (const path of ["/home", "/home/"]) {
+    for (const [path, target] of [
+      ["/home", "https://getinboxlink.vercel.app/"],
+      ["/home/", "https://getinboxlink.vercel.app/"],
+      ["/docs", "https://getinboxlink.vercel.app/quick-start/"],
+      ["/docs/", "https://getinboxlink.vercel.app/quick-start/"],
+    ] as const) {
       const res = await app.request(path);
-      assert.equal(res.status, 200, path);
-      const type = res.headers.get("content-type") ?? "";
-      assert.match(type, /text\/html/);
-      const html = await res.text();
-      assert.match(html, /Inbox<span>Link<\/span>/);
-      assert.match(html, /Connect mailboxes without holding tokens/);
-      assert.match(html, /data-testid="landing-github"/);
-      assert.match(html, /data-testid="landing-docs"/);
-      assert.match(html, /data-testid="landing-wiki"/);
-      assert.match(html, /data-testid="landing-npm"/);
-      assert.match(html, /href="\/docs"/);
-      assert.match(html, /npm i @inboxlink\/core @inboxlink\/sdk/);
-      assert.match(html, /href="\/privacy"/);
-      assert.match(html, /href="\/health"/);
+      assert.equal(res.status, 302, path);
+      assert.equal(res.headers.get("location"), target, path);
     }
 
     for (const path of ["/", "/health"]) {
@@ -72,7 +65,9 @@ describe("legal pages", () => {
       const res = await app.request(path);
       assert.equal(res.status, 200, path);
       assert.match(res.headers.get("content-type") ?? "", /text\/html/);
-      assert.match(await res.text(), new RegExp(`<h1>${heading}</h1>`));
+      const html = await res.text();
+      assert.match(html, new RegExp(`<h1>${heading}</h1>`));
+      assert.match(html, /<a href="https:\/\/getinboxlink\.vercel\.app">Home<\/a>/);
     }
   });
 });

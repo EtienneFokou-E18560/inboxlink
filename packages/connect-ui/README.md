@@ -11,8 +11,8 @@ Shared tokens live in `CONNECT_STYLES` / `src/public/` so landing, `/status`, an
 - `renderConnectPage({ authUrl, expiresAt })` — pending session CTA
 - `renderConnectErrorPage({ kind, detail? })` — expired / invalid / OAuth failures
 - `connectErrorStatus(kind)` — suggested HTTP status
-- `renderLandingPage()` — Vault door developer landing (`GET /home`)
 - `renderPublicDocument({ title, body, extraStyles? })` — shared HTML shell for public pages
-- `CONNECT_STYLES` / `LANDING_STYLES` — design tokens and landing layer
+- `CONNECT_STYLES` — design tokens
+- `INBOXLINK_WEBSITE_URL` — the website (`GET /home` and `GET /docs` redirect there)
 
 Do not depend on career-workspace.
