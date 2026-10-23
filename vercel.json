@@ -4,6 +4,7 @@
   "buildCommand": "pnpm build",
   "framework": null,
   "outputDirectory": "public",
+  "ignoreCommand": "[ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- . \":(exclude)apps/site\"",
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
   "functions": {
     "api/index.ts": {

@@ -1,0 +1,94 @@
+---
+title: Connect a user's Gmail without holding their tokens
+description: InboxLink is open-source mailbox connection infrastructure. Your app sends people to a hosted Connect page, InboxLink keeps the Gmail tokens in an encrypted vault, and you read their mail through one small API.
+template: splash
+hero:
+  tagline: InboxLink runs the Google sign-in, keeps the refresh token in an encrypted vault, and gives your app a grant id and a clean messages API. Open source, MIT, self-hostable.
+  actions:
+    - text: Quick start
+      link: /quick-start/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/EtienneFokou-E18560/inboxlink
+      icon: external
+      variant: minimal
+---
+
+import { Aside, Card, CardGrid, Steps } from "@astrojs/starlight/components";
+import FlowDiagram from "../../components/FlowDiagram.astro";
+
+## From sign-in to messages
+
+```ts
+import { InboxLink } from "@inboxlink/sdk";
+
+const il = new InboxLink({ apiSecret: process.env.INBOXLINK_API_SECRET });
+
+// 1. Send the person to InboxLink's Connect page
+const { connectUrl } = await il.createConnectSession({
+  externalUserId: user.id,
+  redirectUri: "https://your-app.example.com/inboxlink/done",
+});
+
+// 2. When they come back, swap the one-time token for a grant
+const { grantId } = await il.completeConnect({ redirectUrl: request.url });
+
+// 3. Read their mail
+const page = await il.messages.list(grantId, { limit: 25 });
+```
+
+## How it works
+
+<FlowDiagram />
+
+<Steps>
+
+1. **Your server creates a Connect session** and sends the person to the `connectUrl` it returns.
+
+2. **InboxLink runs Google sign-in** with PKCE on its own Google client. Your app never registers a Google OAuth client and never sees a Google token.
+
+3. **The refresh token goes into the vault**, encrypted with AES-256-GCM. The person comes back to your `redirectUri` with a one-time `public_token`.
+
+4. **Your server exchanges it for a `grantId`**, the only thing you store.
+
+5. **You call the messages API with the grant**: list, get, sync, and signed webhooks when new mail or a sync arrives.
+
+</Steps>
+
+## Why use it
+
+<CardGrid>
+  <Card title="Tokens stay out of your app" icon="seti:lock">
+    Only InboxLink's vault holds refresh tokens. Revoking a grant deletes the
+    sealed token. A breach of your database leaks grant ids, not mailbox access.
+  </Card>
+  <Card title="Fails closed" icon="warning">
+    When Google withdraws access the grant turns `needs_reauth` and reads stop.
+    Temporary Google or network errors leave the grant active and retry on the
+    next sync.
+  </Card>
+  <Card title="One normalized API" icon="document">
+    Cursor-paged lists, full message bodies with attachment metadata, a synced
+    cache by default and live Gmail search when you ask for it.
+  </Card>
+  <Card title="Open source" icon="github">
+    MIT licensed TypeScript. Use the hosted service or run your own on Vercel
+    and Postgres.
+  </Card>
+</CardGrid>
+
+<Aside type="tip" title="Connected your Gmail to an app through InboxLink?">
+  Read [what the app can see, what InboxLink keeps and how to disconnect](/for-mailbox-owners/).
+</Aside>
+
+## What works today
+
+| | |
+|---|---|
+| **Gmail** | Available: Connect, message list and get, history sync, Gmail push, signed webhooks |
+| **SDK** | [`@inboxlink/sdk`](https://www.npmjs.com/package/@inboxlink/sdk) on npm, published with provenance |
+| **Microsoft 365 / Outlook** | Planned, not available yet |
+| **IMAP** | Planned, not available yet |
+
+InboxLink is at version 0.x, run by one maintainer, with a free hosted service and no SLA ([project status](/roadmap/#project-status)).
+Read the [changelog](/changelog/) before upgrading, and the [roadmap](/roadmap/) for what comes next.
