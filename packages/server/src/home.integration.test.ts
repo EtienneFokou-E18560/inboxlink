@@ -44,8 +44,8 @@ describe("GET /home and /docs", () => {
     }
 
     for (const [path, target] of [
-      ["/docs", "https://getinboxlink.vercel.app/quick-start/"],
-      ["/docs/", "https://getinboxlink.vercel.app/quick-start/"],
+      ["/docs", "https://inboxlink.cieltd.org/quick-start/"],
+      ["/docs/", "https://inboxlink.cieltd.org/quick-start/"],
     ] as const) {
       const res = await app.request(path);
       assert.equal(res.status, 302, path);
@@ -74,7 +74,7 @@ describe("legal pages", () => {
       assert.match(res.headers.get("content-type") ?? "", /text\/html/);
       const html = await res.text();
       assert.match(html, new RegExp(`<h1>${heading}</h1>`));
-      assert.match(html, /<a href="\/home">Home<\/a> · <a href="https:\/\/getinboxlink\.vercel\.app">Docs<\/a>/);
+      assert.match(html, /<a href="\/home">Home<\/a> · <a href="https:\/\/inboxlink\.cieltd\.org">Docs<\/a>/);
       assert.match(html, /<a href="mailto:efokou@cieltd\.org">efokou@cieltd\.org<\/a>/);
     }
   });
