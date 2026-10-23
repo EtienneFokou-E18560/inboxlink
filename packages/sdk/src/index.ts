@@ -29,6 +29,40 @@ export type Grant = CoreGrant & {
   replaced?: boolean;
 };
 
+/**
+ * A grant in the tenant-wide listing (`grants.listAll`): who owns it and in
+ * what state. No address and no token.
+ */
+export type TenantGrant = {
+  id: string;
+  externalUserId: string;
+  provider: CoreGrant["provider"];
+  status: CoreGrant["status"];
+  createdAt: string;
+  updatedAt: string;
+  /** End of the grant's last finished sync; absent when none finished. */
+  lastSyncAt?: string;
+  /** True when a later Connect of the same mailbox retired it. */
+  replaced?: boolean;
+};
+
+export type ListAllGrantsOptions = {
+  /** Page size, 1–200 (server default 50). */
+  limit?: number;
+  /** Opaque cursor from a previous `nextCursor`. */
+  cursor?: string;
+};
+
+/**
+ * Optional on every call that names a grant: the host user you believe owns
+ * it. When the grant now belongs to another of your users (the same mailbox
+ * was connected again and the server reuses grants for your tenant), the call
+ * answers 409 `grant_replaced` instead of acting on someone else's mailbox.
+ */
+export type GrantOwnerOptions = {
+  externalUserId?: string;
+};
+
 /** Documented Production origin. Used when `baseUrl` is omitted. */
 export const INBOXLINK_PRODUCTION_URL = "https://inboxlink-two.vercel.app";
 
@@ -74,7 +108,7 @@ export type ListMessagesOptions = {
   subject?: string;
   /** Include SPAM/TRASH in results (Gmail `includeSpamTrash`). Live only. */
   includeSpamTrash?: boolean;
-};
+} & GrantOwnerOptions;
 
 export type IterateMessagesOptions = ListMessagesOptions & {
   /** Skip messages with `receivedAt` earlier than this ISO timestamp (client-side). */
@@ -119,7 +153,7 @@ export type SyncResult = {
 
 export type SyncOptions = {
   mode?: "full" | "bootstrap" | "incremental";
-};
+} & GrantOwnerOptions;
 
 export type ConnectRedirectParams = {
   /** One-time token for `grants.exchange` / `completeConnect`. */
@@ -330,6 +364,7 @@ class LinkApi {
       externalUserId: input.externalUserId,
       redirectUri: input.redirectUri,
       products: input.products ?? ["messages"],
+      ...(input.replacesGrantId ? { replacesGrantId: input.replacesGrantId } : {}),
     });
   }
 }
@@ -354,8 +389,31 @@ class GrantsApi {
     );
   }
 
-  revoke(grantId: string): Promise<void> {
-    return this.http.request("DELETE", `v1/grants/${encodeURIComponent(grantId)}`);
+  /**
+   * Every grant of your tenant, oldest first, one page at a time. Maps to
+   * `GET /v1/grants?all=true`. Use it to find grants whose host user no longer
+   * exists on your side. No addresses are returned.
+   */
+  listAll(opts?: ListAllGrantsOptions): Promise<{ grants: TenantGrant[]; nextCursor?: string }> {
+    const q = new URLSearchParams({ all: "true" });
+    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+    if (opts?.cursor) q.set("cursor", opts.cursor);
+    return this.http.request("GET", `v1/grants?${q.toString()}`);
+  }
+
+  /** Walk every page of {@link listAll}. */
+  async *iterateAll(opts?: Omit<ListAllGrantsOptions, "cursor">): AsyncGenerator<TenantGrant> {
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.listAll({ ...opts, cursor });
+      yield* page.grants;
+      if (!page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+  }
+
+  revoke(grantId: string, opts?: GrantOwnerOptions): Promise<void> {
+    return this.http.request("DELETE", `v1/grants/${encodeURIComponent(grantId)}${ownerQuery(opts)}`);
   }
 
   /**
@@ -366,16 +424,26 @@ class GrantsApi {
   sync(grantId: string, opts?: SyncOptions): Promise<SyncResult> {
     const body =
       opts?.mode && opts.mode !== "incremental" ? { mode: opts.mode } : undefined;
-    return this.http.request("POST", `v1/grants/${encodeURIComponent(grantId)}/sync`, body);
+    return this.http.request(
+      "POST",
+      `v1/grants/${encodeURIComponent(grantId)}/sync${ownerQuery(opts)}`,
+      body,
+    );
   }
 
   /** Poll async sync job status. Maps to `GET /v1/grants/:grantId/sync/jobs/:jobId`. */
-  getSyncJob(grantId: string, jobId: string): Promise<SyncResult> {
+  getSyncJob(grantId: string, jobId: string, opts?: GrantOwnerOptions): Promise<SyncResult> {
     return this.http.request(
       "GET",
-      `v1/grants/${encodeURIComponent(grantId)}/sync/jobs/${encodeURIComponent(jobId)}`,
+      `v1/grants/${encodeURIComponent(grantId)}/sync/jobs/${encodeURIComponent(jobId)}${ownerQuery(opts)}`,
     );
   }
+}
+
+function ownerQuery(opts: GrantOwnerOptions | undefined): string {
+  return opts?.externalUserId
+    ? `?externalUserId=${encodeURIComponent(opts.externalUserId)}`
+    : "";
 }
 
 class MessagesApi {
@@ -403,6 +471,7 @@ class MessagesApi {
     for (const label of labels) {
       if (label) q.append("label", label);
     }
+    if (opts?.externalUserId) q.set("externalUserId", opts.externalUserId);
     const qs = q.toString();
     return this.http.request(
       "GET",
@@ -415,10 +484,10 @@ class MessagesApi {
    * Maps to `GET /v1/grants/:grantId/messages/:messageId`.
    * Response includes optional attachment metadata (id, filename, mimeType, size) — not bytes.
    */
-  get(grantId: string, messageId: string): Promise<{ message: Message }> {
+  get(grantId: string, messageId: string, opts?: GrantOwnerOptions): Promise<{ message: Message }> {
     return this.http.request(
       "GET",
-      `v1/grants/${encodeURIComponent(grantId)}/messages/${encodeURIComponent(messageId)}`,
+      `v1/grants/${encodeURIComponent(grantId)}/messages/${encodeURIComponent(messageId)}${ownerQuery(opts)}`,
     );
   }
 
@@ -448,8 +517,24 @@ class MessagesApi {
 export type WebhookEventName =
   | "grant.connected"
   | "grant.needs_reauth"
+  | "grant.revoked"
   | "sync.completed"
   | "message.created";
+
+/**
+ * `data` of a `grant.revoked` event: `externalUserId` lost the mailbox in a
+ * Connect. `reason: "replaced"`: the grant was retired (`revoked`, no token, no
+ * cache). `reason: "reassigned"`: the same grant now belongs to another of your
+ * users; it stays active for them, and calls naming `externalUserId` answer 409
+ * `grant_replaced`. Handle both like that 409: ask this user to reconnect.
+ */
+export type GrantRevokedEventData = {
+  grantId: string;
+  tenantId: string;
+  externalUserId: string;
+  provider: CoreGrant["provider"];
+  reason: "replaced" | "reassigned";
+};
 
 export type WebhookEndpointInfo = {
   id: string;

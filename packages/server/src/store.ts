@@ -7,6 +7,11 @@ export type StoredSession = LinkSession & {
   codeVerifier?: string;
   publicToken?: string;
   grantId?: string;
+  /**
+   * The host's existing grant (same tenant and `externalUserId`) this Connect
+   * replaces, when the host asked the person and they chose "replace".
+   */
+  replacesGrantId?: string;
 };
 
 export type CreateSessionInput = {
@@ -14,7 +19,36 @@ export type CreateSessionInput = {
   externalUserId: string;
   redirectUri: string;
   products: string[];
+  replacesGrantId?: string;
   ttlMs?: number;
+};
+
+/** A grant in a tenant-wide listing, with the end of its last finished sync. */
+export type TenantGrant = Grant & { lastSyncAt?: string };
+
+export type TenantGrantPageQuery = {
+  /** Keyset position: grants after this one in (`createdAt`, `id`) order. */
+  after?: { createdAt: string; id: string };
+  limit: number;
+};
+
+export type TenantGrantPage = { grants: TenantGrant[]; hasMore: boolean };
+
+export type ReassignGrantInput = {
+  id: string;
+  tenantId: string;
+  externalUserId: string;
+  scopes: string[];
+  updatedAt: string;
+};
+
+export type RetireGrantsInput = {
+  ids: string[];
+  tenantId: string;
+  replacedBy: string;
+  updatedAt: string;
+  /** When set, only grants owned by this host user are retired. */
+  externalUserId?: string;
 };
 
 /** Durable sync job row (Wave D2 — Postgres table or memory map). */
@@ -98,6 +132,22 @@ export interface GrantStore {
    * other. Returns only the grants this call retired, oldest first.
    */
   retireEarlierGrants(grant: Grant, updatedAt: string): Promise<Grant[]>;
+  /**
+   * Reuse a live grant for a fresh Connect of the same mailbox, in one
+   * conditional write: it becomes `active`, owned by `externalUserId`, with the
+   * new scopes. Returns undefined when the grant is missing, in another tenant
+   * or no longer live (`revoked`). `previousExternalUserId` is the owner just
+   * before this write.
+   */
+  reassignGrant(input: ReassignGrantInput): Promise<{ grant: Grant; previousExternalUserId: string } | undefined>;
+  /**
+   * Retire the listed grants that are still live in this tenant (and owned by
+   * `externalUserId` when given): `revoked` with `replacedBy`. Never retires
+   * `replacedBy` itself. Returns only the grants this call retired.
+   */
+  retireGrants(input: RetireGrantsInput): Promise<Grant[]>;
+  /** Every grant of one tenant, oldest first, one keyset page at a time. */
+  listTenantGrantsPage(tenantId: string, page: TenantGrantPageQuery): Promise<TenantGrantPage>;
   /** Active Gmail grants matching mailbox email (Pub/Sub push lookup). */
   findActiveGrantsByEmail(email: string): Promise<Grant[]>;
   /** All active Gmail grants (watch renewal sweep). */
@@ -168,6 +218,7 @@ export class MemoryStore implements GrantStore {
       status: "pending",
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + (input.ttlMs ?? 30 * 60_000)).toISOString(),
+      ...(input.replacesGrantId ? { replacesGrantId: input.replacesGrantId } : {}),
     };
     this.sessions.set(id, session);
     this.sessionsByToken.set(linkToken, id);
@@ -273,6 +324,59 @@ export class MemoryStore implements GrantStore {
       retired.push(next);
     }
     return retired.sort(compareCreated);
+  }
+
+  async reassignGrant(
+    input: ReassignGrantInput,
+  ): Promise<{ grant: Grant; previousExternalUserId: string } | undefined> {
+    const existing = this.grants.get(input.id);
+    if (!existing || existing.tenantId !== input.tenantId || !isLive(existing)) return undefined;
+    const next: Grant = {
+      ...existing,
+      externalUserId: input.externalUserId,
+      status: "active",
+      scopes: [...input.scopes],
+      updatedAt: input.updatedAt,
+    };
+    delete next.replacedBy;
+    this.grants.set(next.id, next);
+    return { grant: next, previousExternalUserId: existing.externalUserId };
+  }
+
+  async retireGrants(input: RetireGrantsInput): Promise<Grant[]> {
+    const retired: Grant[] = [];
+    for (const id of new Set(input.ids)) {
+      const old = this.grants.get(id);
+      if (!old || id === input.replacedBy || old.tenantId !== input.tenantId || !isLive(old)) continue;
+      if (input.externalUserId !== undefined && old.externalUserId !== input.externalUserId) continue;
+      const next: Grant = { ...old, status: "revoked", replacedBy: input.replacedBy, updatedAt: input.updatedAt };
+      this.grants.set(id, next);
+      retired.push(next);
+    }
+    return retired.sort(compareCreated);
+  }
+
+  async listTenantGrantsPage(tenantId: string, page: TenantGrantPageQuery): Promise<TenantGrantPage> {
+    const after = page.after;
+    const sorted = [...this.grants.values()]
+      .filter((g) => g.tenantId === tenantId)
+      .filter((g) => !after || createdBefore(after, g))
+      .sort(compareCreated);
+    const slice = sorted.slice(0, page.limit);
+    const grants = slice.map((g) => {
+      const lastSyncAt = this.lastFinishedSync(g.id);
+      return lastSyncAt ? { ...g, lastSyncAt } : { ...g };
+    });
+    return { grants, hasMore: sorted.length > page.limit };
+  }
+
+  private lastFinishedSync(grantId: string): string | undefined {
+    let last: string | undefined;
+    for (const job of this.syncJobs.values()) {
+      if (job.grantId !== grantId || job.status !== "completed" || !job.finishedAt) continue;
+      if (!last || job.finishedAt > last) last = job.finishedAt;
+    }
+    return last;
   }
 
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
@@ -433,11 +537,18 @@ export class MemoryStore implements GrantStore {
 }
 
 /** Oldest first: `createdAt`, then id (the tie-break `retireEarlierGrants` uses). */
-export function compareCreated(a: Grant, b: Grant): number {
+type CreatedKey = Pick<Grant, "createdAt" | "id">;
+
+export function compareCreated(a: CreatedKey, b: CreatedKey): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-function createdBefore(a: Grant, b: Grant): boolean {
+/** `active` or `needs_reauth`: the grant still counts as connected. */
+export function isLive(grant: Grant): boolean {
+  return grant.status === "active" || grant.status === "needs_reauth";
+}
+
+function createdBefore(a: CreatedKey, b: CreatedKey): boolean {
   return compareCreated(a, b) < 0;
 }

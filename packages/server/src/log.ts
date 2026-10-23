@@ -77,4 +77,4 @@ export const DATABASE_UNAVAILABLE_GUIDANCE =
   "Check DATABASE_URL and Postgres reachability (Neon or equivalent). Do not run Connect until health returns ok=true and store=postgres.";
 
 export const NEEDS_REAUTH_GUIDANCE =
-  "Refresh token rejected or Gmail returned 401/403. Start a new Connect session for this user; the previous grant is marked needs_reauth.";
+  "Google refused this grant's token (revoked, expired, or access withdrawn). Start a new Connect session for this user; the previous grant is marked needs_reauth.";

@@ -1,6 +1,6 @@
 {
   "name": "@inboxlink/core",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "InboxLink types, normalized models, adapter interfaces, and crypto helpers",
   "license": "MIT",
   "type": "module",

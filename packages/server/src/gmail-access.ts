@@ -1,3 +1,4 @@
+import { gmailRequiresReconnect } from "@inboxlink/adapters-gmail";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import type { AccessTokenCache } from "./access-token-cache.js";
 import { getAccessTokenCache } from "./access-token-cache.js";
@@ -17,13 +18,19 @@ export type GmailTokenRefresher = {
 export type OpenGrantAccessOk = { ok: true; accessToken: string };
 export type OpenGrantAccessFail = {
   ok: false;
-  error: "missing_refresh_token" | "needs_reauth";
+  /**
+   * `needs_reauth`: Google refused the refresh token (revoked, expired,
+   * consent withdrawn); the grant is marked so. `provider_unavailable`: the
+   * refresh failed for another reason (Google down, a 5xx, the network); the
+   * grant keeps its status and the next request tries again.
+   */
+  error: "missing_refresh_token" | "needs_reauth" | "provider_unavailable";
 };
 
 /**
  * Open vault → refresh (or cache hit) → short-lived access token for a grant.
- * Refresh tokens never enter the cache. On refresh failure the grant is marked
- * `needs_reauth` and any cached access token for the grant is dropped.
+ * Refresh tokens never enter the cache. Only a refresh Google refuses for good
+ * marks the grant `needs_reauth`; any cached access token is dropped either way.
  */
 export async function openGrantAccessToken(input: {
   store: GrantStore;
@@ -58,8 +65,9 @@ export async function openGrantAccessToken(input: {
     const refreshed = await gmail.refreshAccessToken(refreshToken);
     cache.set(grant.id, refreshed.accessToken, refreshed.expiresAt);
     return { ok: true, accessToken: refreshed.accessToken };
-  } catch {
+  } catch (err) {
     cache.invalidate(grant.id);
+    if (!gmailRequiresReconnect(err)) return { ok: false, error: "provider_unavailable" };
     await markNeedsReauth(store, grant);
     return { ok: false, error: "needs_reauth" };
   }

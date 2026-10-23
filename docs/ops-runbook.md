@@ -63,18 +63,23 @@ pnpm --filter @inboxlink/server dev
 
 ## `needs_reauth`
 
-When Gmail refresh fails or list returns 401/403, the grant is marked `needs_reauth` and messages return:
+A grant is marked `needs_reauth` only when Google requires the person to connect again: the refresh is refused with `invalid_grant` (token revoked or expired, consent withdrawn), Gmail answers 401, or Gmail answers 403 for a reason other than a rate limit (`rateLimitExceeded`, `userRateLimitExceeded`, `dailyLimitExceeded`, `quotaExceeded`). Messages then return:
 
 ```json
 {
   "error": "needs_reauth",
-  "guidance": "Refresh token rejected or Gmail returned 401/403. Start a new Connect session for this user; the previous grant is marked needs_reauth."
+  "guidance": "Google refused this grant's token (revoked, expired, or access withdrawn). Start a new Connect session for this user; the previous grant is marked needs_reauth."
 }
 ```
 
-**Fix:** create a new link session and complete Connect again (same `externalUserId` is fine). Do not reuse an old `public_token`. List grants show `status: "needs_reauth"` until a new grant replaces it or you revoke. When the new Connect is for the same address, the old grant is retired automatically (next section).
+Any other refresh failure (Google 5xx, the network, a 429, `invalid_client` from our own configuration) leaves the grant `active`: reads answer 502 `gmail_unavailable`, syncs end `gmail_unavailable`, the watch renewal counts it as `watch_failed`, and the next call tries again. Log event `gmail_unavailable` (`reason: "refresh_failed"`).
+
+**Fix:** create a new link session and complete Connect again (same `externalUserId` is fine). Do not reuse an old `public_token`. List grants show `status: "needs_reauth"` until a new Connect settles it (next section) or you revoke. There is no time-based clean-up: a `needs_reauth` grant keeps its token and cache until the person reconnects or the host deletes it (for example with the account).
 
 ## `grant_replaced` (one live grant per mailbox)
+
+The Connect rule is per tenant: `INBOXLINK_CONNECT_POLICY` (`askel=reuse`, comma or space separated; an invalid entry stops the server at boot). Tenants not listed keep `replace`, described next. Under `reuse`, a Connect of an address the tenant already has a live grant for seals the fresh token on that grant (one conditional `UPDATE ... RETURNING` that only takes a live row; the grant keeps its id and cache and moves to the connecting `externalUserId`), retires the tenant's other live grants for the address, and queues an incremental sync. Log events `grant_reused` (`grantId`, `tenantId`, `sameUser`, `retired`) and `grant_replaced`. If the claim loses a race with a retirement, the token it sealed is destroyed and a new grant is made. A session may name `replacesGrantId` (the same user's grant); when the connected address differs, that grant is retired too. Every retirement and every move to another user sends `grant.revoked` to the host.
+
 
 A finished Connect retires the tenant's `active` / `needs_reauth` grants for the same provider and address (case ignored) that were created before it (ties broken on grant id), whichever `externalUserId` owned them: token and cached messages deleted, status `revoked`, `replaced_by` set to the new grant id. Reads and syncs on the old id answer 409 `grant_replaced`; `GET /v1/grants` shows it `revoked` with `replaced: true`. Log event: `grant_replaced` (`grantId`, `replacedBy`, `tenantId`, `sameUser`; never the address). The old refresh token is not revoked at Google, because that would also end the new one.
 
@@ -87,6 +92,16 @@ psql "$DATABASE_URL" -f scripts/shared-address-report.sql
 ```
 
 The first table counts, per tenant, addresses with more than one grant and those with more than one live grant (the ones to act on). The second lists the live grants on those addresses (grant id, an 8-character address key, identity kind `anonymous` / `google` / `account`, status, date, cached messages); no address is printed. The next Connect of that mailbox keeps only the newest grant. To clean up sooner, revoke the grants you don't want with `DELETE /v1/grants/:id` (or `il.grants.revoke`) using that tenant's secret; that is a manual owner decision, nothing does it automatically.
+
+## Grant health report
+
+Read-only counts of grants per tenant by status and age, and of live grants by kind of host user (`anonymous` / `google` / `account`) and time since the last finished sync. No address, grant id or user id is printed. Run it before and after a change to grant handling:
+
+```bash
+psql "$DATABASE_URL" -f scripts/grant-health-report.sql
+```
+
+A host can list its own tenant's grants (ids, owner ids, status, dates, last finished sync; no addresses) with `GET /v1/grants?all=true` and its tenant secret.
 
 ## Access-token cache
 
@@ -109,7 +124,8 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set, th
 | Event | Emit point |
 |-------|------------|
 | `grant.connected` | OAuth callback success |
-| `grant.needs_reauth` | Refresh / Gmail 401–403 / sync reauth / push reauth |
+| `grant.needs_reauth` | Google refused the token: refresh `invalid_grant`, Gmail 401, or a non-rate-limit 403 (reads, sync, push) |
+| `grant.revoked` | A Connect retired a grant (`reason: "replaced"`) or moved a reused grant to another host user (`"reassigned"`); `externalUserId` is the user who lost it |
 | `sync.completed` | Successful sync job (API drain, push apply, or cron) |
 | `message.created` | New message upserted via Gmail Pub/Sub push apply |
 

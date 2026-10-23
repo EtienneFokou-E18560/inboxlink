@@ -13,10 +13,15 @@ import type {
   GrantStore,
   MessagePage,
   MessagePageQuery,
+  ReassignGrantInput,
+  RetireGrantsInput,
   StoredSession,
   SyncJobKind,
   SyncJobRecord,
   SyncJobStatus,
+  TenantGrant,
+  TenantGrantPage,
+  TenantGrantPageQuery,
 } from "../store.js";
 import { compareCreated } from "../store.js";
 import { SCHEMA_SQL } from "./schema.js";
@@ -69,12 +74,18 @@ type SessionRow = {
   code_verifier: string | null;
   public_token: string | null;
   grant_id: string | null;
+  replaces_grant_id?: string | null;
   created_at: Date | string;
   expires_at: Date | string;
 };
 
 const GRANT_COLUMNS =
   "id, tenant_id, external_user_id, provider, email, status, scopes, created_at, updated_at, replaced_by";
+
+/** `GRANT_COLUMNS` qualified with the `g` alias, for statements that join. */
+const PREFIXED_GRANT_COLUMNS = GRANT_COLUMNS.split(", ")
+  .map((column) => `g.${column}`)
+  .join(", ");
 
 type GrantRow = {
   id: string;
@@ -91,7 +102,7 @@ type GrantRow = {
 
 const SESSION_COLUMNS = `
   id, link_token, tenant_id, external_user_id, redirect_uri, products, status,
-  oauth_state, code_verifier, public_token, grant_id, created_at, expires_at
+  oauth_state, code_verifier, public_token, grant_id, replaces_grant_id, created_at, expires_at
 `;
 
 export class PostgresStore implements GrantStore {
@@ -106,6 +117,7 @@ export class PostgresStore implements GrantStore {
     externalUserId: string;
     redirectUri: string;
     products: string[];
+    replacesGrantId?: string;
     ttlMs?: number;
   }): Promise<StoredSession> {
     await this.db.ensure();
@@ -122,11 +134,13 @@ export class PostgresStore implements GrantStore {
       status: "pending",
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + (input.ttlMs ?? 30 * 60_000)).toISOString(),
+      ...(input.replacesGrantId ? { replacesGrantId: input.replacesGrantId } : {}),
     };
     await this.db.sql.query(
       `INSERT INTO link_sessions (
-         id, link_token, tenant_id, external_user_id, redirect_uri, products, status, created_at, expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)`,
+         id, link_token, tenant_id, external_user_id, redirect_uri, products, status, created_at, expires_at,
+         replaces_grant_id
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)`,
       [
         session.id,
         session.linkToken,
@@ -137,6 +151,7 @@ export class PostgresStore implements GrantStore {
         session.status,
         session.createdAt,
         session.expiresAt,
+        session.replacesGrantId ?? null,
       ],
     );
     return session;
@@ -303,6 +318,67 @@ export class PostgresStore implements GrantStore {
       [grant.tenantId, grant.provider, grant.email.trim(), grant.id, updatedAt],
     );
     return rows.map(mapGrant).sort(compareCreated);
+  }
+
+  async reassignGrant(
+    input: ReassignGrantInput,
+  ): Promise<{ grant: Grant; previousExternalUserId: string } | undefined> {
+    await this.db.ensure();
+    // One conditional statement; the row lock taken in prev makes the returned
+    // previous owner the one this write replaced, even with a concurrent reuse.
+    const rows = await this.db.sql.query<GrantRow & { previous_external_user_id: string }>(
+      `WITH prev AS (
+         SELECT id, external_user_id FROM grants
+         WHERE id = $1 AND tenant_id = $2 AND status IN ('active', 'needs_reauth')
+         FOR UPDATE
+       )
+       UPDATE grants g
+       SET external_user_id = $3, status = 'active', scopes = $4::jsonb, updated_at = $5, replaced_by = NULL
+       FROM prev
+       WHERE g.id = prev.id AND g.status IN ('active', 'needs_reauth')
+       RETURNING ${PREFIXED_GRANT_COLUMNS}, prev.external_user_id AS previous_external_user_id`,
+      [input.id, input.tenantId, input.externalUserId, JSON.stringify(input.scopes), input.updatedAt],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    return { grant: mapGrant(row), previousExternalUserId: row.previous_external_user_id };
+  }
+
+  async retireGrants(input: RetireGrantsInput): Promise<Grant[]> {
+    await this.db.ensure();
+    const ids = [...new Set(input.ids)].filter((id) => id !== input.replacedBy);
+    if (ids.length === 0) return [];
+    const rows = await this.db.sql.query<GrantRow>(
+      `UPDATE grants g
+       SET status = 'revoked', replaced_by = $3, updated_at = $4
+       WHERE g.tenant_id = $1 AND g.id = ANY($2::text[])
+         AND g.status IN ('active', 'needs_reauth')
+         AND ($5::text IS NULL OR g.external_user_id = $5)
+       RETURNING ${PREFIXED_GRANT_COLUMNS}`,
+      [input.tenantId, ids, input.replacedBy, input.updatedAt, input.externalUserId ?? null],
+    );
+    return rows.map(mapGrant).sort(compareCreated);
+  }
+
+  async listTenantGrantsPage(tenantId: string, page: TenantGrantPageQuery): Promise<TenantGrantPage> {
+    await this.db.ensure();
+    const rows = await this.db.sql.query<GrantRow & { last_sync_at: Date | string | null }>(
+      `SELECT ${PREFIXED_GRANT_COLUMNS},
+         (SELECT MAX(j.finished_at) FROM sync_jobs j
+          WHERE j.grant_id = g.id AND j.status = 'completed') AS last_sync_at
+       FROM grants g
+       WHERE g.tenant_id = $1
+         AND ($2::timestamptz IS NULL OR (g.created_at, g.id) > ($2::timestamptz, $3::text))
+       ORDER BY g.created_at ASC, g.id ASC
+       LIMIT $4`,
+      [tenantId, page.after?.createdAt ?? null, page.after?.id ?? "", page.limit + 1],
+    );
+    const grants: TenantGrant[] = rows.slice(0, page.limit).map((row) => {
+      const grant: TenantGrant = mapGrant(row);
+      if (row.last_sync_at) grant.lastSyncAt = asIso(row.last_sync_at);
+      return grant;
+    });
+    return { grants, hasMore: rows.length > page.limit };
   }
 
   async findActiveGrantsByEmail(email: string): Promise<Grant[]> {
@@ -747,6 +823,7 @@ function mapSession(row: SessionRow): StoredSession {
   if (row.code_verifier) session.codeVerifier = row.code_verifier;
   if (row.public_token) session.publicToken = row.public_token;
   if (row.grant_id) session.grantId = row.grant_id;
+  if (row.replaces_grant_id) session.replacesGrantId = row.replaces_grant_id;
   return session;
 }
 

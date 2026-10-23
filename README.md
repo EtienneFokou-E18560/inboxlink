@@ -11,13 +11,14 @@ It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18
 Working TypeScript monorepo with:
 
 - Gmail OAuth **authorization URL + callback** with **S256 PKCE** (real Google token exchange when `GOOGLE_CLIENT_*` are set; placeholder credentials use a stub exchange)
-- Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext); refresh fails **closed** (`needs_reauth`)
+- Encrypted **token vault** (AES-256-GCM; revoke deletes the ciphertext); refresh fails **closed**: `needs_reauth` when Google refuses the token, `gmail_unavailable` (grant stays active) for temporary failures
+- Per-tenant **Connect rule** (`INBOXLINK_CONNECT_POLICY`): `replace` (default) or `reuse` (a reconnect of the same address keeps the `grantId` and the cache)
 - In-process **access-token cache** (short-lived access tokens only; refresh tokens stay vaulted)
 - HTTP API: link sessions, **Connect UI** (`@inboxlink/connect-ui`), grants exchange/list/revoke, message list/get, health
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Durable **Postgres sync_jobs** queue (202 + status API; Redis unused)
 
-`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.1.3`** and **`@inboxlink/core@0.1.3`** are published on npm (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.2.0`** and **`@inboxlink/core@0.2.0`** are the current versions (publish from `publish-npm.yml`; `0.1.3` is the latest on npm until then) (`npm i @inboxlink/sdk`).
 
 **IMAP (draft / parked):** `POST /v1/connect/:linkToken/imap` seals password/app-password credentials; list is **INBOX** via [imapflow](https://github.com/postalsys/imapflow) (**MIT**). CI uses a mock transport. Limitations: password/app-password only (no XOAUTH2), INBOX only, best-effort MIME, no IDLE/UID sync, Connect UI is Gmail-first (IMAP is API-only until unparked). Do **not** fork EmailEngine or RustMailer (commercial licenses).
 
@@ -57,7 +58,7 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 | Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL + PKCE, token exchange/refresh, list + normalize |
 | Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
 | Connect UI | `@inboxlink/connect-ui` | Hosted Connect + error pages (CSP + security headers) |
-| SDK | `@inboxlink/sdk` **0.1.3** (npm) | Host HTTP client (Gmail list/get/sync) |
+| SDK | `@inboxlink/sdk` **0.2.0** | Host HTTP client (Gmail list/get/sync, tenant grant listing) |
 | Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
 **Standing rules:** no Production secrets in git; MIT/Apache-compatible only; no career-workspace imports, shared DB, or shared types.
@@ -138,6 +139,7 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `INBOXLINK_API_SECRET` | If `multi` (incl. Production) | Bearer for the default tenant (`/v1/*` except oauth/connect/health). Never commit real values; never ship to browsers. |
 | `INBOXLINK_TENANT_ID` | Optional | Tenant id for `INBOXLINK_API_SECRET` (default `default`) |
 | `INBOXLINK_TENANT_SECRETS` | Optional | Extra `tenantId=secret` pairs (comma/newline) for multiple host apps |
+| `INBOXLINK_CONNECT_POLICY` | Optional | Per-tenant Connect rule, `tenantId=reuse` or `tenantId=replace` (comma/space separated). Unlisted tenants keep `replace`. See [host integration](docs/host-integration.md#one-mailbox-one-live-grant-identities). |
 | `INBOXLINK_RATE_LIMIT_WINDOW_MS` / `INBOXLINK_RATE_LIMIT_MAX` | Optional | Soft in-process abuse guard in multi (defaults 60000 / 120) |
 | `GMAIL_SCOPES` | Optional | Default readonly + openid email |
 | `PORT` / `HOST` | Local only | Not used on Vercel |

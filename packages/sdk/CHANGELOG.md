@@ -1,5 +1,16 @@
 # `@inboxlink/sdk` changelog
 
+## 0.2.0
+
+Minor release for the per-tenant Connect rule and grant clean-up (askel#604). Additive: a host on `0.1.3` keeps working unchanged, and a tenant keeps today's behaviour unless its server sets `INBOXLINK_CONNECT_POLICY`.
+
+- **Reconnect without losing the cache (server, opt-in per tenant).** With `INBOXLINK_CONNECT_POLICY=<tenant>=reuse`, a Connect of an address the tenant already has a live grant for puts the fresh token on that grant: same `grantId`, cached messages kept, status back to `active`, owned by the user who just connected. Only an incremental sync is queued. A Connect of a different address adds a grant next to the existing ones, unless the session names the one it replaces (next item). Tenants not listed keep `replace` (a new grant; earlier grants for the address retired), as in 0.1.3.
+- `link.createSession({ ..., replacesGrantId })`: the host user's own grant this Connect replaces, when you asked the person and they chose "replace". If they connect a different address, that grant is retired (`revoked`, `replaced: true`, token and cache deleted); the same address is reused (or replaced under `replace`). The server answers 400 `invalid_replaces_grant` for a grant that is not this user's in your tenant. New field on `CreateLinkSessionInput` (core).
+- `GrantOwnerOptions` (`{ externalUserId }`) on `messages.list`, `messages.iterate`, `messages.get`, `grants.sync`, `grants.getSyncJob` and `grants.revoke`: name the host user you believe owns the grant. When the grant now belongs to another of your users (reused for them), the call answers **409 `grant_replaced`** and does nothing, so a deleted or stale account cannot read or delete a mailbox that moved on. Without it, calls behave as before.
+- `grants.listAll({ limit?, cursor? })` and `grants.iterateAll()`: every grant of your tenant, oldest first (`GET /v1/grants?all=true`, limit 1–200, default 50). Each `TenantGrant` has `id`, `externalUserId`, `provider`, `status`, `createdAt`, `updatedAt`, `lastSyncAt?` (end of the last finished sync) and `replaced?`. No address, no token. For finding grants whose host user no longer exists on your side.
+- Webhook event **`grant.revoked`** (`GrantRevokedEventData`): `externalUserId` lost the mailbox in a Connect. `reason: "replaced"` (the grant was retired) or `"reassigned"` (the same grant now belongs to another of your users). Handle both like a 409 `grant_replaced`: ask that user to reconnect. Endpoints registered with an explicit `events` list must add it to receive it.
+- **`needs_reauth` only when Google requires it (server).** A grant is marked `needs_reauth` only when Google refuses its refresh token (`invalid_grant`: revoked, expired, consent withdrawn), Gmail answers 401, or Gmail answers 403 for a reason other than a rate limit. A refresh that fails for any other reason (Google 5xx, network, rate limit, a misconfigured client) leaves the grant `active`: reads answer **502 `gmail_unavailable`** and the next sync retries. Previously any refresh failure, and any Gmail 403, asked the person to reconnect. There is no time-based clean-up of `needs_reauth` grants.
+
 ## 0.1.3
 
 Patch release, additive only: hosts on `0.1.2` keep working and simply ignore the new fields.

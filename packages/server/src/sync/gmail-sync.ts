@@ -1,5 +1,10 @@
 import type { Grant, Message, SyncCursor } from "@inboxlink/core";
-import { GmailAdapter, GmailApiError, type GmailHistoryRecord } from "@inboxlink/adapters-gmail";
+import {
+  GmailAdapter,
+  GmailApiError,
+  gmailRequiresReconnect,
+  type GmailHistoryRecord,
+} from "@inboxlink/adapters-gmail";
 import { getAccessTokenCache } from "../access-token-cache.js";
 import {
   markNeedsReauth,
@@ -99,7 +104,7 @@ export async function syncGmailGrantDetailed(
       accessToken: access.accessToken,
     });
   } catch (err) {
-    if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+    if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(grantId);
       await markNeedsReauth(store, grant);
       return withoutMessages({
@@ -279,9 +284,14 @@ async function openAccessToken(input: {
   vault: CiphertextVault;
   gmail: GmailAdapter;
   grant: Grant;
-}): Promise<{ status: "ok"; accessToken: string } | { status: "needs_reauth"; error: string }> {
+}): Promise<
+  | { status: "ok"; accessToken: string }
+  | { status: "needs_reauth" | "gmail_unavailable"; error: string }
+> {
   const access = await openGrantAccessToken(input);
   if (access.ok) return { status: "ok", accessToken: access.accessToken };
+  // A temporary refresh failure leaves the grant as it is; the next sync retries.
+  if (access.error === "provider_unavailable") return { status: "gmail_unavailable", error: "gmail_unavailable" };
   return { status: "needs_reauth", error: access.error };
 }
 

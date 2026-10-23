@@ -5,6 +5,7 @@ import { log } from "../log.js";
 export const WEBHOOK_EVENT_TYPES = [
   "grant.connected",
   "grant.needs_reauth",
+  "grant.revoked",
   "sync.completed",
   "message.created",
 ] as const;

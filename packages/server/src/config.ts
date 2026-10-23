@@ -1,3 +1,4 @@
+import { parseConnectPolicies, type ConnectPolicy } from "./connect-grant.js";
 import {
   buildTenantSecrets,
   DEV_API_SECRET_PLACEHOLDER,
@@ -33,6 +34,11 @@ export type ServerConfig = {
    * `null` = permissive (any http(s) URL) — default for single-tenant demo.
    */
   allowedRedirectOrigins: string[] | null;
+  /**
+   * Per-tenant Connect rule from `INBOXLINK_CONNECT_POLICY` (`tenantId=reuse`).
+   * Tenants not listed keep `replace`.
+   */
+  connectPolicies: Record<string, ConnectPolicy>;
   /** Soft abuse guard for Connect + host APIs (single and multi). */
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
@@ -123,6 +129,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     microsoftTenant: env.MICROSOFT_TENANT?.trim() || "common",
     microsoftScopes,
     allowedRedirectOrigins: parseAllowedRedirectOrigins(env.ALLOWED_REDIRECT_ORIGINS),
+    connectPolicies: parseConnectPolicies(env.INBOXLINK_CONNECT_POLICY),
     rateLimitWindowMs: positiveInt(env.INBOXLINK_RATE_LIMIT_WINDOW_MS, 60_000),
     rateLimitMaxRequests: positiveInt(env.INBOXLINK_RATE_LIMIT_MAX, 120),
     webhookUrl: optionalTrimmed(env.INBOXLINK_WEBHOOK_URL),
