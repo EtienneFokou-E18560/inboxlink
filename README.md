@@ -2,6 +2,8 @@
 
 **Open-source “Plaid for email mailboxes.”**
 
+**Website and docs: [getinboxlink.vercel.app](https://getinboxlink.vercel.app)**
+
 InboxLink is standalone **mailbox connection infrastructure**: Link-style Connect, vaulted OAuth tokens, and a normalized messages API so host apps never hold Gmail refresh tokens.
 
 It does **not** depend on [career-workspace](https://github.com/EtienneFokou-E18560/career-workspace). That app may become a later *consumer* via `@inboxlink/sdk` — never the other way around.

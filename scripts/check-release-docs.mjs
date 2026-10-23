@@ -1,8 +1,10 @@
-// Fails when a published package's version is not reflected in its CHANGELOG and the root README.
+// Fails when a published package's version is not reflected in its CHANGELOG, the root README and the website SDK page.
 import { readFileSync } from "node:fs";
 
 const packages = ["core", "sdk"];
 const readme = readFileSync("README.md", "utf8");
+const siteSdkPage = "apps/site/src/content/docs/reference/sdk.md";
+const siteSdk = readFileSync(siteSdkPage, "utf8");
 const problems = [];
 
 for (const dir of packages) {
@@ -14,10 +16,13 @@ for (const dir of packages) {
   if (!readme.includes(`${name}@${version}`) && !new RegExp(`${name.replace("/", "\\/")}\`? \\*\\*${version.replaceAll(".", "\\.")}\\*\\*`).test(readme)) {
     problems.push(`README.md does not mention ${name} ${version}`);
   }
+  if (!siteSdk.includes(`${name}@${version}`)) {
+    problems.push(`${siteSdkPage} does not mention ${name}@${version}`);
+  }
 }
 
 if (problems.length) {
-  console.error(`Release docs are out of date:\n- ${problems.join("\n- ")}\nAlso update the wiki (Home, Quick-start, SDK, _Sidebar).`);
+  console.error(`Release docs are out of date:\n- ${problems.join("\n- ")}\nAlso update the website guides in apps/site when API behaviour changed.`);
   process.exit(1);
 }
 console.log("Release docs match package versions.");
