@@ -16,10 +16,19 @@ asked InboxLink to connect your mailbox so that the app itself never holds
 your Google password or the key that lets it read your mail. InboxLink keeps
 that key locked away and reads mail **for that app only**.
 
+## Why Google's screen says InboxLink
+
+Google shows the name of whoever holds the access, and that is InboxLink, not
+the app. This is on purpose: the app gets mail through InboxLink and never
+holds the key itself.
+
 ## What the app can see
 
 - **Read-only access.** InboxLink asks Google for permission to read your
   mail. It cannot send, delete or change messages.
+- The exact permissions asked from Google are: *View your email messages and
+  settings* (`gmail.readonly`), plus your email address and a sign-in
+  identifier (`openid`, `email`).
 - The app can read message details such as sender, recipients, subject, date,
   labels and a short preview, and can open a full message, including its
   text and the names of attachments.
@@ -39,7 +48,11 @@ Your Google password never reaches InboxLink or the app: you type it on
 Google's own page.
 
 InboxLink does not sell your data, show you ads, or use your mail to train AI
-models. See the full [privacy policy](https://inboxlink-two.vercel.app/privacy).
+models. InboxLink's use and transfer of information received from Google APIs
+adheres to the
+[Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy),
+including the Limited Use requirements. See the full
+[privacy policy](https://inboxlink-two.vercel.app/privacy).
 
 ## How to disconnect
 

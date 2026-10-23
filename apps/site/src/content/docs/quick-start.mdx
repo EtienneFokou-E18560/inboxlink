@@ -73,7 +73,9 @@ sign-in runs on the InboxLink server.
 5. **Sync and read messages.**
 
    ```ts
-   await il.grants.sync(grantId); // queues a sync job (202 + jobId)
+   const { jobId } = await il.grants.sync(grantId); // queued (HTTP 202)
+   // wait for the sync.completed webhook, or poll:
+   const job = await il.grants.getSyncJob(grantId, jobId); // queued → running → completed (or failed)
 
    const page = await il.messages.list(grantId, { limit: 25 });
    for (const m of page.messages) console.log(m.subject);
@@ -93,6 +95,32 @@ sign-in runs on the InboxLink server.
   through Connect again.
 - To disconnect a mailbox, call `il.grants.revoke(grantId)`. The sealed token
   and cached messages are deleted.
+
+## Troubleshooting
+
+| You see | Cause | Fix |
+|---|---|---|
+| `401` on `createConnectSession` | Missing or wrong API secret | Check `INBOXLINK_API_SECRET` on your server |
+| `redirectUri_not_allowed` | The server only accepts listed origins | Use an allowed origin, or ask for yours to be added |
+| No `public_token` on your redirect | The person cancelled at Google, or Connect failed | Show a "connect again" button |
+| `error=connect_restart` on your redirect | The session expired or was used already | Create a new session and redirect again |
+| Empty `messages.list` right after Connect | The first sync has not finished | Wait for `sync.completed` or the job to complete |
+| Filters ignored | The default source is the cache | Pass `source: "live"` |
+| `409 needs_reauth` or `grant_inactive` | Google withdrew access | Send the person through Connect again |
+
+Errors come back as `InboxLinkApiError`, with `status` and `code`:
+
+```ts
+import { InboxLinkApiError } from "@inboxlink/sdk";
+
+try {
+  await il.messages.list(grantId);
+} catch (err) {
+  if (err instanceof InboxLinkApiError && err.code === "needs_reauth") {
+    // ask the person to reconnect
+  }
+}
+```
 
 ## Next
 

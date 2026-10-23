@@ -6,6 +6,17 @@ description: What InboxLink supports today, what is being built, and what is pla
 InboxLink is built in the open. Each item links to its GitHub issue, where
 you can follow progress or say what you need.
 
+## Project status
+
+- **Version 0.x.** The API can still change between minor versions; the
+  [changelog](/changelog/) says when a host needs to act.
+- **One maintainer.** Issues and pull requests are welcome; answers can take
+  a few days.
+- **Hosted service by request, free, no SLA.** It runs on Vercel and Neon
+  Postgres. For guarantees, [run your own](/operate/self-host/).
+- **Security reports** go through [the Security page](/security/#report-a-vulnerability),
+  never public issues.
+
 ## Available
 
 - Gmail: Connect, message list and get, live Gmail search, history sync,

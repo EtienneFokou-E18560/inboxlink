@@ -15,6 +15,7 @@ hero:
 ---
 
 import { Aside, Card, CardGrid, Steps } from "@astrojs/starlight/components";
+import FlowDiagram from "../../components/FlowDiagram.astro";
 
 ## From sign-in to messages
 
@@ -37,6 +38,8 @@ const page = await il.messages.list(grantId, { limit: 25 });
 ```
 
 ## How it works
+
+<FlowDiagram />
 
 <Steps>
 
@@ -87,5 +90,5 @@ const page = await il.messages.list(grantId, { limit: 25 });
 | **Microsoft 365 / Outlook** | Planned, not available yet |
 | **IMAP** | Planned, not available yet |
 
-InboxLink is at version 0.x: the API can still change between minor versions.
+InboxLink is at version 0.x, run by one maintainer, with a free hosted service and no SLA ([project status](/roadmap/#project-status)).
 Read the [changelog](/changelog/) before upgrading, and the [roadmap](/roadmap/) for what comes next.

@@ -1,0 +1,81 @@
+---
+// Three parties and what each one holds. HTML, not SVG, so it stacks on phones.
+---
+<figure class="flow" aria-labelledby="flow-caption">
+  <div class="party">
+    <p class="name">Your app</p>
+    <p class="holds">Stores a <code>grantId</code></p>
+    <p class="never">Never sees a Google token</p>
+  </div>
+  <div class="link" aria-hidden="true">
+    <span>API secret + <code>grantId</code></span>
+    <span class="arrow">⇄</span>
+    <span>messages, webhooks</span>
+  </div>
+  <div class="party core">
+    <p class="name">InboxLink</p>
+    <p class="holds">Vault: refresh token, encrypted <span class="nowrap">(AES-256-GCM)</span></p>
+    <p class="never">Read-only Gmail access</p>
+  </div>
+  <div class="link" aria-hidden="true">
+    <span>OAuth with PKCE</span>
+    <span class="arrow">⇄</span>
+    <span>Gmail API</span>
+  </div>
+  <div class="party">
+    <p class="name">Google</p>
+    <p class="holds">The person signs in here</p>
+    <p class="never">Password stays with Google</p>
+  </div>
+  <figcaption id="flow-caption">
+    Your app talks to InboxLink with a grant id. Only InboxLink talks to Google, and the refresh token never leaves its vault.
+  </figcaption>
+</figure>
+
+<style>
+  .flow {
+    display: grid;
+    grid-template-columns: 1fr auto 1.2fr auto 1fr;
+    align-items: stretch;
+    gap: 0.5rem;
+    margin: 1.5rem 0;
+  }
+  .party {
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    padding: 0.9rem 1rem;
+    background: var(--sl-color-bg-nav);
+  }
+  .party.core {
+    border-color: var(--sl-color-accent);
+    box-shadow: 0 0 0 1px var(--sl-color-accent);
+  }
+  .party p { margin: 0; }
+  .nowrap { white-space: nowrap; }
+  .name { font-weight: 600; color: var(--sl-color-white); }
+  .holds { margin-top: 0.35rem !important; font-size: var(--sl-text-sm); }
+  .never { margin-top: 0.35rem !important; font-size: var(--sl-text-xs); color: var(--sl-color-gray-3); }
+  .link {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    max-width: 8.5rem;
+    margin: 0;
+  }
+  .arrow { font-size: 1.4rem; color: var(--sl-color-accent); line-height: 1.2; }
+  figcaption {
+    grid-column: 1 / -1;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+    margin-top: 0.25rem;
+  }
+  @media (max-width: 50rem) {
+    .flow { grid-template-columns: 1fr; }
+    .link { max-width: none; flex-direction: row; gap: 0.5rem; }
+    .arrow { transform: rotate(90deg); }
+  }
+</style>
