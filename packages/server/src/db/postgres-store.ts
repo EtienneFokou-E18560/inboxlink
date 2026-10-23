@@ -230,7 +230,7 @@ export class PostgresStore implements GrantStore {
     const rows = await this.db.sql.query<{ id: string }>(
       `UPDATE grants SET status = $2, updated_at = $3
        WHERE id = $1 AND tenant_id = $4 AND status <> 'revoked'
-         AND ($5::timestamptz IS NULL OR updated_at = $5::timestamptz)
+         AND ($5::timestamptz IS NULL OR date_trunc('milliseconds', updated_at) = $5::timestamptz)
        RETURNING id`,
       [grant.id, grant.status, grant.updatedAt, grant.tenantId, opts.expectUpdatedAt ?? null],
     );

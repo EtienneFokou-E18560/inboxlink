@@ -48,7 +48,7 @@ import {
   type ConnectPolicy,
 } from "../connect-grant.js";
 import { inactiveGrantError } from "../grants-replace.js";
-import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
+import { markNeedsReauth, openGrantAccessToken, reusedSince } from "../gmail-access.js";
 import { applyGmailPushNotification, parsePubSubPushBody } from "../sync/gmail-push.js";
 import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watch.js";
 import { drainSyncJobs } from "../queue/sync-queue.js";
@@ -1470,7 +1470,10 @@ async function gmailReadError(
 ): Promise<Response> {
   if (gmailRequiresReconnect(err)) {
     getAccessTokenCache().invalidate(grant.id);
-    await markNeedsReauth(opts.store, grant);
+    if (!(await markNeedsReauth(opts.store, grant)) && (await reusedSince(opts.store, grant))) {
+      // The old token was refused; a reconnect reused the grant meanwhile.
+      return Response.json({ error: "gmail_unavailable" }, { status: 502 });
+    }
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,

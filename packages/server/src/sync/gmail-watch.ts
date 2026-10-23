@@ -3,6 +3,7 @@ import { GmailAdapter, GmailApiError, gmailRequiresReconnect } from "@inboxlink/
 import { getAccessTokenCache } from "../access-token-cache.js";
 import {
   markNeedsReauth,
+  reusedSince,
   openGrantAccessToken,
   type CiphertextVault,
 } from "../gmail-access.js";
@@ -78,7 +79,9 @@ export async function startOrRenewGmailWatch(input: {
   } catch (err) {
     if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(input.grant.id);
-      await markNeedsReauth(input.store, input.grant);
+      if (!(await markNeedsReauth(input.store, input.grant)) && (await reusedSince(input.store, input.grant))) {
+        return { grantId: input.grant.id, status: "watch_failed", error: "reused_since" };
+      }
       return { grantId: input.grant.id, status: "needs_reauth", error: "needs_reauth" };
     }
     log.warn("gmail_watch_failed", {

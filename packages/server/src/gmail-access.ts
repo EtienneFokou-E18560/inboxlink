@@ -68,7 +68,10 @@ export async function openGrantAccessToken(input: {
   } catch (err) {
     cache.invalidate(grant.id);
     if (!gmailRequiresReconnect(err)) return { ok: false, error: "provider_unavailable" };
-    await markNeedsReauth(store, grant);
+    if (!(await markNeedsReauth(store, grant)) && (await reusedSince(store, grant))) {
+      // The refused token was the old one: a reconnect reused this grant meanwhile.
+      return { ok: false, error: "provider_unavailable" };
+    }
     return { ok: false, error: "needs_reauth" };
   }
 }
@@ -92,4 +95,15 @@ export async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<
     grant.updatedAt = updatedAt;
   }
   return changed;
+}
+
+/**
+ * True when the grant was made active again after `grant` was loaded (a
+ * reconnect reused it with a fresh token): a refusal seen by a request that
+ * started before is about the old token and must not ask anyone to reconnect.
+ * Call it after `markNeedsReauth` returned false.
+ */
+export async function reusedSince(store: GrantStore, grant: Grant): Promise<boolean> {
+  const now = await store.getGrant(grant.id).catch(() => undefined);
+  return Boolean(now && now.status === "active" && now.updatedAt !== grant.updatedAt);
 }

@@ -3,14 +3,14 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
-import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { GmailAdapter, GmailTokenRefreshError } from "@inboxlink/adapters-gmail";
 import { unescapeHtml } from "@inboxlink/connect-ui";
 import type { Grant, Message, TokenVault } from "@inboxlink/core";
 import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { connectGrant, parseConnectPolicies, pickReuseTarget } from "./connect-grant.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
-import { markNeedsReauth, type CiphertextVault } from "./gmail-access.js";
+import { markNeedsReauth, openGrantAccessToken, type CiphertextVault } from "./gmail-access.js";
 import type { SyncJob } from "./queue/sync-queue.js";
 import { createApp } from "./routes/app.js";
 import { MemoryStore, type GrantStore } from "./store.js";
@@ -341,12 +341,23 @@ describe("Connect rule `reuse`: only a confirmed mailbox address is reused", () 
     assert.equal(store.grants.get(victim)?.status, "active", "and the victim's grant is not retired");
   });
 
-  it("when Gmail's profile cannot be read, a new grant is made rather than reusing on an unconfirmed address", async () => {
+  it("when Gmail's profile cannot be read, a new grant is made and the existing one keeps its cache", async () => {
     const built = buildApp();
+    const { store } = built;
     const first = await connectAs(built, "google:1");
+    await store.upsertMessages([cached(first, 1)]);
     gmailProfile = 0;
     const second = await connectAs(built, "google:1");
-    assert.notEqual(second, first);
+    assert.notEqual(second, first, "no reuse on an unconfirmed address");
+    assert.equal(store.grants.get(first)?.status, "active", "a blip does not retire it");
+    assert.deepEqual(await store.listMessageIds(first), ["p1"], "nor wipe its cache");
+    // The next Connect with the profile readable lands on one of them and retires the other.
+    gmailProfile = undefined;
+    const third = await connectAs(built, "google:1");
+    assert.equal(third, second, "the user's newest grant is reused");
+    assert.equal(store.grants.get(first)?.status, "revoked");
+    const live = await store.findLiveGrantsByAddress("askel", "gmail", ADDRESS);
+    assert.deepEqual(live.map((g) => g.id), [second]);
   });
 
   it("Microsoft grants are never reused", async () => {
@@ -400,6 +411,21 @@ describe("a failure from before a reconnect does not touch the reused grant", ()
       const now = await store.getGrant("grant_1");
       assert.equal(now?.status, "active", backend.name);
       assert.equal(now?.externalUserId, "google:1", `${backend.name}: the owner is not written back`);
+      // A request that started before the reconnect sees the old token refused: it answers
+      // "temporary", not "reconnect", and the grant stays active.
+      resetAccessTokenCacheForTests();
+      const refused = await openGrantAccessToken({
+        store,
+        vault,
+        gmail: {
+          async refreshAccessToken(): Promise<never> {
+            throw new GmailTokenRefreshError(400, "invalid_grant");
+          },
+        },
+        grant: stale,
+      });
+      assert.deepEqual(refused, { ok: false, error: "provider_unavailable" }, backend.name);
+      assert.equal((await store.getGrant("grant_1"))?.status, "active", backend.name);
       // A failure of the current version still marks it.
       assert.equal(await markNeedsReauth(store, now!), true, backend.name);
       assert.equal((await store.getGrant("grant_1"))?.status, "needs_reauth");

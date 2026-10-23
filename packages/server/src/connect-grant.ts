@@ -215,7 +215,11 @@ async function createNew(input: ConnectGrantInput): Promise<ConnectGrantOutcome>
   // same address (any host user). Skipped when the provider sent no address.
   // A failure here must not fail a Connect whose token is already sealed: the
   // duplicates stay (as before this rule) and the next Connect retries.
-  if (input.verifiedAddress ?? input.email) {
+  // Under `reuse` without a confirmed address (Gmail's profile could not be
+  // read), retire nothing: the existing grant keeps its cache and the next
+  // Connect reuses one of them, instead of a blip wiping what `reuse` keeps.
+  const unconfirmedReuse = input.policy === "reuse" && input.provider === "gmail" && !input.verifiedAddress;
+  if ((input.verifiedAddress ?? input.email) && !unconfirmedReuse) {
     try {
       const ids = await replaceEarlierGrants({ store, vault, grant });
       for (const id of ids) {

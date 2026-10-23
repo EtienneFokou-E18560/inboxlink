@@ -8,6 +8,7 @@ import {
 import { getAccessTokenCache } from "../access-token-cache.js";
 import {
   markNeedsReauth,
+  reusedSince,
   openGrantAccessToken,
   type CiphertextVault,
 } from "../gmail-access.js";
@@ -106,7 +107,18 @@ export async function syncGmailGrantDetailed(
   } catch (err) {
     if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(grantId);
-      await markNeedsReauth(store, grant);
+      const stale = !(await markNeedsReauth(store, grant)) && (await reusedSince(store, grant));
+      if (stale) {
+        // The old token was refused; a reconnect reused the grant meanwhile.
+        return withoutMessages({
+          grantId,
+          status: "gmail_unavailable",
+          mode: force ? "bootstrap" : "incremental",
+          upserted: 0,
+          deleted: 0,
+          error: "gmail_unavailable",
+        });
+      }
       return withoutMessages({
         grantId,
         status: "needs_reauth",
