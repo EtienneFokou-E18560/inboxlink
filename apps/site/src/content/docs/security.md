@@ -50,9 +50,10 @@ Reducing what is kept is planned in
 ## Report a vulnerability
 
 Do **not** open a public issue for anything involving tokens, keys, API
-secrets or mailbox data. Use GitHub's
-[private vulnerability reporting](https://github.com/EtienneFokou-E18560/inboxlink/security/advisories/new)
-and include the impact, the component (SDK, server, Connect) and whether the
+secrets or mailbox data. Email [efokou@cieltd.org](mailto:efokou@cieltd.org)
+or use GitHub's
+[private vulnerability reporting](https://github.com/EtienneFokou-E18560/inboxlink/security/advisories/new).
+Include the impact, the component (SDK, server, Connect) and whether the
 hosted service or a self-host was involved. Never attach live tokens, keys or
 message bodies.
 

@@ -64,10 +64,10 @@ Any of these stops access:
    [Google Account → Third-party connections](https://myaccount.google.com/connections),
    find InboxLink and remove its access. Access stops at once; the app will
    ask you to connect again if you keep using it.
-3. **Ask for deletion**: send a
-   [private request on GitHub](https://github.com/EtienneFokou-E18560/inboxlink/security/advisories/new)
-   (only the maintainer sees it) with the app you used and your address. Do
-   not post personal details in a public issue.
+3. **Ask for deletion**: email
+   [efokou@cieltd.org](mailto:efokou@cieltd.org) with the app you used and
+   the address you connected. Do not post personal details in a public
+   GitHub issue.
 
 ## Is it safe?
 
