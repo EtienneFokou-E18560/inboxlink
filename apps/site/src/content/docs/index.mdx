@@ -14,7 +14,7 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, Steps } from "@astrojs/starlight/components";
+import { Aside, Card, CardGrid, Steps } from "@astrojs/starlight/components";
 
 ## From sign-in to messages
 
@@ -74,6 +74,10 @@ const page = await il.messages.list(grantId, { limit: 25 });
   </Card>
 </CardGrid>
 
+<Aside type="tip" title="Connected your Gmail to an app through InboxLink?">
+  Read [what the app can see, what InboxLink keeps and how to disconnect](/for-mailbox-owners/).
+</Aside>
+
 ## What works today
 
 | | |
@@ -84,4 +88,4 @@ const page = await il.messages.list(grantId, { limit: 25 });
 | **IMAP** | Planned, not available yet |
 
 InboxLink is at version 0.x: the API can still change between minor versions.
-Follow the [changelog](https://github.com/EtienneFokou-E18560/inboxlink/blob/main/packages/sdk/CHANGELOG.md) before upgrading.
+Read the [changelog](/changelog/) before upgrading, and the [roadmap](/roadmap/) for what comes next.

@@ -27,12 +27,20 @@ export default defineConfig({
             { label: "Sync and webhooks", slug: "guides/sync-and-webhooks" },
           ],
         },
-        { label: "Reference", items: [{ label: "SDK", slug: "reference/sdk" }] },
+        {
+          label: "Reference",
+          items: [
+            { label: "SDK", slug: "reference/sdk" },
+            { label: "Changelog", slug: "changelog" },
+            { label: "Roadmap", slug: "roadmap" },
+          ],
+        },
         {
           label: "Operate",
           items: [
             { label: "Self-hosting", slug: "operate/self-host" },
             { label: "Security", slug: "security" },
+            { label: "For mailbox owners", slug: "for-mailbox-owners" },
             { label: "Status", link: "https://inboxlink-two.vercel.app/status", attrs: { target: "_blank" } },
           ],
         },

@@ -9,3 +9,8 @@
   --sl-color-accent: #4f46e5;
   --sl-color-accent-high: #312e81;
 }
+
+/* The imported CHANGELOG.md starts with its own h1; the page already has a title. */
+.changelog > h1:first-child {
+  display: none;
+}
