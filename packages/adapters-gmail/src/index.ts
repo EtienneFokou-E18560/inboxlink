@@ -51,25 +51,32 @@ export class GmailTokenRefreshError extends Error {
   }
 }
 
-/** Gmail 403 reasons that mean "slow down", not "access withdrawn". */
-const GMAIL_RATE_LIMIT_REASONS = new Set([
+/** Gmail 403 reasons that mean "slow down" or "our setup", not "access withdrawn". */
+const GMAIL_TEMPORARY_403_REASONS = new Set([
   "rateLimitExceeded",
   "userRateLimitExceeded",
   "dailyLimitExceeded",
   "quotaExceeded",
   "backendError",
+  // The Gmail API is off in InboxLink's own Google Cloud project: an operator
+  // fix, not the person's.
+  "accessNotConfigured",
+  "RESOURCE_EXHAUSTED",
 ]);
 
 /**
  * True when Google requires the person to connect again: a refresh refused
- * with `invalid_grant`, a Gmail 401 (token refused), or a Gmail 403 that is
- * not a rate limit (scope or consent withdrawn). Everything else is temporary.
+ * with `invalid_grant`, a Gmail 401 (token refused), or a Gmail 403 whose reason
+ * is not a rate limit or our own setup (scope or consent withdrawn). Everything
+ * else is temporary.
  */
 export function gmailRequiresReconnect(err: unknown): boolean {
   if (err instanceof GmailTokenRefreshError) return err.reconnect;
   if (err instanceof GmailApiError) {
     if (err.status === 401) return true;
-    if (err.status === 403) return !(err.reason && GMAIL_RATE_LIMIT_REASONS.has(err.reason));
+    // A 403 that names no reason (not Google's JSON: a proxy or an outage page)
+    // is not proof the person withdrew access.
+    if (err.status === 403) return Boolean(err.reason) && !GMAIL_TEMPORARY_403_REASONS.has(err.reason!);
   }
   return false;
 }

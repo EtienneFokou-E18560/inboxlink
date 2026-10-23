@@ -64,6 +64,13 @@ export type ConnectGrantInput = {
   provider: Provider;
   /** The address the provider reported; undefined when it sent none. */
   email: string | undefined;
+  /**
+   * The mailbox address the provider itself confirmed for this token (Gmail
+   * `users.getProfile().emailAddress`). `reuse` matches on this only: an
+   * id-token or directory address can be set by whoever controls the account,
+   * and must never be enough to take over another user's grant.
+   */
+  verifiedAddress?: string;
   /** Used for a new grant when the provider sent no address. */
   fallbackEmail: string;
   refreshToken: string;
@@ -98,8 +105,9 @@ export class VaultSealError extends Error {
  * throws `VaultSealError` and leaves no new grant behind.
  */
 export async function connectGrant(input: ConnectGrantInput): Promise<ConnectGrantOutcome> {
-  if (input.policy === "reuse" && input.email) {
-    const reused = await tryReuse(input, input.email);
+  // Gmail only: it is the provider whose mailbox address InboxLink can confirm.
+  if (input.policy === "reuse" && input.provider === "gmail" && input.verifiedAddress) {
+    const reused = await tryReuse(input, input.verifiedAddress);
     if (reused) return reused;
   }
   return createNew(input);
@@ -130,8 +138,10 @@ async function tryReuse(input: ConnectGrantInput, email: string): Promise<Connec
   if (!claimed) {
     // Retired between the lookup and the claim (a concurrent Connect took the
     // address another way). A revoked grant holds no token: drop what we just
-    // sealed and fall back to a new grant.
-    const now = await store.getGrant(target.id);
+    // sealed and fall back to a new grant. If the lookup itself fails, drop it
+    // anyway: a live grant then needs one refresh failure to ask again, which is
+    // better than a revoked grant holding a token.
+    const now = await store.getGrant(target.id).catch(() => undefined);
     if (!now || now.status === "revoked") await vault.destroy(target.id);
     return undefined;
   }
@@ -184,7 +194,9 @@ async function createNew(input: ConnectGrantInput): Promise<ConnectGrantOutcome>
     tenantId,
     externalUserId: input.externalUserId,
     provider: input.provider,
-    email: input.email ?? input.fallbackEmail,
+    // The confirmed mailbox address when there is one, so the same-address
+    // retirement below can only ever retire grants for this very mailbox.
+    email: input.verifiedAddress ?? input.email ?? input.fallbackEmail,
     status: "active",
     scopes: [...input.scopes],
     createdAt,
@@ -203,7 +215,7 @@ async function createNew(input: ConnectGrantInput): Promise<ConnectGrantOutcome>
   // same address (any host user). Skipped when the provider sent no address.
   // A failure here must not fail a Connect whose token is already sealed: the
   // duplicates stay (as before this rule) and the next Connect retries.
-  if (input.email) {
+  if (input.verifiedAddress ?? input.email) {
     try {
       const ids = await replaceEarlierGrants({ store, vault, grant });
       for (const id of ids) {
@@ -230,8 +242,26 @@ async function createNew(input: ConnectGrantInput): Promise<ConnectGrantOutcome>
  * Retire grants by id (live ones of this tenant only), then delete their
  * tokens and cached messages. Logs and returns [] on a store failure.
  */
+/**
+ * Retire the grant a host named for this Connect (`replacesGrantId`), when it
+ * is still live and still that host user's. For Connect paths that do not go
+ * through `connectGrant` (IMAP). Best effort, like every retirement here.
+ */
+export function retireNamedGrant(input: {
+  store: GrantStore;
+  vault: TokenVault;
+  tenantId: string;
+  externalUserId: string;
+  replacesGrantId: string;
+  replacedBy: string;
+}): Promise<Grant[]> {
+  return retireSafe(input, { ids: [input.replacesGrantId], replacedBy: input.replacedBy, ownOnly: true });
+}
+
+type RetireContext = Pick<ConnectGrantInput, "store" | "vault" | "tenantId" | "externalUserId">;
+
 async function retireSafe(
-  input: ConnectGrantInput,
+  input: RetireContext,
   what: { ids: string[]; replacedBy: string; ownOnly?: boolean },
 ): Promise<Grant[]> {
   const { store, vault, tenantId } = input;

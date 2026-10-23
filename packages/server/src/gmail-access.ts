@@ -76,14 +76,17 @@ export async function openGrantAccessToken(input: {
 /**
  * Mark a grant `needs_reauth` after its token was refused. Conditional: a
  * grant retired meanwhile (a later Connect replaced it while this request or
- * sync was running) stays `revoked` with its `replacedBy`. Returns whether the
+ * sync was running) stays `revoked` with its `replacedBy`, and a grant reused
+ * meanwhile (changed since it was loaded) is left as the reconnect set it. Returns whether the
  * status changed; `grant` is updated in place only then.
  */
 export async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<boolean> {
   const updatedAt = new Date().toISOString();
   const next: Grant = { ...grant, status: "needs_reauth", updatedAt };
   delete next.replacedBy;
-  const changed = await store.updateGrant(next);
+  // Only over the version this request loaded: if a reconnect reused the grant
+  // meanwhile (fresh token, `active`), this old failure says nothing about it.
+  const changed = await store.updateGrant(next, { expectUpdatedAt: grant.updatedAt });
   if (changed) {
     grant.status = "needs_reauth";
     grant.updatedAt = updatedAt;

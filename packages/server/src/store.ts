@@ -113,8 +113,11 @@ export interface GrantStore {
    * Write a grant's `status` and `updatedAt`. Never touches a `revoked` grant
    * (a retired grant stays retired, with its `replacedBy`): returns false when
    * the grant is missing, belongs to another tenant, or is already revoked.
+   * With `expectUpdatedAt`, writes only while the stored grant still has that
+   * `updatedAt`: a request that loaded the grant before a reconnect reused it
+   * cannot mark the fresh grant with its stale failure.
    */
-  updateGrant(grant: Grant): Promise<boolean>;
+  updateGrant(grant: Grant, opts?: { expectUpdatedAt?: string }): Promise<boolean>;
   getGrant(id: string): Promise<Grant | undefined>;
   deleteGrant(id: string, tenantId: string): Promise<void>;
   listGrants(tenantId: string, externalUserId: string): Promise<Grant[]>;
@@ -267,16 +270,14 @@ export class MemoryStore implements GrantStore {
     this.grants.set(grant.id, grant);
   }
 
-  async updateGrant(grant: Grant): Promise<boolean> {
+  async updateGrant(grant: Grant, opts: { expectUpdatedAt?: string } = {}): Promise<boolean> {
     const existing = this.grants.get(grant.id);
     if (!existing || existing.tenantId !== grant.tenantId) return false;
     if (existing.status === "revoked") return false;
-    // Only status and timestamps move here; `replacedBy` is set by
-    // `retireEarlierGrants` alone.
-    const next: Grant = { ...grant };
-    delete next.replacedBy;
-    if (existing.replacedBy) next.replacedBy = existing.replacedBy;
-    this.grants.set(grant.id, next);
+    if (opts.expectUpdatedAt !== undefined && existing.updatedAt !== opts.expectUpdatedAt) return false;
+    // Only status and timestamps move here (like the Postgres store): owner,
+    // scopes and `replacedBy` are never written back from a caller's snapshot.
+    this.grants.set(grant.id, { ...existing, status: grant.status, updatedAt: grant.updatedAt });
     return true;
   }
 

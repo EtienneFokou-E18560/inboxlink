@@ -42,6 +42,7 @@ import { getAccessTokenCache } from "../access-token-cache.js";
 import {
   connectGrant,
   connectPolicyFor,
+  retireNamedGrant,
   VaultSealError,
   type ConnectGrantOutcome,
   type ConnectPolicy,
@@ -316,7 +317,12 @@ export function createApp(opts: CreateAppOptions) {
         typeof body.replacesGrantId === "string" && body.replacesGrantId.length <= 128
           ? await opts.store.getGrant(body.replacesGrantId)
           : undefined;
-      if (!named || named.tenantId !== tenantId || named.externalUserId !== externalUserId) {
+      if (
+        !named ||
+        named.tenantId !== tenantId ||
+        named.externalUserId !== externalUserId ||
+        named.status === "revoked"
+      ) {
         return c.json({ error: "invalid_replaces_grant" }, 400);
       }
       replacesGrantId = named.id;
@@ -502,6 +508,20 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
 
+    // The grant the host said this Connect replaces (the person chose
+    // "replace"). IMAP has no confirmed address to reuse on, so it never reuses.
+    if (session.replacesGrantId) {
+      const retired = await retireNamedGrant({
+        store: opts.store,
+        vault: opts.vault,
+        tenantId: session.tenantId,
+        externalUserId: session.externalUserId,
+        replacesGrantId: session.replacesGrantId,
+        replacedBy: grantId,
+      });
+      await emitRevokedWebhooks(opts.webhooks, { grant, reused: false, retired });
+    }
+
     session.oauthState = undefined;
     const publicToken = randomToken(24);
     session.status = "completed";
@@ -605,16 +625,31 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_missing_refresh"),
       );
     }
+    const policy = connectPolicyFor(appOpts.connectPolicies, session.tenantId);
+    // Reuse keys on the mailbox address Gmail itself reports for this token,
+    // not on the id-token address. Unavailable: a new grant is made (as `replace`).
+    let verifiedAddress: string | undefined;
+    if (policy === "reuse" && provider === "gmail") {
+      try {
+        verifiedAddress = (await appOpts.gmail.getProfile(tokens.accessToken)).emailAddress;
+      } catch (err) {
+        log.warn("connect_profile_failed", {
+          tenantId: session.tenantId,
+          gmailStatus: err instanceof GmailApiError ? err.status : undefined,
+        });
+      }
+    }
     let outcome: ConnectGrantOutcome;
     try {
       outcome = await connectGrant({
         store: appOpts.store,
         vault: appOpts.vault,
-        policy: connectPolicyFor(appOpts.connectPolicies, session.tenantId),
+        policy,
         tenantId: session.tenantId,
         externalUserId: session.externalUserId,
         provider,
         email: tokens.email,
+        ...(verifiedAddress ? { verifiedAddress } : {}),
         fallbackEmail: provider === "gmail" ? "unknown@gmail.com" : "unknown@outlook.com",
         refreshToken,
         scopes: tokens.scopes.length ? tokens.scopes : [...scopes],
@@ -1344,7 +1379,9 @@ function decodeTenantCursor(raw: string | undefined): { createdAt: string; id: s
   if (sep <= 0) return null;
   const createdAt = decoded.slice(0, sep);
   const id = decoded.slice(sep + 1);
-  if (!id || Number.isNaN(Date.parse(createdAt))) return null;
+  // Exactly what encodeTenantCursor writes: an ISO instant and a grant id.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/.test(createdAt)) return null;
+  if (Number.isNaN(Date.parse(createdAt)) || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return null;
   return { createdAt, id };
 }
 

@@ -222,15 +222,17 @@ export class PostgresStore implements GrantStore {
     );
   }
 
-  async updateGrant(grant: Grant): Promise<boolean> {
+  async updateGrant(grant: Grant, opts: { expectUpdatedAt?: string } = {}): Promise<boolean> {
     await this.db.ensure();
     // Conditional: a retired (revoked) grant is never moved back, and
-    // `replaced_by` is written only by `retireEarlierGrants`.
+    // `replaced_by` is written only by the retire steps. With expectUpdatedAt,
+    // only the version the caller loaded is written over.
     const rows = await this.db.sql.query<{ id: string }>(
       `UPDATE grants SET status = $2, updated_at = $3
        WHERE id = $1 AND tenant_id = $4 AND status <> 'revoked'
+         AND ($5::timestamptz IS NULL OR updated_at = $5::timestamptz)
        RETURNING id`,
-      [grant.id, grant.status, grant.updatedAt, grant.tenantId],
+      [grant.id, grant.status, grant.updatedAt, grant.tenantId, opts.expectUpdatedAt ?? null],
     );
     return rows.length > 0;
   }
@@ -362,14 +364,17 @@ export class PostgresStore implements GrantStore {
 
   async listTenantGrantsPage(tenantId: string, page: TenantGrantPageQuery): Promise<TenantGrantPage> {
     await this.db.ensure();
+    // Keyset on created_at at millisecond precision: the cursor carries a JS
+    // ISO time, so a row written with microseconds must compare as it reads.
     const rows = await this.db.sql.query<GrantRow & { last_sync_at: Date | string | null }>(
       `SELECT ${PREFIXED_GRANT_COLUMNS},
          (SELECT MAX(j.finished_at) FROM sync_jobs j
           WHERE j.grant_id = g.id AND j.status = 'completed') AS last_sync_at
        FROM grants g
        WHERE g.tenant_id = $1
-         AND ($2::timestamptz IS NULL OR (g.created_at, g.id) > ($2::timestamptz, $3::text))
-       ORDER BY g.created_at ASC, g.id ASC
+         AND ($2::timestamptz IS NULL
+              OR (date_trunc('milliseconds', g.created_at), g.id) > ($2::timestamptz, $3::text))
+       ORDER BY date_trunc('milliseconds', g.created_at) ASC, g.id ASC
        LIMIT $4`,
       [tenantId, page.after?.createdAt ?? null, page.after?.id ?? "", page.limit + 1],
     );

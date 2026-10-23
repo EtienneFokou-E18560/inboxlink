@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { GmailAdapter } from "@inboxlink/adapters-gmail";
@@ -10,7 +10,7 @@ import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { connectGrant, parseConnectPolicies, pickReuseTarget } from "./connect-grant.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
-import type { CiphertextVault } from "./gmail-access.js";
+import { markNeedsReauth, type CiphertextVault } from "./gmail-access.js";
 import type { SyncJob } from "./queue/sync-queue.js";
 import { createApp } from "./routes/app.js";
 import { MemoryStore, type GrantStore } from "./store.js";
@@ -24,23 +24,37 @@ type Tenant = keyof typeof SECRETS;
 
 /** The address Google reports on the next Connect. */
 let googleEmail = ADDRESS;
+/** The mailbox Gmail's profile reports; undefined: the same as googleEmail. 0: the profile call fails. */
+let gmailProfile: string | 0 | undefined;
+/** Google's answer to a token refresh: [status, body]. */
+let refreshAnswer: [number, unknown] = [200, { access_token: "ya29.refreshed", expires_in: 3600 }];
+/** Gmail's answer to a live messages list: [status, body]. */
+let listAnswer: [number, unknown] = [200, { messages: [] }];
 /** Each Connect gets its own refresh token, so a test can tell which one is sealed. */
 let refreshCounter = 0;
 
 let google: Server;
 let tokenUrl = "";
 let userinfoUrl = "";
-
-function drain(req: IncomingMessage): Promise<void> {
-  return new Promise((resolve) => {
-    req.resume();
-    req.on("end", () => resolve());
-  });
-}
+let gmailApiBaseUrl = "";
 
 before(async () => {
   google = createServer(async (req, res) => {
-    await drain(req);
+    const body = await new Promise<string>((resolve) => {
+      let text = "";
+      req.on("data", (chunk) => (text += chunk));
+      req.on("end", () => resolve(text));
+    });
+    if (req.url?.startsWith("/token") && body.includes("grant_type=refresh_token")) {
+      res.writeHead(refreshAnswer[0], { "content-type": "application/json" });
+      res.end(JSON.stringify(refreshAnswer[1]));
+      return;
+    }
+    if (req.url?.startsWith("/gmail/v1/users/me/messages")) {
+      res.writeHead(listAnswer[0], { "content-type": "application/json" });
+      res.end(JSON.stringify(listAnswer[1]));
+      return;
+    }
     if (req.url?.startsWith("/token")) {
       refreshCounter += 1;
       res.writeHead(200, { "content-type": "application/json" });
@@ -59,6 +73,16 @@ before(async () => {
       res.end(JSON.stringify({ email: googleEmail }));
       return;
     }
+    if (req.url?.startsWith("/gmail/v1/users/me/profile")) {
+      if (gmailProfile === 0) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: 503 } }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ emailAddress: gmailProfile ?? googleEmail, historyId: "1" }));
+      return;
+    }
     res.writeHead(404);
     res.end();
   });
@@ -66,6 +90,7 @@ before(async () => {
   const port = (google.address() as { port: number }).port;
   tokenUrl = `http://127.0.0.1:${port}/token`;
   userinfoUrl = `http://127.0.0.1:${port}/userinfo`;
+  gmailApiBaseUrl = `http://127.0.0.1:${port}/gmail/v1`;
 });
 
 after(async () => {
@@ -74,6 +99,9 @@ after(async () => {
 
 beforeEach(() => {
   googleEmail = ADDRESS;
+  gmailProfile = undefined;
+  refreshAnswer = [200, { access_token: "ya29.refreshed", expires_in: 3600 }];
+  listAnswer = [200, { messages: [] }];
   resetAccessTokenCacheForTests();
 });
 
@@ -93,6 +121,7 @@ function buildApp(policy = "askel=reuse beta=reuse") {
       redirectUri: "http://localhost:8787/v1/oauth/gmail/callback",
       tokenUrl,
       userinfoUrl,
+      gmailApiBaseUrl,
     }),
     publicBaseUrl: "http://localhost:8787",
     apiSecret: SECRETS.askel,
@@ -292,6 +321,92 @@ describe("Connect rule `reuse` (askel#604): same address", () => {
   });
 });
 
+describe("Connect rule `reuse`: only a confirmed mailbox address is reused", () => {
+  it("a token whose Gmail mailbox differs from the id-token address never takes over a grant", async () => {
+    const built = buildApp();
+    const { store, vault } = built;
+    const victim = await connectAs(built, "google:victim");
+    await store.upsertMessages([cached(victim, 1)]);
+    const victimToken = await sealedToken(vault, store.grants.get(victim)!);
+
+    // The account claims the victim's address, but its mailbox is another one.
+    gmailProfile = "attacker@gmail.com";
+    const attacker = await connectAs(built, "google:attacker");
+
+    assert.notEqual(attacker, victim, "a new grant, not the victim's");
+    assert.equal(store.grants.get(victim)?.externalUserId, "google:victim");
+    assert.equal(await sealedToken(vault, store.grants.get(victim)!), victimToken, "the victim's token is untouched");
+    assert.deepEqual(await store.listMessageIds(attacker), [], "no cache handed over");
+    assert.equal(store.grants.get(attacker)?.email, "attacker@gmail.com", "filed under the mailbox it really is");
+    assert.equal(store.grants.get(victim)?.status, "active", "and the victim's grant is not retired");
+  });
+
+  it("when Gmail's profile cannot be read, a new grant is made rather than reusing on an unconfirmed address", async () => {
+    const built = buildApp();
+    const first = await connectAs(built, "google:1");
+    gmailProfile = 0;
+    const second = await connectAs(built, "google:1");
+    assert.notEqual(second, first);
+  });
+
+  it("Microsoft grants are never reused", async () => {
+    const { store, vault } = await BACKENDS[0]!.make();
+    await store.putGrant({ ...row("grant_ms", "askel", "u1", "2026-10-01T00:00:00.000Z"), provider: "microsoft" });
+    const out = await connectGrant({
+      store,
+      vault,
+      policy: "reuse",
+      tenantId: "askel",
+      externalUserId: "u2",
+      provider: "microsoft",
+      email: ADDRESS,
+      verifiedAddress: ADDRESS,
+      fallbackEmail: "unknown@outlook.com",
+      refreshToken: "r",
+      scopes: [],
+      createdAt: () => "2026-10-23T00:00:00.000Z",
+      newGrantId: () => "grant_ms_new",
+    });
+    assert.equal(out.reused, false);
+    assert.equal(out.grant.id, "grant_ms_new");
+  });
+});
+
+describe("a failure from before a reconnect does not touch the reused grant", () => {
+  it("markNeedsReauth with the old snapshot leaves the reused grant active and its owner as set", async () => {
+    for (const backend of BACKENDS) {
+      const { store, vault } = await backend.make();
+      await store.putGrant(row("grant_1", "askel", "anon_1", "2026-10-01T00:00:00.000Z"));
+      await vault.seal("1//old", { grantId: "grant_1", tenantId: "askel" });
+      const stale = (await store.getGrant("grant_1"))!; // a sync loaded it
+      const out = await connectGrant({
+        store,
+        vault,
+        policy: "reuse",
+        tenantId: "askel",
+        externalUserId: "google:1",
+        provider: "gmail",
+        email: ADDRESS,
+        verifiedAddress: ADDRESS,
+        fallbackEmail: "unknown@gmail.com",
+        refreshToken: "1//new",
+        scopes: ["s"],
+        createdAt: () => "2026-10-23T00:00:00.000Z",
+        newGrantId: () => "grant_new",
+      });
+      assert.equal(out.reused, true);
+      // ...then the old token is refused and the stale sync marks it.
+      assert.equal(await markNeedsReauth(store, stale), false, backend.name);
+      const now = await store.getGrant("grant_1");
+      assert.equal(now?.status, "active", backend.name);
+      assert.equal(now?.externalUserId, "google:1", `${backend.name}: the owner is not written back`);
+      // A failure of the current version still marks it.
+      assert.equal(await markNeedsReauth(store, now!), true, backend.name);
+      assert.equal((await store.getGrant("grant_1"))?.status, "needs_reauth");
+    }
+  });
+});
+
 describe("Connect rule `reuse`: different address", () => {
   it("replaces the named grant when the host says the person chose replace", async () => {
     const built = buildApp();
@@ -336,10 +451,12 @@ describe("Connect rule `reuse`: different address", () => {
     assert.equal(built.store.grants.get(first)?.status, "active");
   });
 
-  it("refuses a replacesGrantId that is not the host user's own grant in this tenant", async () => {
+  it("refuses a replacesGrantId that is not the host user's own live grant in this tenant", async () => {
     const built = buildApp();
     const mine = await connectAs(built, "google:1");
+    built.store.grants.set("grant_dead", { ...built.store.grants.get(mine)!, id: "grant_dead", status: "revoked" });
     for (const [tenant, user, id] of [
+      ["askel", "google:1", "grant_dead"], // already revoked
       ["askel", "google:2", mine], // another user's grant
       ["beta", "google:1", mine], // another tenant's grant
       ["askel", "google:1", "grant_nope"],
@@ -368,14 +485,24 @@ describe("Connect rule `reuse`: different address", () => {
 });
 
 describe("Connect rule per tenant", () => {
-  it("a tenant without the setting keeps replace: a new grant, the old one retired", async () => {
+  it("a tenant without the setting keeps replace: a new grant, the old one retired, and the host is told", async () => {
     const built = buildApp();
-    const { store } = built;
+    const { store, events, jobs } = built;
     const first = await connectAs(built, "u1", { tenant: "plain" });
+    events.length = 0;
     const second = await connectAs(built, "u2", { tenant: "plain" });
     assert.notEqual(second, first);
     assert.equal(store.grants.get(first)?.status, "revoked");
     assert.equal(store.grants.get(first)?.replacedBy, second);
+    assert.deepEqual(jobs.map((j) => j.kind), ["bootstrap", "bootstrap"], "job kinds as before");
+    // New in 0.2.0 for every tenant: the user who lost the mailbox is named.
+    assert.deepEqual(
+      events.map((e) => [e.type, e.data.grantId, e.data.externalUserId, e.data.reason ?? e.data.reused]),
+      [
+        ["grant.connected", second, "u2", false],
+        ["grant.revoked", first, "u1", "replaced"],
+      ],
+    );
   });
 
   it("nothing is shared across tenants: each keeps its own grant for the same address", async () => {
@@ -435,6 +562,49 @@ describe("concurrent Connects for one address under `reuse`", () => {
   });
 });
 
+describe("needs_reauth only when Google requires it, through the HTTP routes", () => {
+  async function liveRead(built: Built, grantId: string) {
+    return built.app.request(`/v1/grants/${grantId}/messages?source=live`, { headers: auth("askel") });
+  }
+
+  it("a refresh Google answers with 500 gives 502 gmail_unavailable; the grant stays active, no webhook", async () => {
+    const built = buildApp();
+    const g = await connectAs(built, "google:1");
+    built.events.length = 0;
+    refreshAnswer = [500, { error: "internal_failure" }];
+    const res = await liveRead(built, g);
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { error: "gmail_unavailable" });
+    assert.equal(built.store.grants.get(g)?.status, "active");
+    assert.deepEqual(built.events, []);
+  });
+
+  it("a refresh refused with invalid_grant gives 409 needs_reauth and tells the host", async () => {
+    const built = buildApp();
+    const g = await connectAs(built, "google:1");
+    built.events.length = 0;
+    refreshAnswer = [400, { error: "invalid_grant" }];
+    const res = await liveRead(built, g);
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { error: string }).error, "needs_reauth");
+    assert.equal(built.store.grants.get(g)?.status, "needs_reauth");
+    assert.deepEqual(built.events.map((e) => e.type), ["grant.needs_reauth"]);
+  });
+
+  it("a Gmail 403 rate limit is temporary; a 403 for a withdrawn scope asks to reconnect", async () => {
+    const built = buildApp();
+    const g = await connectAs(built, "google:1");
+    listAnswer = [403, { error: { code: 403, errors: [{ reason: "userRateLimitExceeded" }] } }];
+    const limited = await liveRead(built, g);
+    assert.equal(limited.status, 502);
+    assert.equal(built.store.grants.get(g)?.status, "active");
+    listAnswer = [403, { error: { code: 403, errors: [{ reason: "insufficientPermissions" }] } }];
+    const withdrawn = await liveRead(built, g);
+    assert.equal(withdrawn.status, 409);
+    assert.equal(built.store.grants.get(g)?.status, "needs_reauth");
+  });
+});
+
 describe("tenant-wide grant listing (GET /v1/grants?all=true)", () => {
   it("lists only the calling tenant's grants, paged, with no address", async () => {
     const built = buildApp();
@@ -474,7 +644,17 @@ describe("tenant-wide grant listing (GET /v1/grants?all=true)", () => {
     };
     assert.deepEqual(beta.grants.map((g) => g.externalUserId), ["other"]);
 
-    for (const q of ["limit=0", "limit=201", "limit=x", "cursor=%%%", "cursor=bm9wZQ"]) {
+    const cursorOf = (text: string) => Buffer.from(text, "utf8").toString("base64url");
+    for (const q of [
+      "limit=0",
+      "limit=201",
+      "limit=x",
+      "cursor=%%%",
+      "cursor=bm9wZQ",
+      `cursor=${cursorOf("1\0grant_x")}`, // a date Postgres would refuse
+      `cursor=${cursorOf("2026-10-01T00:00:00.000Z\0a\0b")}`, // a NUL in the id
+      `cursor=${cursorOf("2026-10-01T00:00:00.000Z\0a b")}`,
+    ]) {
       const res = await app.request(`/v1/grants?all=true&${q}`, { headers: auth("askel") });
       assert.equal(res.status, 400, q);
     }
@@ -597,6 +777,27 @@ for (const backend of BACKENDS) {
       assert.equal(p2.grants[1]!.lastSyncAt, undefined, "a failed sync is not a finished one");
     });
 
+    it("listTenantGrantsPage never repeats a grant written with sub-millisecond precision", async () => {
+      const { store } = await backend.make();
+      await store.putGrant(row("grant_a", "beta", "u1", "2026-10-01T00:00:00.123Z"));
+      await store.putGrant(row("grant_b", "beta", "u2", "2026-10-01T00:00:00.123Z"));
+      if (backend.name === "postgres") {
+        // A row written by SQL rather than by this code keeps microseconds.
+        const pg = (store as unknown as { db: { sql: { query: (t: string, p: unknown[]) => Promise<unknown> } } }).db;
+        await pg.sql.query(`UPDATE grants SET created_at = '2026-10-01T00:00:00.123456Z' WHERE id = 'grant_a'`, []);
+      }
+      const seen: string[] = [];
+      let after: { createdAt: string; id: string } | undefined;
+      for (let i = 0; i < 4; i += 1) {
+        const page = await store.listTenantGrantsPage("beta", { limit: 1, ...(after ? { after } : {}) });
+        seen.push(...page.grants.map((g) => g.id));
+        const last = page.grants.at(-1);
+        if (!page.hasMore || !last) break;
+        after = { createdAt: last.createdAt, id: last.id };
+      }
+      assert.deepEqual(seen, ["grant_a", "grant_b"]);
+    });
+
     it("connectGrant under reuse: one live grant, same id, for concurrent Connects on the same store", async () => {
       const { store, vault } = await backend.make();
       await store.putGrant(row("grant_old", "askel", "anon_1", "2026-10-01T00:00:00.000Z"));
@@ -611,6 +812,7 @@ for (const backend of BACKENDS) {
           externalUserId: user,
           provider: "gmail",
           email: ADDRESS,
+          verifiedAddress: ADDRESS,
           fallbackEmail: "unknown@gmail.com",
           refreshToken: `1//new-${user}`,
           scopes: ["s"],

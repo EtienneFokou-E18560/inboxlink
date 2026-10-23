@@ -94,7 +94,13 @@ describe("reconnect only when Google requires it", () => {
   it("a Gmail 401, or a 403 for a withdrawn scope, asks to reconnect", () => {
     assert.equal(gmailRequiresReconnect(new GmailApiError(401)), true);
     assert.equal(gmailRequiresReconnect(new GmailApiError(403, "insufficientPermissions")), true);
-    assert.equal(gmailRequiresReconnect(new GmailApiError(403)), true, "a 403 with no reason is not a rate limit");
+    assert.equal(gmailRequiresReconnect(new GmailApiError(403, "PERMISSION_DENIED")), true);
+  });
+
+  it("a 403 that is our own setup, or names no reason, is temporary", () => {
+    assert.equal(gmailRequiresReconnect(new GmailApiError(403, "accessNotConfigured")), false);
+    assert.equal(gmailRequiresReconnect(new GmailApiError(403, "RESOURCE_EXHAUSTED")), false);
+    assert.equal(gmailRequiresReconnect(new GmailApiError(403)), false, "not Google's JSON: not proof of anything");
   });
 
   it("other Gmail failures and unknown errors are temporary", () => {
