@@ -170,6 +170,10 @@ h1 {
   color: var(--danger);
 }
 
+.footer a {
+  color: inherit;
+  text-decoration: underline;
+}
 .footer {
   color: var(--muted);
   font-size: 0.8rem;
