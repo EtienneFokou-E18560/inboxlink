@@ -1,0 +1,102 @@
+---
+title: Quick start
+description: Connect a Gmail mailbox and list its messages with @inboxlink/sdk.
+---
+
+import { Steps, Aside } from "@astrojs/starlight/components";
+
+This guide connects one Gmail mailbox to your app and lists its messages. It
+takes about ten minutes if you already have a server route that can handle a
+redirect.
+
+## Before you start
+
+- Node.js 22 or newer on your server.
+- An InboxLink **API secret**. The hosted service at
+  `https://inboxlink-two.vercel.app` gives each host app its own secret:
+  [open an issue on GitHub](https://github.com/EtienneFokou-E18560/inboxlink/issues/new)
+  to ask for one, or run your own InboxLink server.
+
+<Aside type="caution">
+  The API secret is a server credential. Keep it in an environment variable and
+  never send it to a browser.
+</Aside>
+
+You do **not** need a Google Cloud project or `GOOGLE_*` settings. Google
+sign-in runs on the InboxLink server.
+
+## Steps
+
+<Steps>
+
+1. **Install the SDK.**
+
+   ```bash
+   npm install @inboxlink/sdk
+   ```
+
+2. **Set the secret** in your server's environment.
+
+   ```bash
+   INBOXLINK_API_SECRET=...
+   ```
+
+3. **Create a Connect session** and send the person to its `connectUrl`.
+   `externalUserId` is your own id for this person; `redirectUri` is a route
+   in **your** app, not a Google URL.
+
+   ```ts
+   import { InboxLink } from "@inboxlink/sdk";
+
+   const il = new InboxLink({ apiSecret: process.env.INBOXLINK_API_SECRET });
+
+   const session = await il.createConnectSession({
+     externalUserId: user.id,
+     redirectUri: "https://your-app.example.com/inboxlink/done",
+   });
+   return Response.redirect(session.connectUrl, 302);
+   ```
+
+4. **Handle the redirect.** InboxLink sends the person back to `redirectUri`
+   with a one-time `public_token`. Exchange it on your server and keep the
+   `grantId` against your user.
+
+   ```ts
+   const { grantId } = await il.completeConnect({ redirectUrl: request.url });
+   await db.saveInboxGrant(user.id, grantId);
+   ```
+
+   The token works once. If the person cancels at Google, there is no
+   `public_token` and `completeConnect` throws a clear error: show a
+   "connect again" button.
+
+5. **Sync and read messages.**
+
+   ```ts
+   await il.grants.sync(grantId); // queues a sync job (202 + jobId)
+
+   const page = await il.messages.list(grantId, { limit: 25 });
+   for (const m of page.messages) console.log(m.subject);
+
+   const { message } = await il.messages.get(grantId, page.messages[0]!.id);
+   ```
+
+</Steps>
+
+## Good to know
+
+- `messages.list` reads InboxLink's **synced cache** by default and ignores
+  search filters there. Pass `source: "live"` to query Gmail directly with
+  `q`, `from`, `to`, `subject`, `label` or `includeSpamTrash`.
+- Lists are cursor paged; `messages.iterate` walks every page for you.
+- A grant answers `needs_reauth` when Google withdraws access. Send the person
+  through Connect again.
+- To disconnect a mailbox, call `il.grants.revoke(grantId)`. The sealed token
+  and cached messages are deleted.
+
+## Next
+
+The full API, webhooks and self-hosting guides are in the
+[repository docs](https://github.com/EtienneFokou-E18560/inboxlink/tree/main/docs)
+and the [wiki](https://github.com/EtienneFokou-E18560/inboxlink/wiki) while they
+move to this site.

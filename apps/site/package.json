@@ -1,0 +1,20 @@
+{
+  "name": "@inboxlink/site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "InboxLink website and docs (Astro Starlight), deployed as its own Vercel project",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.7",
+    "astro": "^7.4.2"
+  }
+}
