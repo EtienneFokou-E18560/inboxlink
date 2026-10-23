@@ -153,9 +153,17 @@ Default list reads the **synced store**. Pass `source: "live"` for live Gmail + 
 
 Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.revoke(grantId)`.
 
+To list **every** grant of your tenant (for example to find grants whose user no longer exists on your side), use `il.grants.listAll({ limit, cursor })` or `for await (const g of il.grants.iterateAll())` (`GET /v1/grants?all=true`, oldest first, `limit` 1–200, default 50, `nextCursor` while there are more). Each entry has `id`, `externalUserId`, `provider`, `status`, `createdAt`, `updatedAt`, `lastSyncAt` (end of the last finished sync, when there was one) and `replaced` when it was retired. No address and no token are returned.
+
+### Naming the owner on grant calls
+
+Every call that names a grant accepts an optional `externalUserId` (query string `?externalUserId=`; SDK option `{ externalUserId }` on `messages.list`, `messages.iterate`, `messages.get`, `grants.sync`, `grants.getSyncJob`, `grants.revoke`). When the grant now belongs to another of your users (a reused grant, next section), the call answers **409 `{ "error": "grant_replaced" }`** and does nothing: a stale or deleted user cannot read, sync or delete a mailbox that moved to someone else. Send it on every call once your tenant uses `reuse`. Without it, calls behave as before.
+
 ### One mailbox, one live grant (identities)
 
-InboxLink keys a grant to **your** `externalUserId`, but it treats the mailbox itself (tenant + provider + address, case ignored) as the thing that can only be connected once. When Connect finishes for an address this tenant already has a live grant for (`active` or `needs_reauth`), the **new grant wins**:
+InboxLink keys a grant to **your** `externalUserId`, but it treats the mailbox itself (tenant + provider + address, case ignored) as the thing that can only be connected once. What a finished Connect does with a live grant (`active` or `needs_reauth`) this tenant already has for the same address is a **per-tenant setting**, `INBOXLINK_CONNECT_POLICY` on the server (`tenantId=reuse`, comma or space separated). A tenant that is not listed keeps `replace`.
+
+**`replace` (default).** The **new grant wins**:
 
 - The new grant belongs to the `externalUserId` that just connected.
 - Each earlier grant for that address (created before the new one) is retired inside InboxLink: its sealed token and cached messages are deleted and it becomes `revoked`. It still appears in `grants.list` for its old user with `"replaced": true`, so you can tell it apart from a grant you never had or one that was simply revoked (the new grant's id is not shown).
@@ -163,9 +171,21 @@ InboxLink keys a grant to **your** `externalUserId`, but it treats the mailbox i
 - The old token is **not** revoked at Google: Google's revoke ends the whole authorization for that account, which would also kill the token that was just issued.
 - Two Connects for the same address finishing at the same time (two tabs or devices) cannot retire each other: a Connect only retires grants older than its own, so the newest grant is the one that stays live. A sync that was already running on the retired grant cannot bring it back: a token refusal during that sync leaves it `revoked` (with `replaced: true`), and messages it fetches are not cached.
 
-This covers the case where one person reaches your app under several identities: for example an anonymous id before sign-up (`anon_…`), a Google sign-in (`google:…`) and an email/password account (a uuid). InboxLink does not know these are the same person and does not link them; your app decides which identity a mailbox belongs to by which one runs Connect. If you merge identities on your side, move the `grantId` to the surviving user rather than connecting again, or connect again from the surviving user and let the rule above retire the old grant.
+**`reuse`.** The **existing grant is kept**:
 
-A reconnect by the same user (the usual fix for `needs_reauth`) follows the same rule: the old grant is retired, so store the new `grantId` and drop the old one.
+- **Same address** (Gmail only; the address Gmail's profile reports for the new token, not the sign-in address, so claiming another address is not enough; if the profile cannot be read, a new grant is made and the existing one is left as it is, cache included; the next Connect settles it): the fresh token is sealed on the existing grant, which keeps its `grantId` and its cached messages, goes back to `active`, and is now owned by the `externalUserId` that just connected. Only an incremental sync is queued, so nothing is fetched twice. If the tenant had several live grants for the address (made before this rule), the connecting user's own is kept (else the one named by `replacesGrantId`, else the newest) and the others are retired as under `replace`.
+- If the grant belonged to another of your users, calls that name that user (`externalUserId`, above) answer **409 `grant_replaced`**, and `grants.list` for that user no longer shows it.
+- Two Connects of one address finishing together both land on the same grant. Nothing is shared across tenants: each tenant keeps its own grant for the same address.
+
+**Different address, either setting.** By default a Connect of another address **adds** a grant next to the user's existing ones. If your app asks the person whether to add the new mailbox or replace an existing one and they choose replace, pass that grant's id when you create the session: `il.link.createSession({ externalUserId, redirectUri, replacesGrantId })`. When they then connect a different address, that grant is retired (`revoked`, `replaced: true`, token and cache deleted). The grant must be the same user's live (not `revoked`) grant in your tenant, or the session is refused with 400 `invalid_replaces_grant`. IMAP Connects honour it too; a grant that moved to another user before Connect finished is left alone.
+
+This covers the case where one person reaches your app under several identities: for example an anonymous id before sign-up (`anon_…`), a Google sign-in (`google:…`) and an email/password account (a uuid). InboxLink does not know these are the same person and does not link them; your app decides which identity a mailbox belongs to by which one runs Connect. If you merge identities on your side, move the `grantId` to the surviving user rather than connecting again, or connect again from the surviving user and let the rule above settle it.
+
+A reconnect by the same user (the usual fix for `needs_reauth`) follows the same rule: under `replace` the old grant is retired, so store the new `grantId` and drop the old one; under `reuse` the `grantId` stays the same.
+
+Whenever a Connect by one of your users takes a mailbox away from another of your users, InboxLink sends **`grant.revoked`** (below) for the user who lost it, under either setting. A user replacing their own grant gets no event: the Connect itself returns the new grant. It is a new event in 0.2.0: an endpoint registered without an `events` list receives it, so ignore event types you do not handle.
+
+`needs_reauth` is set only when Google requires the person to connect again: Google refuses the refresh token (`invalid_grant`: revoked, expired, consent withdrawn), Gmail answers 401, or Gmail answers 403 naming a reason other than a rate limit or InboxLink's own setup. Any other failure (Google 5xx, the network, a rate limit) leaves the grant `active`; reads answer **502 `gmail_unavailable`** and the next sync retries. There is no time-based clean-up of `needs_reauth` grants.
 
 To see whether a database already has mailboxes connected more than once (grants created before this rule), run `scripts/shared-address-report.sql` (see the ops runbook). It prints counts and grant ids, never addresses.
 
@@ -178,7 +198,8 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set on 
 | Event | When |
 |-------|------|
 | `grant.connected` | OAuth Connect succeeds and a grant is vaulted |
-| `grant.needs_reauth` | Refresh / Gmail auth fails and the grant is marked `needs_reauth` |
+| `grant.needs_reauth` | Google refuses the grant's token and it is marked `needs_reauth` |
+| `grant.revoked` | A Connect took a mailbox away from `externalUserId`: `reason: "replaced"` (the grant was retired) or `"reassigned"` (the same grant now belongs to another of your users). Ask that user to reconnect, as for 409 `grant_replaced`. |
 | `sync.completed` | Sync job completes successfully (API drain, cron, or Gmail push apply) |
 | `message.created` | New message upserted from Gmail Pub/Sub push apply |
 
@@ -250,7 +271,8 @@ OAuth callback (`/v1/oauth/…`) and Connect (`/v1/connect/…`) stay public; th
 - [ ] Exchange `public_token` server-side, once  
 - [ ] Handle missing/invalid token on the redirect route  
 - [ ] Handle `needs_reauth` / `grant_inactive` from messages by sending the user through Connect again  
-- [ ] Handle `grant_replaced`: the mailbox was connected again (maybe by another of your users); stop polling that `grantId` and offer to reconnect  
+- [ ] Handle `grant_replaced` and `grant.revoked`: the mailbox was connected again (maybe by another of your users); stop polling that `grantId` for that user and offer to reconnect  
+- [ ] Under `reuse`, send `externalUserId` on every grant call  
 - [ ] Optional: receive webhooks — set `INBOXLINK_WEBHOOK_URL` + `INBOXLINK_WEBHOOK_SECRET` on InboxLink; verify with `webhooks.verify`  
 - [ ] Never ship `INBOXLINK_API_SECRET` / `apiSecret` to browsers  
 - [ ] Do **not** set `GOOGLE_*`, Postgres, or vault keys in the host app  
@@ -278,7 +300,7 @@ curl -sS "$BASE/v1/webhooks" -H "Authorization: Bearer $TENANT_SECRET"        # 
 curl -sS -X DELETE "$BASE/v1/webhooks/whe_…" -H "Authorization: Bearer $TENANT_SECRET"
 ```
 
-- URLs must be public `https` (no credentials, no private/loopback/metadata hosts). Local `single` mode also allows `http://localhost`. Up to 5 endpoints per tenant. Omit `events` to receive all of: `grant.connected`, `grant.needs_reauth`, `sync.completed`, `message.created`.
+- URLs must be public `https` (no credentials, no private/loopback/metadata hosts). Local `single` mode also allows `http://localhost`. Up to 5 endpoints per tenant. Omit `events` to receive all of: `grant.connected`, `grant.needs_reauth`, `grant.revoked`, `sync.completed`, `message.created`.
 - Secrets are sealed with `INBOXLINK_MASTER_KEY`. Changing the master key makes existing endpoint secrets unreadable (deliveries to them are skipped) — delete and recreate them.
 - Each delivery is a `POST` with headers `X-InboxLink-Timestamp` (unix seconds) and `X-InboxLink-Signature-V1` = `sha256=HMAC(secret, "<timestamp>.<raw body>")`. Reject requests more than ~5 minutes off. The legacy `X-InboxLink-Signature` (body-only HMAC) is still sent for older hosts but has no replay protection.
 - Verify with the SDK: `il.webhooks.verifySigned({ payload, timestampHeader, signatureHeader, secret })`.

@@ -1,8 +1,9 @@
 import type { Grant } from "@inboxlink/core";
-import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
+import { GmailAdapter, GmailApiError, gmailRequiresReconnect } from "@inboxlink/adapters-gmail";
 import { getAccessTokenCache } from "../access-token-cache.js";
 import {
   markNeedsReauth,
+  reusedSince,
   openGrantAccessToken,
   type CiphertextVault,
 } from "../gmail-access.js";
@@ -45,6 +46,9 @@ export async function startOrRenewGmailWatch(input: {
     grant: input.grant,
   });
   if (!access.ok) {
+    if (access.error === "provider_unavailable") {
+      return { grantId: input.grant.id, status: "watch_failed", error: access.error };
+    }
     return { grantId: input.grant.id, status: "needs_reauth", error: access.error };
   }
 
@@ -73,9 +77,11 @@ export async function startOrRenewGmailWatch(input: {
       expiration: watched.expiration,
     };
   } catch (err) {
-    if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+    if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(input.grant.id);
-      await markNeedsReauth(input.store, input.grant);
+      if (!(await markNeedsReauth(input.store, input.grant)) && (await reusedSince(input.store, input.grant))) {
+        return { grantId: input.grant.id, status: "watch_failed", error: "reused_since" };
+      }
       return { grantId: input.grant.id, status: "needs_reauth", error: "needs_reauth" };
     }
     log.warn("gmail_watch_failed", {

@@ -88,6 +88,7 @@ export function createAppFromEnv(
       maxRequests: config.rateLimitMaxRequests,
     }),
     allowedRedirectOrigins: config.allowedRedirectOrigins,
+    connectPolicies: config.connectPolicies,
     webhookRegistry,
     // Events reach only the tenant's own endpoints. The legacy single env URL/secret
     // applies to the default tenant only.

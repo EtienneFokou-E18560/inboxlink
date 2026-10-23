@@ -18,10 +18,82 @@ export type GmailAdapterConfig = {
 };
 
 export class GmailApiError extends Error {
-  constructor(readonly status: number) {
+  /**
+   * @param reason Google's error reason when the body names one
+   *   (`rateLimitExceeded`, `insufficientPermissions`, ...).
+   */
+  constructor(
+    readonly status: number,
+    readonly reason?: string,
+  ) {
     super(`Gmail API request failed: ${status}`);
     this.name = "GmailApiError";
   }
+}
+
+/**
+ * Google refused to refresh a grant's token. `reconnect` is true only when
+ * Google says the refresh token itself is no good (`invalid_grant`: revoked,
+ * expired, or consent withdrawn), so the person must connect again. Any other
+ * failure (Google down, a 5xx, a rate limit) is temporary: retry later.
+ */
+export class GmailTokenRefreshError extends Error {
+  constructor(
+    readonly status: number,
+    readonly oauthError: string | undefined,
+  ) {
+    super(`Gmail refresh failed: ${status}${oauthError ? ` ${oauthError}` : ""}`);
+    this.name = "GmailTokenRefreshError";
+  }
+
+  get reconnect(): boolean {
+    return this.oauthError === "invalid_grant";
+  }
+}
+
+/** Gmail 403 reasons that mean "slow down" or "our setup", not "access withdrawn". */
+const GMAIL_TEMPORARY_403_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "dailyLimitExceeded",
+  "quotaExceeded",
+  "backendError",
+  // The Gmail API is off in InboxLink's own Google Cloud project: an operator
+  // fix, not the person's.
+  "accessNotConfigured",
+  "RESOURCE_EXHAUSTED",
+]);
+
+/**
+ * True when Google requires the person to connect again: a refresh refused
+ * with `invalid_grant`, a Gmail 401 (token refused), or a Gmail 403 whose reason
+ * is not a rate limit or our own setup (scope or consent withdrawn). Everything
+ * else is temporary.
+ */
+export function gmailRequiresReconnect(err: unknown): boolean {
+  if (err instanceof GmailTokenRefreshError) return err.reconnect;
+  if (err instanceof GmailApiError) {
+    if (err.status === 401) return true;
+    // A 403 that names no reason (not Google's JSON: a proxy or an outage page)
+    // is not proof the person withdrew access.
+    if (err.status === 403) return Boolean(err.reason) && !GMAIL_TEMPORARY_403_REASONS.has(err.reason!);
+  }
+  return false;
+}
+
+async function gmailApiError(res: Response): Promise<GmailApiError> {
+  let reason: string | undefined;
+  try {
+    const body = (await res.json()) as {
+      error?: { errors?: { reason?: unknown }[]; status?: unknown };
+    };
+    const first = body.error?.errors?.[0]?.reason;
+    if (typeof first === "string") reason = first;
+    else if (typeof body.error?.status === "string") reason = body.error.status;
+  } catch {
+    // Not JSON: status alone.
+  }
+  return new GmailApiError(res.status, reason);
 }
 
 export { collectAttachments, normalizeGmailMessage, type GmailMessageResource };
@@ -156,7 +228,14 @@ export class GmailAdapter implements MailboxAdapter {
       body,
     });
     if (!res.ok) {
-      throw new Error(`Gmail refresh failed: ${res.status}`);
+      let oauthError: string | undefined;
+      try {
+        const body = (await res.json()) as { error?: unknown };
+        if (typeof body.error === "string") oauthError = body.error;
+      } catch {
+        // Not JSON: treated as temporary.
+      }
+      throw new GmailTokenRefreshError(res.status, oauthError);
     }
     const json = (await res.json()) as { access_token: string; expires_in?: number };
     return {
@@ -353,7 +432,7 @@ export type GmailWatchResult = {
 
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const res = await fetch(url, { headers: { authorization: `Bearer ${accessToken}` } });
-  if (!res.ok) throw new GmailApiError(res.status);
+  if (!res.ok) throw await gmailApiError(res);
   return (await res.json()) as T;
 }
 
@@ -366,7 +445,7 @@ async function gmailJsonPost<T>(url: URL, accessToken: string, body: unknown): P
     },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new GmailApiError(res.status);
+  if (!res.ok) throw await gmailApiError(res);
   return (await res.json()) as T;
 }
 

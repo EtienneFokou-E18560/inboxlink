@@ -157,4 +157,10 @@ export type CreateLinkSessionInput = {
   externalUserId: string;
   redirectUri: string;
   products?: string[];
+  /**
+   * The host user's existing grant this Connect replaces (the person was asked
+   * and chose "replace"). When the mailbox they connect is a different address,
+   * that grant is retired. Omit it to add the mailbox next to the existing ones.
+   */
+  replacesGrantId?: string;
 };

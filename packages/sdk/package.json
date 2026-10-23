@@ -1,6 +1,6 @@
 {
   "name": "@inboxlink/sdk",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Host-app client for InboxLink HTTP API",
   "license": "MIT",
   "type": "module",

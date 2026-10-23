@@ -26,6 +26,35 @@ export function toPublicGrant(grant: Grant): PublicGrant {
   };
 }
 
+/**
+ * A grant in the tenant-wide listing (`GET /v1/grants?all=true`): who owns it
+ * and in what state, with no address and no token.
+ */
+export type TenantGrantSummary = {
+  id: string;
+  externalUserId: string;
+  provider: Grant["provider"];
+  status: Grant["status"];
+  createdAt: string;
+  updatedAt: string;
+  /** End of the last finished sync, when there was one. */
+  lastSyncAt?: string;
+  replaced?: true;
+};
+
+export function toTenantGrant(grant: Grant & { lastSyncAt?: string }): TenantGrantSummary {
+  return {
+    id: grant.id,
+    externalUserId: grant.externalUserId,
+    provider: grant.provider,
+    status: grant.status,
+    createdAt: grant.createdAt,
+    updatedAt: grant.updatedAt,
+    ...(grant.lastSyncAt ? { lastSyncAt: grant.lastSyncAt } : {}),
+    ...(grant.replacedBy ? { replaced: true as const } : {}),
+  };
+}
+
 const MAX_EXTERNAL_USER_ID = 256;
 const MAX_REDIRECT_URI = 2048;
 

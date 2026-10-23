@@ -1,3 +1,4 @@
+import { gmailRequiresReconnect } from "@inboxlink/adapters-gmail";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import type { AccessTokenCache } from "./access-token-cache.js";
 import { getAccessTokenCache } from "./access-token-cache.js";
@@ -17,13 +18,19 @@ export type GmailTokenRefresher = {
 export type OpenGrantAccessOk = { ok: true; accessToken: string };
 export type OpenGrantAccessFail = {
   ok: false;
-  error: "missing_refresh_token" | "needs_reauth";
+  /**
+   * `needs_reauth`: Google refused the refresh token (revoked, expired,
+   * consent withdrawn); the grant is marked so. `provider_unavailable`: the
+   * refresh failed for another reason (Google down, a 5xx, the network); the
+   * grant keeps its status and the next request tries again.
+   */
+  error: "missing_refresh_token" | "needs_reauth" | "provider_unavailable";
 };
 
 /**
  * Open vault → refresh (or cache hit) → short-lived access token for a grant.
- * Refresh tokens never enter the cache. On refresh failure the grant is marked
- * `needs_reauth` and any cached access token for the grant is dropped.
+ * Refresh tokens never enter the cache. Only a refresh Google refuses for good
+ * marks the grant `needs_reauth`; any cached access token is dropped either way.
  */
 export async function openGrantAccessToken(input: {
   store: GrantStore;
@@ -58,9 +65,13 @@ export async function openGrantAccessToken(input: {
     const refreshed = await gmail.refreshAccessToken(refreshToken);
     cache.set(grant.id, refreshed.accessToken, refreshed.expiresAt);
     return { ok: true, accessToken: refreshed.accessToken };
-  } catch {
+  } catch (err) {
     cache.invalidate(grant.id);
-    await markNeedsReauth(store, grant);
+    if (!gmailRequiresReconnect(err)) return { ok: false, error: "provider_unavailable" };
+    if (!(await markNeedsReauth(store, grant)) && (await reusedSince(store, grant))) {
+      // The refused token was the old one: a reconnect reused this grant meanwhile.
+      return { ok: false, error: "provider_unavailable" };
+    }
     return { ok: false, error: "needs_reauth" };
   }
 }
@@ -68,17 +79,31 @@ export async function openGrantAccessToken(input: {
 /**
  * Mark a grant `needs_reauth` after its token was refused. Conditional: a
  * grant retired meanwhile (a later Connect replaced it while this request or
- * sync was running) stays `revoked` with its `replacedBy`. Returns whether the
+ * sync was running) stays `revoked` with its `replacedBy`, and a grant reused
+ * meanwhile (changed since it was loaded) is left as the reconnect set it. Returns whether the
  * status changed; `grant` is updated in place only then.
  */
 export async function markNeedsReauth(store: GrantStore, grant: Grant): Promise<boolean> {
   const updatedAt = new Date().toISOString();
   const next: Grant = { ...grant, status: "needs_reauth", updatedAt };
   delete next.replacedBy;
-  const changed = await store.updateGrant(next);
+  // Only over the version this request loaded: if a reconnect reused the grant
+  // meanwhile (fresh token, `active`), this old failure says nothing about it.
+  const changed = await store.updateGrant(next, { expectUpdatedAt: grant.updatedAt });
   if (changed) {
     grant.status = "needs_reauth";
     grant.updatedAt = updatedAt;
   }
   return changed;
+}
+
+/**
+ * True when the grant was made active again after `grant` was loaded (a
+ * reconnect reused it with a fresh token): a refusal seen by a request that
+ * started before is about the old token and must not ask anyone to reconnect.
+ * Call it after `markNeedsReauth` returned false.
+ */
+export async function reusedSince(store: GrantStore, grant: Grant): Promise<boolean> {
+  const now = await store.getGrant(grant.id).catch(() => undefined);
+  return Boolean(now && now.status === "active" && now.updatedAt !== grant.updatedAt);
 }

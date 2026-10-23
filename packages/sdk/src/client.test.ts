@@ -192,6 +192,75 @@ describe("InboxLink SDK", () => {
     assert.deepEqual(replaced, [true, undefined]);
   });
 
+  it("names the owning host user on grant calls and the replaced grant on a session (0.2.0)", async () => {
+    const calls: { method: string; url: string; body?: string }[] = [];
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      fetch: async (input, init) => {
+        calls.push({ method: init?.method ?? "GET", url: String(input), body: init?.body as string | undefined });
+        if (init?.method === "DELETE") return new Response(null, { status: 204 });
+        const body = String(input).includes("/sessions")
+          ? { linkToken: "lt", connectUrl: "u", sessionId: "s" }
+          : String(input).includes("/messages/")
+            ? { message: {} }
+            : String(input).includes("/messages")
+              ? { messages: [] }
+              : { grantId: "g", status: "queued" };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const owner = { externalUserId: "google:1" };
+    await il.link.createSession({ externalUserId: "google:1", redirectUri: "https://host/done", replacesGrantId: "grant_old" });
+    await il.messages.list("grant_1", { source: "live", ...owner });
+    await il.messages.get("grant_1", "msg_1", owner);
+    await il.grants.sync("grant_1", { mode: "full", ...owner });
+    await il.grants.getSyncJob("grant_1", "job_1", owner);
+    await il.grants.revoke("grant_1", owner);
+    await il.grants.revoke("grant_2");
+
+    assert.deepEqual(JSON.parse(calls[0]!.body!), {
+      externalUserId: "google:1",
+      redirectUri: "https://host/done",
+      products: ["messages"],
+      replacesGrantId: "grant_old",
+    });
+    assert.deepEqual(
+      calls.slice(1).map((c) => `${c.method} ${c.url.replace("http://localhost:8787/", "")}`),
+      [
+        "GET v1/grants/grant_1/messages?source=live&externalUserId=google%3A1",
+        "GET v1/grants/grant_1/messages/msg_1?externalUserId=google%3A1",
+        "POST v1/grants/grant_1/sync?externalUserId=google%3A1",
+        "GET v1/grants/grant_1/sync/jobs/job_1?externalUserId=google%3A1",
+        "DELETE v1/grants/grant_1?externalUserId=google%3A1",
+        "DELETE v1/grants/grant_2",
+      ],
+    );
+    assert.deepEqual(JSON.parse(calls[3]!.body!), { mode: "full" });
+  });
+
+  it("grants.iterateAll walks every page of the tenant listing", async () => {
+    const pages: Record<string, unknown> = {
+      "": { grants: [{ id: "g1", externalUserId: "u1", provider: "gmail", status: "active", createdAt: "a", updatedAt: "a" }], nextCursor: "c2" },
+      c2: { grants: [{ id: "g2", externalUserId: "anon_2", provider: "gmail", status: "needs_reauth", createdAt: "b", updatedAt: "b", lastSyncAt: "b" }] },
+    };
+    const urls: string[] = [];
+    const il = new InboxLink({
+      baseUrl: "http://localhost:8787",
+      fetch: async (input) => {
+        urls.push(String(input));
+        const cursor = new URL(String(input)).searchParams.get("cursor") ?? "";
+        return new Response(JSON.stringify(pages[cursor]), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const ids: string[] = [];
+    for await (const g of il.grants.iterateAll({ limit: 100 })) ids.push(g.id);
+    assert.deepEqual(ids, ["g1", "g2"]);
+    assert.deepEqual(urls, [
+      "http://localhost:8787/v1/grants?all=true&limit=100",
+      "http://localhost:8787/v1/grants?all=true&limit=100&cursor=c2",
+    ]);
+  });
+
   it("gets a message by id with attachment metadata wrapper", async () => {
     const calls: string[] = [];
     const fetchMock: typeof fetch = async (input) => {

@@ -1,5 +1,11 @@
 # `@inboxlink/core` changelog
 
+## 0.2.0
+
+Companion release with `@inboxlink/sdk@0.2.0`. Additive only.
+
+- `CreateLinkSessionInput.replacesGrantId?: string`: the host user's own grant a Connect replaces (see the SDK changelog for the per-tenant Connect rule).
+
 ## 0.1.3
 
 Companion release with `@inboxlink/sdk@0.1.3`. Additive only.

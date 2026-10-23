@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Grant, TokenVault } from "@inboxlink/core";
 import { createPkcePair, newId, randomToken } from "@inboxlink/core";
-import { GmailAdapter, GmailApiError } from "@inboxlink/adapters-gmail";
+import { GmailAdapter, GmailApiError, gmailRequiresReconnect } from "@inboxlink/adapters-gmail";
 import {
   ImapAdapter,
   ImapAuthError,
@@ -25,6 +25,7 @@ import { buildTenantSecrets, parseBearerToken, resolveTenantId } from "../auth.j
 import {
   buildCorsOriginAllowlist,
   toPublicGrant,
+  toTenantGrant,
   validateExternalUserId,
   validateRedirectUri,
 } from "../grants-public.js";
@@ -38,8 +39,16 @@ import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
 import { parseMessageListFilters } from "../message-filters.js";
 import { getAccessTokenCache } from "../access-token-cache.js";
-import { inactiveGrantError, replaceEarlierGrants } from "../grants-replace.js";
-import { markNeedsReauth, openGrantAccessToken } from "../gmail-access.js";
+import {
+  connectGrant,
+  connectPolicyFor,
+  retireNamedGrant,
+  VaultSealError,
+  type ConnectGrantOutcome,
+  type ConnectPolicy,
+} from "../connect-grant.js";
+import { inactiveGrantError } from "../grants-replace.js";
+import { markNeedsReauth, openGrantAccessToken, reusedSince } from "../gmail-access.js";
 import { applyGmailPushNotification, parsePubSubPushBody } from "../sync/gmail-push.js";
 import { renewAllGmailWatches, startOrRenewGmailWatch } from "../sync/gmail-watch.js";
 import { drainSyncJobs } from "../queue/sync-queue.js";
@@ -117,6 +126,11 @@ export type CreateAppOptions = {
   gmailPushOidc?: PushOidcConfig | null;
   /** Per-tenant webhook destinations (`/v1/webhooks`). Omit/null = routes return 501. */
   webhookRegistry?: WebhookRegistry | null;
+  /**
+   * Per-tenant Connect rule (`INBOXLINK_CONNECT_POLICY`). A tenant not listed
+   * keeps `replace`. See `connect-grant.ts`.
+   */
+  connectPolicies?: Record<string, ConnectPolicy>;
 };
 
 export function createApp(opts: CreateAppOptions) {
@@ -272,6 +286,7 @@ export function createApp(opts: CreateAppOptions) {
       externalUserId?: string;
       redirectUri?: string;
       products?: string[];
+      replacesGrantId?: string;
     };
     const externalUserId = validateExternalUserId(body.externalUserId);
     const redirectUri = validateRedirectUri(
@@ -295,11 +310,29 @@ export function createApp(opts: CreateAppOptions) {
       return c.json({ error: "externalUserId and redirectUri are required" }, 400);
     }
     const tenantId = c.get("tenantId");
+    let replacesGrantId: string | undefined;
+    if (body.replacesGrantId !== undefined && body.replacesGrantId !== null) {
+      // Only the host user's own grant can be named, in this tenant.
+      const named =
+        typeof body.replacesGrantId === "string" && body.replacesGrantId.length <= 128
+          ? await opts.store.getGrant(body.replacesGrantId)
+          : undefined;
+      if (
+        !named ||
+        named.tenantId !== tenantId ||
+        named.externalUserId !== externalUserId ||
+        named.status === "revoked"
+      ) {
+        return c.json({ error: "invalid_replaces_grant" }, 400);
+      }
+      replacesGrantId = named.id;
+    }
     const session = await opts.store.createSession({
       tenantId,
       externalUserId,
       redirectUri,
       products: body.products ?? ["messages"],
+      ...(replacesGrantId ? { replacesGrantId } : {}),
     });
     const connectUrl = new URL(
       `/v1/connect/${encodeURIComponent(session.linkToken)}`,
@@ -475,6 +508,20 @@ export function createApp(opts: CreateAppOptions) {
       );
     }
 
+    // The grant the host said this Connect replaces (the person chose
+    // "replace"). IMAP has no confirmed address to reuse on, so it never reuses.
+    if (session.replacesGrantId) {
+      const retired = await retireNamedGrant({
+        store: opts.store,
+        vault: opts.vault,
+        tenantId: session.tenantId,
+        externalUserId: session.externalUserId,
+        replacesGrantId: session.replacesGrantId,
+        replacedBy: grantId,
+      });
+      await emitRevokedWebhooks(opts.webhooks, { grant, reused: false, retired });
+    }
+
     session.oauthState = undefined;
     const publicToken = randomToken(24);
     session.status = "completed";
@@ -578,48 +625,48 @@ export function createApp(opts: CreateAppOptions) {
         connectErrorStatus("oauth_missing_refresh"),
       );
     }
-    const grantId = newId("grant");
-    const now = nextGrantCreatedAt();
-    const grant: Grant = {
-      id: grantId,
-      tenantId: session.tenantId,
-      externalUserId: session.externalUserId,
-      provider,
-      email: tokens.email ?? (provider === "gmail" ? "unknown@gmail.com" : "unknown@outlook.com"),
-      status: "active",
-      scopes: tokens.scopes.length ? tokens.scopes : [...scopes],
-      createdAt: now,
-      updatedAt: now,
-    };
-    await appOpts.store.putGrant(grant);
+    const policy = connectPolicyFor(appOpts.connectPolicies, session.tenantId);
+    // Reuse keys on the mailbox address Gmail itself reports for this token,
+    // not on the id-token address. Unavailable: a new grant is made (as `replace`).
+    let verifiedAddress: string | undefined;
+    if (policy === "reuse" && provider === "gmail") {
+      try {
+        verifiedAddress = (await appOpts.gmail.getProfile(tokens.accessToken)).emailAddress;
+      } catch (err) {
+        log.warn("connect_profile_failed", {
+          tenantId: session.tenantId,
+          gmailStatus: err instanceof GmailApiError ? err.status : undefined,
+        });
+      }
+    }
+    let outcome: ConnectGrantOutcome;
     try {
-      await appOpts.vault.seal(refreshToken, {
-        grantId,
+      outcome = await connectGrant({
+        store: appOpts.store,
+        vault: appOpts.vault,
+        policy,
         tenantId: session.tenantId,
+        externalUserId: session.externalUserId,
+        provider,
+        email: tokens.email,
+        ...(verifiedAddress ? { verifiedAddress } : {}),
+        fallbackEmail: provider === "gmail" ? "unknown@gmail.com" : "unknown@outlook.com",
+        refreshToken,
+        scopes: tokens.scopes.length ? tokens.scopes : [...scopes],
+        replacesGrantId: session.replacesGrantId,
+        createdAt: nextGrantCreatedAt,
+        newGrantId: () => newId("grant"),
       });
-    } catch {
-      await appOpts.store.deleteGrant(grantId, session.tenantId);
-      log.error("oauth_vault_seal_failed", { grantId, tenantId: session.tenantId });
+    } catch (err) {
+      if (!(err instanceof VaultSealError)) throw err;
+      log.error("oauth_vault_seal_failed", { grantId: err.grantId, tenantId: session.tenantId });
       return c.html(
         renderConnectErrorPage({ kind: "vault_failed" }),
         connectErrorStatus("vault_failed"),
       );
     }
-    // One live grant per mailbox: retire this tenant's earlier grants for the
-    // same address (any host user). Skipped when Google sent no address.
-    // A failure here must not fail a Connect whose token is already sealed:
-    // the duplicates stay (as before this rule) and the next Connect retries.
-    if (tokens.email) {
-      try {
-        await replaceEarlierGrants({ store: appOpts.store, vault: appOpts.vault, grant });
-      } catch (err) {
-        log.warn("grant_replace_failed", {
-          grantId,
-          tenantId: session.tenantId,
-          error: err instanceof Error ? err.message : "unknown",
-        });
-      }
-    }
+    const { grant } = outcome;
+    const grantId = grant.id;
     session.oauthState = undefined;
     session.codeVerifier = undefined;
     const publicToken = randomToken(24);
@@ -631,6 +678,7 @@ export function createApp(opts: CreateAppOptions) {
       grantId,
       tenantId: session.tenantId,
       provider,
+      reused: outcome.reused,
       store: appOpts.storeKind ?? "memory",
     });
 
@@ -640,7 +688,9 @@ export function createApp(opts: CreateAppOptions) {
       externalUserId: session.externalUserId,
       provider,
       email: grant.email,
+      reused: outcome.reused,
     });
+    await emitRevokedWebhooks(appOpts.webhooks, outcome);
 
     if (provider === "gmail") {
       await startOrRenewGmailWatch({
@@ -652,13 +702,14 @@ export function createApp(opts: CreateAppOptions) {
       });
     }
 
-    // Enqueue bootstrap sync job (drained by cron / deferred invoke).
+    // Enqueue a sync job (drained by cron / deferred invoke). A reused grant
+    // keeps its cache and history watermark, so it only catches up.
     if (appOpts.queue) {
       const { jobId } = await appOpts.queue.enqueue({
         grantId,
         tenantId: session.tenantId,
-        kind: "bootstrap",
-        forceBootstrap: true,
+        kind: outcome.reused ? "incremental" : "bootstrap",
+        forceBootstrap: !outcome.reused,
       });
       void drainSyncJobs({
         store: appOpts.store,
@@ -740,6 +791,23 @@ export function createApp(opts: CreateAppOptions) {
   });
 
   app.get("/v1/grants", async (c) => {
+    if (c.req.query("all") === "true") {
+      // Every grant of the calling tenant, for hosts that reconcile their own
+      // users (ownerless grants). Ids and status only: no address, no token.
+      const limit = parseTenantListLimit(c.req.query("limit"));
+      if (limit === null) return c.json({ error: "invalid_limit" }, 400);
+      const after = decodeTenantCursor(c.req.query("cursor"));
+      if (after === null) return c.json({ error: "invalid_cursor" }, 400);
+      const page = await opts.store.listTenantGrantsPage(c.get("tenantId"), {
+        limit,
+        ...(after ? { after } : {}),
+      });
+      const last = page.grants.at(-1);
+      return c.json({
+        grants: page.grants.map(toTenantGrant),
+        ...(page.hasMore && last ? { nextCursor: encodeTenantCursor(last) } : {}),
+      });
+    }
     const externalUserId = validateExternalUserId(c.req.query("externalUserId"));
     if (!externalUserId) return c.json({ error: "externalUserId required" }, 400);
     const tenantId = c.get("tenantId");
@@ -752,6 +820,10 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    // A host deleting its user's grant must not delete a grant that has since
+    // moved to another of its users (same mailbox reconnected, `reuse`).
+    const notOwner = ownerMismatch(c, grant);
+    if (notOwner) return notOwner;
     await opts.vault.destroy(grantId);
     getAccessTokenCache().invalidate(grantId);
     await opts.store.deleteGrant(grantId, tenantId);
@@ -764,6 +836,8 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    const notOwner = ownerMismatch(c, grant);
+    if (notOwner) return notOwner;
 
     const limit = parseLimit(c.req.query("limit"));
     if (limit === null) return c.json({ error: "invalid_limit" }, 400);
@@ -851,6 +925,8 @@ export function createApp(opts: CreateAppOptions) {
 
     const ready = await readyGmailGrant(opts, grantId, tenantId);
     if (!ready.ok) return c.json({ error: ready.error }, ready.status);
+    const notOwner = ownerMismatch(c, ready.grant);
+    if (notOwner) return notOwner;
 
     const access = await openGmailAccess(opts, ready.grant);
     if (!access.ok) return c.json(accessBody(access), access.status);
@@ -876,6 +952,8 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    const notOwner = ownerMismatch(c, grant);
+    if (notOwner) return notOwner;
     if (grant.provider !== "gmail") return c.json({ error: "unsupported_provider" }, 400);
     if (grant.status !== "active") return c.json({ error: inactiveGrantError(grant) }, 409);
 
@@ -940,6 +1018,8 @@ export function createApp(opts: CreateAppOptions) {
     const tenantId = c.get("tenantId");
     const grant = await opts.store.getGrant(grantId);
     if (!grant || grant.tenantId !== tenantId) return c.json({ error: "not_found" }, 404);
+    const notOwner = ownerMismatch(c, grant);
+    if (notOwner) return notOwner;
     const job = await opts.store.getSyncJob(jobId);
     if (!job || job.grantId !== grantId || job.tenantId !== tenantId) {
       return c.json({ error: "not_found" }, 404);
@@ -1227,6 +1307,88 @@ async function listMicrosoftMessages(
   }
 }
 
+/**
+ * Tell the host which of its other users lost a mailbox in this Connect, so it
+ * can show "reconnect" without waiting for a read to answer 409 (a grant the
+ * connecting user replaced themselves is not announced):
+ * `reason: "replaced"` for each retired grant (it is `revoked`), and
+ * `reason: "reassigned"` when a reused grant moved to another host user (the
+ * grant stays active, for the new owner only; reads naming the previous owner
+ * answer 409 `grant_replaced`). `externalUserId` is always the user who lost it.
+ */
+async function emitRevokedWebhooks(
+  webhooks: WebhookBus | null | undefined,
+  outcome: ConnectGrantOutcome,
+): Promise<void> {
+  for (const old of outcome.retired) {
+    // The same user replacing their own grant learns the new one from this
+    // very Connect (grant.connected and the redirect): nothing to tell.
+    if (old.externalUserId === outcome.grant.externalUserId) continue;
+    await emitWebhookSafe(webhooks, "grant.revoked", {
+      grantId: old.id,
+      tenantId: old.tenantId,
+      externalUserId: old.externalUserId,
+      provider: old.provider,
+      reason: "replaced",
+    });
+  }
+  if (outcome.previousExternalUserId !== undefined) {
+    await emitWebhookSafe(webhooks, "grant.revoked", {
+      grantId: outcome.grant.id,
+      tenantId: outcome.grant.tenantId,
+      externalUserId: outcome.previousExternalUserId,
+      provider: outcome.grant.provider,
+      reason: "reassigned",
+    });
+  }
+}
+
+/**
+ * Optional `?externalUserId=` on grant reads, syncs and deletes: the host user
+ * the host believes owns the grant. When the grant now belongs to another host
+ * user (the same mailbox was connected again and the grant reused, `reuse`),
+ * answer 409 `grant_replaced`, exactly like a retired grant. A host that never
+ * sends it keeps today's behaviour. An invalid value is a 400.
+ */
+function ownerMismatch(c: Context<AppEnv>, grant: Grant): Response | undefined {
+  const raw = c.req.query("externalUserId");
+  if (raw === undefined) return undefined;
+  const named = validateExternalUserId(raw);
+  if (!named) return c.json({ error: "invalid_external_user_id" }, 400);
+  if (named !== grant.externalUserId) return c.json({ error: "grant_replaced" }, 409);
+  return undefined;
+}
+
+const TENANT_LIST_DEFAULT = 50;
+const TENANT_LIST_MAX = 200;
+
+function parseTenantListLimit(raw: string | undefined): number | null {
+  if (raw === undefined || raw === "") return TENANT_LIST_DEFAULT;
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n >= 1 && n <= TENANT_LIST_MAX ? n : null;
+}
+
+/** Opaque keyset cursor: base64url of `createdAt` + NUL + `id`. */
+function encodeTenantCursor(grant: Grant): string {
+  return Buffer.from(`${grant.createdAt}\0${grant.id}`, "utf8").toString("base64url");
+}
+
+/** undefined: no cursor (first page). null: malformed. */
+function decodeTenantCursor(raw: string | undefined): { createdAt: string; id: string } | undefined | null {
+  if (raw === undefined || raw === "") return undefined;
+  if (raw.length > 512) return null;
+  const decoded = Buffer.from(raw, "base64url").toString("utf8");
+  const sep = decoded.indexOf("\0");
+  if (sep <= 0) return null;
+  const createdAt = decoded.slice(0, sep);
+  const id = decoded.slice(sep + 1);
+  // Exactly what encodeTenantCursor writes: an ISO instant and a grant id.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/.test(createdAt)) return null;
+  if (Number.isNaN(Date.parse(createdAt)) || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return null;
+  return { createdAt, id };
+}
+
 let lastGrantCreatedMs = 0;
 
 /**
@@ -1255,7 +1417,7 @@ async function readyGmailGrant(
 type GmailAccessFailure = {
   ok: false;
   error: string;
-  status: 409;
+  status: 409 | 502;
   guidance?: string;
 };
 
@@ -1291,6 +1453,11 @@ async function openGmailAccess(
       guidance: NEEDS_REAUTH_GUIDANCE,
     };
   }
+  if (access.error === "provider_unavailable") {
+    // Google could not refresh the token right now: not a reason to reconnect.
+    log.warn("gmail_unavailable", { grantId: grant.id, tenantId: grant.tenantId, reason: "refresh_failed" });
+    return { ok: false, error: "gmail_unavailable", status: 502 };
+  }
   return { ok: false, error: access.error, status: 409 };
 }
 
@@ -1305,14 +1472,17 @@ async function gmailReadError(
   grant: Grant,
   err: unknown,
 ): Promise<Response> {
-  if (err instanceof GmailApiError && (err.status === 401 || err.status === 403)) {
+  if (gmailRequiresReconnect(err)) {
     getAccessTokenCache().invalidate(grant.id);
-    await markNeedsReauth(opts.store, grant);
+    if (!(await markNeedsReauth(opts.store, grant)) && (await reusedSince(opts.store, grant))) {
+      // The old token was refused; a reconnect reused the grant meanwhile.
+      return Response.json({ error: "gmail_unavailable" }, { status: 502 });
+    }
     log.warn("grant_needs_reauth", {
       grantId: grant.id,
       tenantId: grant.tenantId,
       reason: "gmail_unauthorized",
-      gmailStatus: err.status,
+      gmailStatus: err instanceof GmailApiError ? err.status : undefined,
     });
     await emitWebhookSafe(opts.webhooks, "grant.needs_reauth", {
       grantId: grant.id,

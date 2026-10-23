@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it, beforeEach } from "node:test";
-import { GmailAdapter } from "@inboxlink/adapters-gmail";
+import { GmailAdapter, GmailTokenRefreshError } from "@inboxlink/adapters-gmail";
 import type { Grant } from "@inboxlink/core";
 import {
   createAccessTokenCache,
@@ -91,7 +91,7 @@ describe("openGrantAccessToken", () => {
     assert.equal(refreshes, 2);
   });
 
-  it("marks needs_reauth and skips cache when refresh fails", async () => {
+  it("marks needs_reauth when Google refuses the refresh token (invalid_grant)", async () => {
     const store = new MemoryStore();
     const vault = new MemoryTokenVault(MASTER);
     const g = grant("grant_fail");
@@ -99,8 +99,8 @@ describe("openGrantAccessToken", () => {
     await vault.seal(REFRESH, { grantId: g.id, tenantId: g.tenantId });
 
     const gmail = {
-      async refreshAccessToken() {
-        throw new Error("invalid_grant");
+      async refreshAccessToken(): Promise<never> {
+        throw new GmailTokenRefreshError(400, "invalid_grant");
       },
     };
 
@@ -109,6 +109,29 @@ describe("openGrantAccessToken", () => {
     const updated = await store.getGrant(g.id);
     assert.equal(updated?.status, "needs_reauth");
   });
+
+  for (const [label, failure] of [
+    ["Google answers 500", () => new GmailTokenRefreshError(500, undefined)],
+    ["Google answers 503 with a JSON error", () => new GmailTokenRefreshError(503, "temporarily_unavailable")],
+    ["our client is misconfigured (invalid_client)", () => new GmailTokenRefreshError(401, "invalid_client")],
+    ["the network fails", () => new TypeError("fetch failed")],
+  ] as const) {
+    it(`keeps the grant active and asks nothing of the person when ${label}`, async () => {
+      const store = new MemoryStore();
+      const vault = new MemoryTokenVault(MASTER);
+      const g = grant(`grant_temp_${label.length}`);
+      await store.putGrant(g);
+      await vault.seal(REFRESH, { grantId: g.id, tenantId: g.tenantId });
+      const gmail = {
+        async refreshAccessToken(): Promise<never> {
+          throw failure();
+        },
+      };
+      const result = await openGrantAccessToken({ store, vault, gmail, grant: g });
+      assert.deepEqual(result, { ok: false, error: "provider_unavailable" });
+      assert.equal((await store.getGrant(g.id))?.status, "active", "no reconnect for a temporary failure");
+    });
+  }
 
   it("returns missing_refresh_token without calling Google when vault is empty", async () => {
     const store = new MemoryStore();

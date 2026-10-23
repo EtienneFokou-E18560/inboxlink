@@ -45,6 +45,7 @@ export const linkSessions = pgTable(
     codeVerifier: text("code_verifier"),
     publicToken: text("public_token"),
     grantId: text("grant_id"),
+    replacesGrantId: text("replaces_grant_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
@@ -191,6 +192,7 @@ CREATE TABLE IF NOT EXISTS link_sessions (
   expires_at TIMESTAMPTZ NOT NULL
 );
 ALTER TABLE link_sessions ADD COLUMN IF NOT EXISTS code_verifier TEXT;
+ALTER TABLE link_sessions ADD COLUMN IF NOT EXISTS replaces_grant_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS link_sessions_public_token_idx ON link_sessions (public_token);
 CREATE INDEX IF NOT EXISTS link_sessions_oauth_state_idx ON link_sessions (oauth_state);
 
@@ -208,6 +210,7 @@ CREATE TABLE IF NOT EXISTS grants (
 CREATE INDEX IF NOT EXISTS grants_tenant_user_idx ON grants(tenant_id, external_user_id);
 ALTER TABLE grants ADD COLUMN IF NOT EXISTS replaced_by TEXT;
 CREATE INDEX IF NOT EXISTS grants_tenant_address_idx ON grants (tenant_id, provider, lower(email));
+CREATE INDEX IF NOT EXISTS grants_tenant_created_idx ON grants (tenant_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS token_vault (
   grant_id TEXT PRIMARY KEY REFERENCES grants(id) ON DELETE CASCADE,
