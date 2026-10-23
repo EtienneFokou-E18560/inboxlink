@@ -183,7 +183,7 @@ This covers the case where one person reaches your app under several identities:
 
 A reconnect by the same user (the usual fix for `needs_reauth`) follows the same rule: under `replace` the old grant is retired, so store the new `grantId` and drop the old one; under `reuse` the `grantId` stays the same.
 
-Whenever a Connect takes a mailbox away from one of your users, InboxLink sends **`grant.revoked`** (below) for that user, under either setting. It is a new event in 0.2.0: an endpoint registered without an `events` list receives it, so ignore event types you do not handle.
+Whenever a Connect by one of your users takes a mailbox away from another of your users, InboxLink sends **`grant.revoked`** (below) for the user who lost it, under either setting. A user replacing their own grant gets no event: the Connect itself returns the new grant. It is a new event in 0.2.0: an endpoint registered without an `events` list receives it, so ignore event types you do not handle.
 
 `needs_reauth` is set only when Google requires the person to connect again: Google refuses the refresh token (`invalid_grant`: revoked, expired, consent withdrawn), Gmail answers 401, or Gmail answers 403 naming a reason other than a rate limit or InboxLink's own setup. Any other failure (Google 5xx, the network, a rate limit) leaves the grant `active`; reads answer **502 `gmail_unavailable`** and the next sync retries. There is no time-based clean-up of `needs_reauth` grants.
 

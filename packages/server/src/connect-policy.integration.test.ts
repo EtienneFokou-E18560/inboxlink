@@ -434,6 +434,15 @@ describe("a failure from before a reconnect does not touch the reused grant", ()
 });
 
 describe("Connect rule `reuse`: different address", () => {
+  it("a user replacing their own grant is not sent grant.revoked; another user losing one is", async () => {
+    const built = buildApp();
+    const { events } = built;
+    await connectAs(built, "u1", { tenant: "plain" });
+    events.length = 0;
+    await connectAs(built, "u1", { tenant: "plain" }); // reconnect, same address, same user
+    assert.deepEqual(events.map((e) => e.type), ["grant.connected"]);
+  });
+
   it("replaces the named grant when the host says the person chose replace", async () => {
     const built = buildApp();
     const { store, vault, events } = built;
@@ -452,10 +461,8 @@ describe("Connect rule `reuse`: different address", () => {
     assert.deepEqual(await store.listMessageIds(old), [], "old cache gone");
     assert.deepEqual(
       events.map((e) => [e.type, e.data.grantId, e.data.reason ?? e.data.reused]),
-      [
-        ["grant.connected", fresh, false],
-        ["grant.revoked", old, "replaced"],
-      ],
+      [["grant.connected", fresh, false]],
+      "the same user replaced it: the Connect itself tells the host",
     );
   });
 

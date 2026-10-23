@@ -1308,8 +1308,9 @@ async function listMicrosoftMessages(
 }
 
 /**
- * Tell the host which of its users lost a mailbox in this Connect, so it can
- * show "reconnect" without waiting for a read to answer 409:
+ * Tell the host which of its other users lost a mailbox in this Connect, so it
+ * can show "reconnect" without waiting for a read to answer 409 (a grant the
+ * connecting user replaced themselves is not announced):
  * `reason: "replaced"` for each retired grant (it is `revoked`), and
  * `reason: "reassigned"` when a reused grant moved to another host user (the
  * grant stays active, for the new owner only; reads naming the previous owner
@@ -1320,6 +1321,9 @@ async function emitRevokedWebhooks(
   outcome: ConnectGrantOutcome,
 ): Promise<void> {
   for (const old of outcome.retired) {
+    // The same user replacing their own grant learns the new one from this
+    // very Connect (grant.connected and the redirect): nothing to tell.
+    if (old.externalUserId === outcome.grant.externalUserId) continue;
     await emitWebhookSafe(webhooks, "grant.revoked", {
       grantId: old.id,
       tenantId: old.tenantId,
