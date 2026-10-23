@@ -19,6 +19,23 @@ export default defineConfig({
       customCss: ["./src/styles/theme.css"],
       sidebar: [
         { label: "Start here", items: [{ label: "Quick start", slug: "quick-start" }] },
+        {
+          label: "Guides",
+          items: [
+            { label: "Connect flow", slug: "guides/connect-flow" },
+            { label: "Messages API", slug: "guides/messages" },
+            { label: "Sync and webhooks", slug: "guides/sync-and-webhooks" },
+          ],
+        },
+        { label: "Reference", items: [{ label: "SDK", slug: "reference/sdk" }] },
+        {
+          label: "Operate",
+          items: [
+            { label: "Self-hosting", slug: "operate/self-host" },
+            { label: "Security", slug: "security" },
+            { label: "Status", link: "https://inboxlink-two.vercel.app/status", attrs: { target: "_blank" } },
+          ],
+        },
       ],
     }),
   ],
