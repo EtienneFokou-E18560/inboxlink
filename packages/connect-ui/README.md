@@ -12,7 +12,8 @@ Shared tokens live in `CONNECT_STYLES` / `src/public/` so landing, `/status`, an
 - `renderConnectErrorPage({ kind, detail? })` — expired / invalid / OAuth failures
 - `connectErrorStatus(kind)` — suggested HTTP status
 - `renderPublicDocument({ title, body, extraStyles? })` — shared HTML shell for public pages
-- `CONNECT_STYLES` — design tokens
-- `INBOXLINK_WEBSITE_URL` — the website (`GET /home` and `GET /docs` redirect there)
+- `renderLandingPage()` — the API domain's home page (`GET /home`, named on Google's consent screen); links to the website
+- `CONNECT_STYLES` / `LANDING_STYLES` — design tokens and landing layer
+- `INBOXLINK_WEBSITE_URL` — the website (`GET /docs` redirects there)
 
 Do not depend on career-workspace.
