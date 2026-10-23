@@ -27,6 +27,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+          # Astro (apps/site) needs a recent 22.x; the runner cache can lag behind
+          check-latest: true
           cache: "pnpm"
 
       - name: Install
@@ -40,6 +42,9 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Build website
+        run: pnpm build:site
 
       - name: Test
         run: pnpm test
