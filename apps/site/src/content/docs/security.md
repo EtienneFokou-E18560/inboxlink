@@ -20,13 +20,16 @@ description: How InboxLink protects mailbox access, and how to report a vulnerab
 |---|---|---|
 | Google refresh token | Encrypted in the vault (AES-256-GCM), never returned by the API | The grant is revoked or replaced |
 | Mailbox address, `externalUserId`, grant status | Postgres | The grant is revoked. A replaced grant keeps this record (no token, no messages) so your app can see `replaced: true` |
-| Copy of synced messages (headers, snippet, labels, and the full message for messages fetched one by one) | Postgres | The grant is revoked or replaced |
+| Synced inbox messages: ids, thread, received time, labels, and the subject and snippet encrypted (AES-256-GCM, a key derived from the master key with its own label, the grant and message ids as additional data). No bodies, addresses, attachment names or sent mail | Postgres | `INBOXLINK_MESSAGE_TTL_DAYS` (30) after the message arrived, when it leaves the inbox, or when the grant is revoked or replaced |
 | Access tokens | Server memory only, short-lived | They expire |
 
 **Never stored:** the person's Google password (typed on Google's page only),
-attachment file contents, and tokens or secrets in logs (logs redact them).
-Reducing what is kept is planned in
-[#86](https://github.com/EtienneFokou-E18560/inboxlink/issues/86).
+message bodies, sent mail, attachment file contents, and tokens or secrets in
+logs (logs redact them). Webhooks carry identifiers only. Live reads
+(`source=live`, `messages.get`) go to Gmail and are not written anywhere.
+These rules apply to mail synced from 0.3.0 on; rows cached before it are left
+as they were until the grant is revoked or replaced
+([#86](https://github.com/EtienneFokou-E18560/inboxlink/issues/86)).
 
 ## Who handles what
 

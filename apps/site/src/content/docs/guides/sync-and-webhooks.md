@@ -10,9 +10,26 @@ const { jobId } = await il.grants.sync(grantId); // HTTP 202, status "queued"
 const job = await il.grants.getSyncJob(grantId, jobId); // "completed" or "failed"
 ```
 
-The first sync of a grant bootstraps the cache; later ones apply Gmail history
-since the last sync. Pass `{ mode: "full" }` (`il.grants.sync(grantId, { mode: "full" })`)
-to rebuild the cache.
+The first sync of a grant takes its one look back: the newest inbox messages
+(up to 50) received inside the time limit. Later syncs apply Gmail history since
+the last sync and read new mail only. A grant gets that first look once:
+`{ mode: "full" }` (`il.grants.sync(grantId, { mode: "full" })`) only does it for
+a grant that never had it, and otherwise runs as an incremental sync. If Gmail no
+longer knows the last watermark, the sync restarts from the mailbox's current
+state without looking back.
+
+What the cache keeps (since 0.3.0):
+
+- **Inbox mail only.** Mail without the `INBOX` label, and anything labelled
+  `SENT`, `DRAFT`, `SPAM` or `TRASH`, is not cached. A cached message that leaves
+  the inbox (archived, trashed) is removed at the next sync.
+- **Metadata only.** Ids, thread, `receivedAt`, labels, subject and snippet. No
+  bodies, addresses or attachment names. Subject and snippet are encrypted at
+  rest. Sync reads messages with Gmail `format=metadata`, never in full.
+- **A time limit.** Rows received more than `INBOXLINK_MESSAGE_TTL_DAYS` days
+  ago (30 on the hosted service) are deleted at each sync of the grant and by
+  the daily scheduled job. The job result carries `expired`: rows this sync
+  deleted.
 Jobs are drained by a scheduled job and right after you enqueue, so poll
 `getSyncJob` or wait for `sync.completed`.
 
@@ -41,7 +58,7 @@ types you do not handle.
 | `grant.needs_reauth` | Google refused the grant's token |
 | `grant.revoked` | A Connect took the mailbox away from `externalUserId` (`reason`: `replaced` or `reassigned`) |
 | `sync.completed` | A sync job finished |
-| `message.created` | Gmail push added a new message |
+| `message.created` | Gmail push added a new inbox message. Identifiers only: `grantId`, `messageId`, `providerMessageId`, `threadId`, `receivedAt` (no subject since 0.3.0); call `messages.get` for the content |
 
 Delivery is at least once, with retries on 408, 429 and 5xx.
 

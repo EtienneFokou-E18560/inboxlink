@@ -7,7 +7,7 @@ description: Every method of @inboxlink/sdk, the TypeScript client for host apps
 npm install @inboxlink/sdk
 ```
 
-Current version: **`@inboxlink/sdk@0.2.0`**, with `@inboxlink/core@0.2.0`.
+Current version: **`@inboxlink/sdk@0.3.0`**, with `@inboxlink/core@0.3.0`.
 InboxLink is 0.x: treat minor versions as possibly breaking and read the
 [changelog](https://github.com/EtienneFokou-E18560/inboxlink/blob/main/packages/sdk/CHANGELOG.md) before upgrading.
 
@@ -47,6 +47,12 @@ the `error` value from the [Messages API](/guides/messages/#errors).
 Grant calls (`messages.*`, `grants.sync`, `getSyncJob`, `revoke`) accept
 `{ externalUserId }`: the call then answers **409 `grant_replaced`** if the
 grant now belongs to another of your users.
+
+`messages.list` reads the synced cache by default: inbox mail from the last 30
+days, metadata only (no `body`, empty `from`/`to`). Use `source: "live"` or
+`messages.get` for the rest. `grants.sync(grantId, { mode: "full" })` looks back
+only for a grant that never had its first look. Type webhook payloads with
+`MessageCreatedEventData` (identifiers only) and `GrantRevokedEventData`.
 
 `grants.listAll` returns ids, owner, provider, status, dates and
 `lastSyncAt` for every grant in your tenant, oldest first. It never returns

@@ -1,5 +1,6 @@
 import type { Grant, LinkSession, Message, SyncCursor } from "@inboxlink/core";
 import { newId, randomToken } from "@inboxlink/core";
+import { minimiseMessage } from "./message-rules.js";
 
 export type StoredSession = LinkSession & {
   oauthState?: string;
@@ -79,6 +80,16 @@ export type EnqueueSyncJobInput = {
 };
 
 export type MessagePageQuery = { offset: number; limit: number };
+
+/** A sync cursor plus when its grant had its one first look back (issue #86). */
+export type StoredSyncCursor = SyncCursor & { firstLookAt?: string };
+
+export type DeleteExpiredMessagesInput = {
+  /** Rows with `receivedAt` before this ISO time go. */
+  before: string;
+  /** One grant only; every grant when omitted (the daily cron). */
+  grantId?: string;
+};
 
 export type MessagePage = { messages: Message[]; hasMore: boolean };
 
@@ -175,11 +186,32 @@ export interface GrantStore {
    * when at least one message exists after this page.
    */
   listMessagesPage(grantId: string, page: MessagePageQuery): Promise<MessagePage>;
+  /**
+   * Store messages as metadata only (issue #86): ids, thread, `receivedAt`, labels,
+   * subject and snippet (encrypted at rest on Postgres). Bodies, addresses and
+   * attachments are dropped. A row written before #86 is never overwritten.
+   */
   upsertMessages(messages: Message[]): Promise<void>;
   deleteMessages(grantId: string): Promise<void>;
-  deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void>;
-  getSyncCursor(grantId: string): Promise<SyncCursor | undefined>;
+  /**
+   * Delete cached messages by provider id. With `minimisedOnly`, rows written
+   * before #86 stay (the inbox-only rule applies to new rows only).
+   */
+  deleteMessagesByProviderIds(
+    grantId: string,
+    providerMessageIds: string[],
+    opts?: { minimisedOnly?: boolean },
+  ): Promise<void>;
+  /**
+   * Time limit (issue #86): delete rows received before `before`. Rows written
+   * before #86 are not touched. Returns how many rows went.
+   */
+  deleteExpiredMessages(input: DeleteExpiredMessagesInput): Promise<number>;
+  getSyncCursor(grantId: string): Promise<StoredSyncCursor | undefined>;
+  /** Keeps `watchExpiration` and `firstLookAt` when the new cursor has none. */
   putSyncCursor(cursor: SyncCursor): Promise<void>;
+  /** Record the grant's first look (only the first call counts). Needs a cursor row. */
+  markFirstLook(grantId: string, at: string): Promise<void>;
   /** Wave D2 durable sync jobs. */
   enqueueSyncJob(input: EnqueueSyncJobInput): Promise<SyncJobRecord>;
   getSyncJob(jobId: string): Promise<SyncJobRecord | undefined>;
@@ -202,7 +234,7 @@ export class MemoryStore implements GrantStore {
   readonly grants = new Map<string, Grant>();
   readonly publicTokens = new Map<string, string>();
   readonly messages = new Map<string, Message[]>();
-  readonly syncCursors = new Map<string, SyncCursor>();
+  readonly syncCursors = new Map<string, StoredSyncCursor>();
   readonly syncJobs = new Map<string, SyncJobRecord>();
 
   async ready(): Promise<void> {}
@@ -442,8 +474,9 @@ export class MemoryStore implements GrantStore {
       const index = existing.findIndex(
         (row) => row.providerMessageId === message.providerMessageId,
       );
-      if (index >= 0) existing[index] = message;
-      else existing.push(message);
+      const row = minimiseMessage(message);
+      if (index >= 0) existing[index] = row;
+      else existing.push(row);
       this.messages.set(message.grantId, existing);
     }
   }
@@ -452,7 +485,12 @@ export class MemoryStore implements GrantStore {
     this.messages.delete(grantId);
   }
 
-  async deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void> {
+  async deleteMessagesByProviderIds(
+    grantId: string,
+    providerMessageIds: string[],
+    _opts?: { minimisedOnly?: boolean },
+  ): Promise<void> {
+    // Memory rows do not outlive the process, so every row is a minimised one.
     if (!providerMessageIds.length) return;
     const remove = new Set(providerMessageIds);
     const existing = this.messages.get(grantId) ?? [];
@@ -462,16 +500,35 @@ export class MemoryStore implements GrantStore {
     );
   }
 
-  async getSyncCursor(grantId: string): Promise<SyncCursor | undefined> {
+  async deleteExpiredMessages(input: DeleteExpiredMessagesInput): Promise<number> {
+    const cutoff = Date.parse(input.before);
+    let removed = 0;
+    for (const [grantId, rows] of this.messages) {
+      if (input.grantId && grantId !== input.grantId) continue;
+      const kept = rows.filter((row) => !(Date.parse(row.receivedAt) < cutoff));
+      removed += rows.length - kept.length;
+      this.messages.set(grantId, kept);
+    }
+    return removed;
+  }
+
+  async getSyncCursor(grantId: string): Promise<StoredSyncCursor | undefined> {
     return this.syncCursors.get(grantId);
   }
 
   async putSyncCursor(cursor: SyncCursor): Promise<void> {
     const existing = this.syncCursors.get(cursor.grantId);
-    this.syncCursors.set(cursor.grantId, {
+    const next: StoredSyncCursor = {
       ...cursor,
       watchExpiration: cursor.watchExpiration ?? existing?.watchExpiration,
-    });
+    };
+    if (existing?.firstLookAt) next.firstLookAt = existing.firstLookAt;
+    this.syncCursors.set(cursor.grantId, next);
+  }
+
+  async markFirstLook(grantId: string, at: string): Promise<void> {
+    const existing = this.syncCursors.get(grantId);
+    if (existing && !existing.firstLookAt) existing.firstLookAt = at;
   }
 
   async enqueueSyncJob(input: EnqueueSyncJobInput): Promise<SyncJobRecord> {

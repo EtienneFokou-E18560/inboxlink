@@ -30,6 +30,10 @@ export async function applyGmailPushNotification(input: {
   gmail: GmailAdapter;
   webhooks?: WebhookBus | null;
   notification: GmailPushNotification;
+  /** `INBOXLINK_MESSAGE_TTL_DAYS`; default 30. */
+  messageTtlDays?: number;
+  /** Test clock (ms). */
+  now?: () => number;
 }): Promise<ApplyPushResult> {
   const email = input.notification.emailAddress?.trim();
   if (!email) {
@@ -52,6 +56,8 @@ export async function applyGmailPushNotification(input: {
       vault: input.vault,
       gmail: input.gmail,
       grant,
+      messageTtlDays: input.messageTtlDays,
+      now: input.now,
     });
     results.push(result);
     await emitPushWebhooks({
@@ -166,7 +172,7 @@ async function emitMessageCreated(
     messageId: message.id,
     providerMessageId: message.providerMessageId,
     threadId: message.threadId,
-    subject: message.subject,
+    // Ids only (issue #86): no subject, snippet or addresses. Read the message to get them.
     receivedAt: message.receivedAt,
   });
 }

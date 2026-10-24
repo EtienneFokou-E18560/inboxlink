@@ -716,7 +716,7 @@ const BACKENDS: { name: string; make(): Promise<{ store: GrantStore; vault: Toke
     async make() {
       const pg = new PGlite();
       const db = new PgDatabase(new PgliteExecutor(pg));
-      const store = new PostgresStore(db);
+      const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
       await store.ready();
       await pg.query(
         `INSERT INTO tenants (id, name, api_secret_hash) VALUES ('askel', 'askel', 'x'), ('beta', 'beta', 'x')`,
@@ -890,7 +890,7 @@ describe("scripts/grant-health-report.sql", () => {
     assert.equal(report.length, 2);
     const pg = new PGlite();
     const db = new PgDatabase(new PgliteExecutor(pg));
-    const store = new PostgresStore(db);
+    const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
     await store.ready();
     const day = 86_400_000;
     const ago = (days: number) => new Date(Date.now() - days * day).toISOString();

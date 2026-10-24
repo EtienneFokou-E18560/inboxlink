@@ -76,6 +76,10 @@ export async function drainSyncJobs(input: {
   gmail: GmailAdapter;
   webhooks?: WebhookBus | null;
   limit?: number;
+  /** `INBOXLINK_MESSAGE_TTL_DAYS`; default 30. */
+  messageTtlDays?: number;
+  /** Test clock (ms). */
+  now?: () => number;
 }): Promise<DrainResult> {
   const claimed = await input.store.claimQueuedSyncJobs(input.limit ?? 5);
   let completed = 0;
@@ -87,6 +91,8 @@ export async function drainSyncJobs(input: {
       gmail: input.gmail,
       webhooks: input.webhooks,
       job,
+      messageTtlDays: input.messageTtlDays,
+      now: input.now,
     });
     if (ok) completed += 1;
     else failed += 1;
@@ -107,6 +113,8 @@ export async function runClaimedSyncJob(input: {
   gmail: GmailAdapter;
   webhooks?: WebhookBus | null;
   job: SyncJobRecord;
+  messageTtlDays?: number;
+  now?: () => number;
 }): Promise<boolean> {
   const { store, vault, gmail, job } = input;
   const grant = await store.getGrant(job.grantId);
@@ -130,6 +138,8 @@ export async function runClaimedSyncJob(input: {
       gmail,
       grant,
       forceBootstrap: job.forceBootstrap,
+      messageTtlDays: input.messageTtlDays,
+      now: input.now,
     });
     await emitSyncWebhooks(input.webhooks, grant, result);
     if (result.status === "ok") {
@@ -139,6 +149,7 @@ export async function runClaimedSyncJob(input: {
         historyId: result.historyId,
         upserted: result.upserted,
         deleted: result.deleted,
+        expired: result.expired,
       });
       return true;
     }

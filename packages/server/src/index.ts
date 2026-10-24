@@ -39,7 +39,7 @@ export function createAppFromEnv(
 ): AppBundle {
   const config = loadConfig(env);
   const databaseUrl = config.databaseUrl?.trim();
-  const opened = databaseUrl ? openPostgres(databaseUrl) : undefined;
+  const opened = databaseUrl ? openPostgres(databaseUrl, config.masterKey) : undefined;
   const store = opened?.store ?? new MemoryStore();
   const vault = opened
     ? new PostgresTokenVault(opened.db, config.masterKey)
@@ -104,17 +104,18 @@ export function createAppFromEnv(
         ? { audience: config.gmailPushOidcAudience, email: config.gmailPushOidcEmail }
         : null,
     cronSecret: config.cronSecret,
+    messageTtlDays: config.messageTtlDays,
   });
   // Best-effort GC of expired link_sessions (also runs once on Postgres ensure).
   void store.deleteExpiredSessions().catch(() => {});
   return { app, config, store, vault, storeKind, queue: resolvedQueue };
 }
 
-function openPostgres(databaseUrl: string): { db: PgDatabase; store: PostgresStore } {
+function openPostgres(databaseUrl: string, masterKey: string): { db: PgDatabase; store: PostgresStore } {
   const existing = postgresByUrl.get(databaseUrl);
   if (existing) return existing;
   const db = new PgDatabase(new PostgresJsExecutor(createPostgresClient(databaseUrl)));
-  const created = { db, store: new PostgresStore(db) };
+  const created = { db, store: new PostgresStore(db, { masterKey }) };
   postgresByUrl.set(databaseUrl, created);
   return created;
 }

@@ -32,6 +32,11 @@ const FOLDER_LABELS = new Set([
   "CHAT",
 ]);
 
+/** The folder-like subset of Gmail `labelIds` (what `Message.folderIds` carries). */
+export function gmailFolderIds(labels: readonly string[]): string[] {
+  return labels.filter((label) => FOLDER_LABELS.has(label) || label.startsWith("CATEGORY_"));
+}
+
 export type NormalizeGmailOptions = {
   /**
    * Fill `message.headers` from `List-Unsubscribe`, `Precedence` and `Auto-Submitted`.
@@ -63,7 +68,7 @@ export function normalizeGmailMessage(
     to: parseAddressList(headers.get("to")),
     sentAt: sentAt ?? new Date(0).toISOString(),
     receivedAt: receivedAt ?? new Date(0).toISOString(),
-    folderIds: labels.filter((label) => FOLDER_LABELS.has(label) || label.startsWith("CATEGORY_")),
+    folderIds: gmailFolderIds(labels),
     labels,
     hasAttachments: body.hasAttachments || attachments.length > 0,
   };

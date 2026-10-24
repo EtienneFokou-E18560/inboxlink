@@ -1,5 +1,9 @@
 # `@inboxlink/core` changelog
 
+## 0.3.0
+
+Companion release with `@inboxlink/sdk@0.3.0`. No public type changes. The server's synced store now keeps inbox metadata only, so a `Message` read from the store has empty `from`/`to`, no `body`, `sentAt` equal to `receivedAt` and `hasAttachments: false` (see the SDK changelog).
+
 ## 0.2.0
 
 Companion release with `@inboxlink/sdk@0.2.0`. Additive only.

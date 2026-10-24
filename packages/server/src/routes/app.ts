@@ -37,6 +37,7 @@ import {
 import type { GrantStore } from "../store.js";
 import type { QueueHandle } from "../queue/sync-queue.js";
 import { SCHEMA_SQL } from "../db/schema.js";
+import { messageCutoff, positiveTtlDays } from "../message-rules.js";
 import { parseMessageListFilters } from "../message-filters.js";
 import { getAccessTokenCache } from "../access-token-cache.js";
 import {
@@ -122,6 +123,13 @@ export type CreateAppOptions = {
   gmailPushSecret?: string;
   /** Bearer for internal cron routes (`CRON_SECRET`). */
   cronSecret?: string;
+  /**
+   * Days the synced store keeps a message (`INBOXLINK_MESSAGE_TTL_DAYS`, default 30).
+   * Older rows go at each grant's sync and at the daily drain-sync-jobs cron.
+   */
+  messageTtlDays?: number;
+  /** Test clock (ms) for the time limit. */
+  now?: () => number;
   /** OIDC audience + service-account email for signed Pub/Sub push requests. */
   gmailPushOidc?: PushOidcConfig | null;
   /** Per-tenant webhook destinations (`/v1/webhooks`). Omit/null = routes return 501. */
@@ -717,6 +725,8 @@ export function createApp(opts: CreateAppOptions) {
         gmail: appOpts.gmail,
         webhooks: appOpts.webhooks,
         limit: 1,
+        messageTtlDays: appOpts.messageTtlDays,
+        now: appOpts.now,
       }).catch((err) => {
         log.warn("sync_drain_after_connect_failed", {
           jobId,
@@ -994,6 +1004,8 @@ export function createApp(opts: CreateAppOptions) {
       gmail: opts.gmail,
       webhooks: opts.webhooks,
       limit: 3,
+      messageTtlDays: opts.messageTtlDays,
+      now: opts.now,
     }).catch((err) => {
       log.warn("sync_drain_deferred_failed", {
         jobId: enqueued.jobId,
@@ -1074,6 +1086,8 @@ export function createApp(opts: CreateAppOptions) {
         gmail: opts.gmail,
         webhooks: opts.webhooks,
         notification,
+        messageTtlDays: opts.messageTtlDays,
+        now: opts.now,
       });
       log.info("gmail_push_applied", {
         status: applied.status,
@@ -1104,19 +1118,29 @@ export function createApp(opts: CreateAppOptions) {
   app.post("/v1/internal/cron/renew-gmail-watches", renewWatches);
   app.get("/v1/internal/cron/renew-gmail-watches", renewWatches);
 
-  /** Drain durable sync_jobs queue (Vercel cron every few minutes). */
+  /**
+   * Daily cron: delete stored messages past the time limit for every grant
+   * (issue #86, no extra cron on Hobby), then drain the durable sync_jobs queue.
+   */
   const drainJobs = async (c: Context<AppEnv>) => {
     if (!verifyCronSecret(c.req.header("authorization"), opts.cronSecret)) {
       return c.json({ error: "unauthorized" }, 401);
     }
+    const nowMs = (opts.now ?? Date.now)();
+    const expiredMessages = await opts.store.deleteExpiredMessages({
+      before: messageCutoff(positiveTtlDays(opts.messageTtlDays), nowMs),
+    });
+    if (expiredMessages) log.info("messages_expired", { count: expiredMessages });
     const summary = await drainSyncJobs({
       store: opts.store,
       vault: opts.vault,
       gmail: opts.gmail,
       webhooks: opts.webhooks,
       limit: 10,
+      messageTtlDays: opts.messageTtlDays,
+      now: opts.now,
     });
-    return c.json({ ok: true, ...summary });
+    return c.json({ ok: true, expiredMessages, ...summary });
   };
   app.post("/v1/internal/cron/drain-sync-jobs", drainJobs);
   app.get("/v1/internal/cron/drain-sync-jobs", drainJobs);

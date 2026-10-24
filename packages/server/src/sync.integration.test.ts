@@ -12,6 +12,9 @@ import { createStoreSyncQueue, drainSyncJobs } from "./queue/sync-queue.js";
 import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
 
+/** Two days ago: inside the synced store's 30-day time limit (issue #86). */
+const RECENT_MS = Date.now() - 2 * 86_400_000;
+
 const REFRESH = "1//vaulted-refresh-for-sync";
 const ACCESS = "ya29.sync-access-token";
 const MASTER = "test-master-key-at-least-16";
@@ -24,7 +27,7 @@ function messageResource(id: string, subject: string) {
     threadId: id,
     labelIds: ["INBOX"],
     snippet: subject,
-    internalDate: "1710000000000",
+    internalDate: String(RECENT_MS),
     payload: {
       mimeType: "text/plain",
       headers: [
@@ -274,8 +277,8 @@ describe("Gmail history sync watermark", () => {
         snippet: "Prior",
         from: [],
         to: [],
-        sentAt: new Date(0).toISOString(),
-        receivedAt: new Date(0).toISOString(),
+        sentAt: new Date(RECENT_MS).toISOString(),
+        receivedAt: new Date(RECENT_MS).toISOString(),
         folderIds: [],
         hasAttachments: false,
       },
@@ -303,8 +306,8 @@ describe("Gmail history sync watermark", () => {
         snippet: "Keep me",
         from: [{ email: "a@example.com" }],
         to: [{ email: "me@example.com" }],
-        sentAt: new Date(0).toISOString(),
-        receivedAt: new Date(0).toISOString(),
+        sentAt: new Date(RECENT_MS).toISOString(),
+        receivedAt: new Date(RECENT_MS).toISOString(),
         folderIds: ["INBOX"],
         hasAttachments: false,
       } satisfies Message,
@@ -316,8 +319,8 @@ describe("Gmail history sync watermark", () => {
         snippet: "Delete me",
         from: [{ email: "a@example.com" }],
         to: [{ email: "me@example.com" }],
-        sentAt: new Date(0).toISOString(),
-        receivedAt: new Date(0).toISOString(),
+        sentAt: new Date(RECENT_MS).toISOString(),
+        receivedAt: new Date(RECENT_MS).toISOString(),
         folderIds: ["INBOX"],
         hasAttachments: false,
       } satisfies Message,
@@ -390,8 +393,8 @@ describe("Gmail history sync watermark", () => {
         snippet: "stale",
         from: [],
         to: [],
-        sentAt: new Date(0).toISOString(),
-        receivedAt: new Date(0).toISOString(),
+        sentAt: new Date(RECENT_MS).toISOString(),
+        receivedAt: new Date(RECENT_MS).toISOString(),
         folderIds: [],
         hasAttachments: false,
       },
@@ -414,8 +417,8 @@ describe("Gmail history sync watermark", () => {
     profileHistoryId = "33000";
     const pglite = new PGlite();
     const db = new PgDatabase(new PgliteExecutor(pglite));
-    const storeA = new PostgresStore(db);
-    const storeB = new PostgresStore(db);
+    const storeA = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
+    const storeB = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
     const vault = new PostgresTokenVault(db, MASTER);
     const grant = activeGrant("grant_pg_sync");
     await sealGrant(storeA, vault, grant);

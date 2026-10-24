@@ -54,7 +54,7 @@ describe("shared-address report and replacement on Postgres (#371)", () => {
     assert.equal(REPORT.length, 2, "summary and per-grant queries");
     const pg = new PGlite();
     const db = new PgDatabase(new PgliteExecutor(pg));
-    const store = new PostgresStore(db);
+    const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
     const vault = new PostgresTokenVault(db, "test-master-key-at-least-16");
     await store.ready();
 
@@ -133,7 +133,7 @@ const BACKENDS: Backend[] = [
     name: "postgres",
     async make() {
       const db = new PgDatabase(new PgliteExecutor(new PGlite()));
-      const store = new PostgresStore(db);
+      const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
       await store.ready();
       return { store, vault: new PostgresTokenVault(db, "test-master-key-at-least-16") };
     },

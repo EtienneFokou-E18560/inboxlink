@@ -8,7 +8,17 @@ import type {
   TokenVault,
 } from "@inboxlink/core";
 import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
+import { gmailFolderIds } from "@inboxlink/adapters-gmail";
+import { log } from "../log.js";
+import { minimiseMessage } from "../message-rules.js";
+import {
+  deriveMessageKey,
+  openMessageField,
+  sealMessageField,
+  type MessageField,
+} from "../message-seal.js";
 import type {
+  DeleteExpiredMessagesInput,
   EnqueueSyncJobInput,
   GrantStore,
   MessagePage,
@@ -16,6 +26,7 @@ import type {
   ReassignGrantInput,
   RetireGrantsInput,
   StoredSession,
+  StoredSyncCursor,
   SyncJobKind,
   SyncJobRecord,
   SyncJobStatus,
@@ -51,15 +62,88 @@ export class PgDatabase {
   }
 
   private async migrate(): Promise<void> {
+    // One catalog read up front: statements whose effect is already in place are
+    // skipped, so a cold start on an up-to-date database takes no ACCESS EXCLUSIVE
+    // (ALTER TABLE) or SHARE (CREATE INDEX) lock. Decided on the state before this
+    // run; a statement for something missing from it always runs.
+    const catalog = await this.readCatalog();
     for (const statement of sqlStatements(SCHEMA_SQL + TENANT_SQL)) {
+      if (catalog && alreadyApplied(statement, catalog)) continue;
       try {
         await this.sql.exec(statement);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/already exists/i.test(message)) throw err;
+        if (!isAlreadyExistsError(err)) throw err;
       }
     }
   }
+
+  private async readCatalog(): Promise<Catalog | undefined> {
+    try {
+      const columns = await this.sql.query<{
+        table_name: string;
+        column_name: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT table_name, column_name, is_nullable, column_default
+         FROM information_schema.columns WHERE table_schema = current_schema()`,
+        [],
+      );
+      const indexes = await this.sql.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`,
+        [],
+      );
+      return {
+        columns: new Map(
+          columns.map((c) => [
+            `${c.table_name}.${c.column_name}`,
+            { nullable: c.is_nullable === "YES", hasDefault: c.column_default !== null },
+          ]),
+        ),
+        indexes: new Set(indexes.map((i) => i.indexname)),
+      };
+    } catch {
+      // Without the catalog every statement runs, as before.
+      return undefined;
+    }
+  }
+}
+
+type Catalog = {
+  columns: Map<string, { nullable: boolean; hasDefault: boolean }>;
+  indexes: Set<string>;
+};
+
+/** True when the catalog already shows what this ALTER TABLE / CREATE INDEX would do. */
+function alreadyApplied(statement: string, catalog: Catalog): boolean {
+  const sql = statement.replace(/^\s*(--[^\n]*\n\s*)*/, "");
+  let m = /^ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/i.exec(sql);
+  if (m) return catalog.columns.has(`${m[1]}.${m[2]}`);
+  m = /^ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL\s*$/i.exec(sql);
+  if (m) return catalog.columns.get(`${m[1]}.${m[2]}`)?.nullable === true;
+  m = /^ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP DEFAULT\s*$/i.exec(sql);
+  if (m) {
+    const column = catalog.columns.get(`${m[1]}.${m[2]}`);
+    return column !== undefined && !column.hasDefault;
+  }
+  m = /^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)/i.exec(sql);
+  if (m) return catalog.indexes.has(m[1]!);
+  return false;
+}
+
+/**
+ * `IF NOT EXISTS` is not atomic: two cold starts creating the same index or table
+ * at once can fail on the catalog's own unique index (`pg_class_relname_nsp_index`,
+ * `pg_type_typname_nsp_index`) instead of "already exists". Both mean done.
+ */
+export function isAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/already exists/i.test(message)) return true;
+  const code = (err as { code?: unknown } | null)?.code;
+  return (
+    (code === "23505" || /duplicate key value/i.test(message)) &&
+    /pg_(class|type)_\w*nsp_index/.test(message)
+  );
 }
 
 type SessionRow = {
@@ -105,8 +189,23 @@ const SESSION_COLUMNS = `
   oauth_state, code_verifier, public_token, grant_id, replaces_grant_id, created_at, expires_at
 `;
 
+export type PostgresStoreOptions = {
+  /**
+   * `INBOXLINK_MASTER_KEY`. The message store derives its own key from it (HKDF,
+   * own label) to encrypt the subject and snippet it keeps.
+   */
+  masterKey: string;
+};
+
 export class PostgresStore implements GrantStore {
-  constructor(private readonly db: PgDatabase) {}
+  private readonly messageKey: Buffer;
+
+  constructor(
+    private readonly db: PgDatabase,
+    options: PostgresStoreOptions,
+  ) {
+    this.messageKey = deriveMessageKey(options.masterKey);
+  }
 
   ready(): Promise<void> {
     return this.db.ensure();
@@ -432,16 +531,11 @@ export class PostgresStore implements GrantStore {
 
   async listMessages(grantId: string): Promise<Message[]> {
     await this.db.ensure();
-    const rows = await this.db.sql.query<{ payload: unknown }>(
-      `SELECT payload FROM messages WHERE grant_id = $1 ORDER BY received_at ASC`,
+    const rows = await this.db.sql.query<MessageRow>(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE grant_id = $1 ORDER BY received_at ASC`,
       [grantId],
     );
-    const messages: Message[] = [];
-    for (const row of rows) {
-      const message = asMessage(row.payload);
-      if (message) messages.push(message);
-    }
-    return messages;
+    return this.mapMessages(rows);
   }
 
   async listMessageIds(grantId: string): Promise<string[]> {
@@ -457,69 +551,71 @@ export class PostgresStore implements GrantStore {
   async listMessagesPage(grantId: string, page: MessagePageQuery): Promise<MessagePage> {
     await this.db.ensure();
     // Fetch one extra row to learn whether another page exists without a COUNT.
-    const rows = await this.db.sql.query<{ payload: unknown }>(
-      `SELECT payload FROM messages
+    const rows = await this.db.sql.query<MessageRow>(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages
        WHERE grant_id = $1
        ORDER BY received_at DESC, provider_message_id ASC
        LIMIT $2 OFFSET $3`,
       [grantId, page.limit + 1, page.offset],
     );
     const hasMore = rows.length > page.limit;
-    const messages: Message[] = [];
-    for (const row of rows.slice(0, page.limit)) {
-      const message = asMessage(row.payload);
-      if (message) messages.push(message);
-    }
-    return { messages, hasMore };
+    return { messages: this.mapMessages(rows.slice(0, page.limit)), hasMore };
   }
 
   async upsertMessages(messages: Message[]): Promise<void> {
     if (!messages.length) return;
     await this.db.ensure();
-    // Single multi-row upsert to cut Neon RTT vs one INSERT per message.
+    // Single multi-row upsert to cut Neon RTT vs one INSERT per message. Metadata
+    // only (issue #86): no payload, plain subject/snippet left empty, both encrypted.
     const ids: string[] = [];
     const grantIds: string[] = [];
     const providerIds: string[] = [];
     const threadIds: Array<string | null> = [];
-    const subjects: string[] = [];
-    const snippets: string[] = [];
-    const payloads: string[] = [];
+    const labels: string[] = [];
+    const subjectCts: string[] = [];
+    const snippetCts: string[] = [];
     const receivedAts: string[] = [];
-    for (const message of messages) {
+    for (const original of messages) {
+      const message = minimiseMessage(original);
       ids.push(message.id);
       grantIds.push(message.grantId);
       providerIds.push(message.providerMessageId);
       threadIds.push(message.threadId ?? null);
-      subjects.push(message.subject);
-      snippets.push(message.snippet);
-      payloads.push(JSON.stringify(message));
+      labels.push(JSON.stringify(message.labels ?? []));
+      subjectCts.push(this.seal(message.subject, message, "subject"));
+      snippetCts.push(this.seal(message.snippet, message, "snippet"));
       receivedAts.push(message.receivedAt);
     }
     await this.db.sql.query(
       `INSERT INTO messages (
-         id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at
+         id, grant_id, provider_message_id, thread_id, subject, snippet, payload,
+         labels, subject_ct, snippet_ct, received_at
        )
-       SELECT t.* FROM UNNEST(
+       SELECT t.id, t.grant_id, t.provider_message_id, t.thread_id, '', '', NULL,
+              t.labels, decode(t.subject_ct, 'base64'), decode(t.snippet_ct, 'base64'), t.received_at
+       FROM UNNEST(
          $1::text[],
          $2::text[],
          $3::text[],
          $4::text[],
-         $5::text[],
+         $5::jsonb[],
          $6::text[],
-         $7::jsonb[],
+         $7::text[],
          $8::timestamptz[]
-       ) AS t(id, grant_id, provider_message_id, thread_id, subject, snippet, payload, received_at)
+       ) AS t(id, grant_id, provider_message_id, thread_id, labels, subject_ct, snippet_ct, received_at)
        -- Only an active grant caches mail: a sync still running when its
        -- grant was retired must not refill the cache retirement emptied.
        WHERE EXISTS (SELECT 1 FROM grants g WHERE g.id = t.grant_id AND g.status = 'active')
        ON CONFLICT (grant_id, provider_message_id) DO UPDATE SET
          id = EXCLUDED.id,
          thread_id = EXCLUDED.thread_id,
-         subject = EXCLUDED.subject,
-         snippet = EXCLUDED.snippet,
-         payload = EXCLUDED.payload,
-         received_at = EXCLUDED.received_at`,
-      [ids, grantIds, providerIds, threadIds, subjects, snippets, payloads, receivedAts],
+         labels = EXCLUDED.labels,
+         subject_ct = EXCLUDED.subject_ct,
+         snippet_ct = EXCLUDED.snippet_ct,
+         received_at = EXCLUDED.received_at
+       -- A row written before issue #86 (it has a payload) stays as it is.
+       WHERE messages.payload IS NULL`,
+      [ids, grantIds, providerIds, threadIds, labels, subjectCts, snippetCts, receivedAts],
     );
   }
 
@@ -528,16 +624,99 @@ export class PostgresStore implements GrantStore {
     await this.db.sql.query(`DELETE FROM messages WHERE grant_id = $1`, [grantId]);
   }
 
-  async deleteMessagesByProviderIds(grantId: string, providerMessageIds: string[]): Promise<void> {
+  async deleteMessagesByProviderIds(
+    grantId: string,
+    providerMessageIds: string[],
+    opts?: { minimisedOnly?: boolean },
+  ): Promise<void> {
     if (!providerMessageIds.length) return;
     await this.db.ensure();
     await this.db.sql.query(
-      `DELETE FROM messages WHERE grant_id = $1 AND provider_message_id = ANY($2::text[])`,
+      `DELETE FROM messages WHERE grant_id = $1 AND provider_message_id = ANY($2::text[])${
+        opts?.minimisedOnly ? " AND payload IS NULL" : ""
+      }`,
       [grantId, providerMessageIds],
     );
   }
 
-  async getSyncCursor(grantId: string): Promise<SyncCursor | undefined> {
+  async deleteExpiredMessages(input: DeleteExpiredMessagesInput): Promise<number> {
+    await this.db.ensure();
+    // Minimised rows only (payload IS NULL): rows written before #86 are left alone.
+    // Counted in SQL so the delete never ships row ids back.
+    const params: unknown[] = [input.before];
+    let where = `payload IS NULL AND received_at < $1::timestamptz`;
+    if (input.grantId) {
+      params.push(input.grantId);
+      where += ` AND grant_id = $2`;
+    }
+    const rows = await this.db.sql.query<{ n: number | string }>(
+      `WITH gone AS (DELETE FROM messages WHERE ${where} RETURNING 1)
+       SELECT count(*)::int AS n FROM gone`,
+      params,
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  private seal(
+    plaintext: string,
+    message: Pick<Message, "grantId" | "providerMessageId">,
+    field: MessageField,
+  ): string {
+    const context = { grantId: message.grantId, providerMessageId: message.providerMessageId, field };
+    return Buffer.from(sealMessageField(this.messageKey, plaintext, context)).toString("base64");
+  }
+
+  private open(ciphertext: unknown, row: MessageRow, field: MessageField): string | undefined {
+    if (ciphertext === null || ciphertext === undefined) return "";
+    try {
+      return openMessageField(this.messageKey, asBytes(ciphertext), {
+        grantId: row.grant_id,
+        providerMessageId: row.provider_message_id,
+        field,
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  private mapMessages(rows: MessageRow[]): Message[] {
+    const messages: Message[] = [];
+    let unreadable = 0;
+    for (const row of rows) {
+      if (row.payload !== null && row.payload !== undefined) {
+        // Written before issue #86: served as it was stored.
+        const message = asMessage(row.payload);
+        if (message) messages.push(message);
+        continue;
+      }
+      const subject = this.open(row.subject_ct, row, "subject");
+      const snippet = this.open(row.snippet_ct, row, "snippet");
+      if (subject === undefined || snippet === undefined) unreadable += 1;
+      const labels = asStringArray(row.labels);
+      const receivedAt = asIso(row.received_at);
+      const message: Message = {
+        id: row.id,
+        grantId: row.grant_id,
+        providerMessageId: row.provider_message_id,
+        subject: subject ?? "",
+        snippet: snippet ?? "",
+        from: [],
+        to: [],
+        sentAt: receivedAt,
+        receivedAt,
+        folderIds: gmailFolderIds(labels),
+        labels,
+        hasAttachments: false,
+      };
+      if (row.thread_id) message.threadId = row.thread_id;
+      messages.push(message);
+    }
+    // A wrong key or a row moved to another grant: say so without any content.
+    if (unreadable) log.warn("message_metadata_unreadable", { count: unreadable });
+    return messages;
+  }
+
+  async getSyncCursor(grantId: string): Promise<StoredSyncCursor | undefined> {
     await this.db.ensure();
     const rows = await this.db.sql.query<{
       grant_id: string;
@@ -545,28 +724,32 @@ export class PostgresStore implements GrantStore {
       value: string;
       updated_at: Date | string;
       watch_expiration: Date | string | null;
+      first_look_at: Date | string | null;
     }>(
-      `SELECT grant_id, kind, value, updated_at, watch_expiration
+      `SELECT grant_id, kind, value, updated_at, watch_expiration, first_look_at
        FROM sync_cursors WHERE grant_id = $1`,
       [grantId],
     );
     const row = rows[0];
     if (!row) return undefined;
-    const cursor: SyncCursor = {
+    const cursor: StoredSyncCursor = {
       grantId: row.grant_id,
       kind: asSyncCursorKind(row.kind),
       value: row.value,
       updatedAt: asIso(row.updated_at),
     };
     if (row.watch_expiration) cursor.watchExpiration = asIso(row.watch_expiration);
+    if (row.first_look_at) cursor.firstLookAt = asIso(row.first_look_at);
     return cursor;
   }
 
   async putSyncCursor(cursor: SyncCursor): Promise<void> {
     await this.db.ensure();
     await this.db.sql.query(
-      `INSERT INTO sync_cursors (grant_id, kind, value, updated_at, watch_expiration)
-       VALUES ($1, $2, $3, $4, $5)
+      // first_look_at is named (NULL) so a new cursor never takes a column default;
+      // an existing row keeps its value (only markFirstLook sets it).
+      `INSERT INTO sync_cursors (grant_id, kind, value, updated_at, watch_expiration, first_look_at)
+       VALUES ($1, $2, $3, $4, $5, NULL)
        ON CONFLICT (grant_id) DO UPDATE SET
          kind = EXCLUDED.kind,
          value = EXCLUDED.value,
@@ -579,6 +762,15 @@ export class PostgresStore implements GrantStore {
         cursor.updatedAt,
         cursor.watchExpiration ?? null,
       ],
+    );
+  }
+
+  async markFirstLook(grantId: string, at: string): Promise<void> {
+    await this.db.ensure();
+    await this.db.sql.query(
+      `UPDATE sync_cursors SET first_look_at = $2
+       WHERE grant_id = $1 AND first_look_at IS NULL`,
+      [grantId, at],
     );
   }
 
@@ -886,6 +1078,20 @@ function asBytes(value: unknown): Uint8Array {
   }
   throw new Error("Unexpected vault ciphertext");
 }
+
+type MessageRow = {
+  id: string;
+  grant_id: string;
+  provider_message_id: string;
+  thread_id: string | null;
+  payload: unknown;
+  labels: unknown;
+  subject_ct: unknown;
+  snippet_ct: unknown;
+  received_at: Date | string;
+};
+
+const MESSAGE_COLUMNS = `id, grant_id, provider_message_id, thread_id, payload, labels, subject_ct, snippet_ct, received_at`;
 
 function asMessage(payload: unknown): Message | undefined {
   const parsed = typeof payload === "string" ? JSON.parse(payload) : payload;

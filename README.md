@@ -20,7 +20,7 @@ Working TypeScript monorepo with:
 - Postgres store when `DATABASE_URL` is set (auto-migrates schema + `default` tenant on startup; expired `link_sessions` GC)
 - Durable **Postgres sync_jobs** queue (202 + status API; Redis unused)
 
-`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. **`@inboxlink/sdk@0.2.0`** and **`@inboxlink/core@0.2.0`** are the current versions (publish from `publish-npm.yml`; `0.1.3` is the latest on npm until then) (`npm i @inboxlink/sdk`).
+`GET /v1/grants/:grantId/messages` lists **synced cache** messages by default (`store.listMessages`), with freshness fields `syncedAt` / `historyId` when a sync cursor exists. Pass `?source=live` for the previous live Gmail list (`format=metadata`) plus filters (`q`, `from`/`to`/`subject`, `label`, `includeSpamTrash`). `GET /v1/grants/:grantId/messages/:messageId` returns one message (InboxLink `msg_…` id or Gmail id) with `format=full`, including body and attachment **metadata** (id, filename, mimeType, size) — not attachment bytes. `POST /v1/grants/:grantId/sync` enqueues a durable job (**202** + `jobId`); poll `GET …/sync/jobs/:jobId` or wait for `sync.completed`. Optional Gmail `users.watch` + Pub/Sub push applies history into the store. Redis is not required. CI uses a local Gmail HTTP stand-in and does not call Google. The synced store keeps **inbox mail only, as metadata** (ids, thread, `receivedAt`, labels, subject and snippet encrypted at rest; no bodies, addresses or sent mail) for `INBOXLINK_MESSAGE_TTL_DAYS` (30) days, and each grant gets one first look back; webhooks carry identifiers only (issue #86). **`@inboxlink/sdk@0.3.0`** and **`@inboxlink/core@0.3.0`** are the current versions (publish from `publish-npm.yml`; `0.2.0` is the latest on npm until then) (`npm i @inboxlink/sdk`).
 
 **IMAP (draft / parked):** `POST /v1/connect/:linkToken/imap` seals password/app-password credentials; list is **INBOX** via [imapflow](https://github.com/postalsys/imapflow) (**MIT**). CI uses a mock transport. Limitations: password/app-password only (no XOAUTH2), INBOX only, best-effort MIME, no IDLE/UID sync, Connect UI is Gmail-first (IMAP is API-only until unparked). Do **not** fork EmailEngine or RustMailer (commercial licenses).
 
@@ -60,7 +60,7 @@ Short-lived **access** tokens are cached in-process per grant (see [docs/ops-run
 | Gmail adapter | `@inboxlink/adapters-gmail` | Auth URL + PKCE, token exchange/refresh, list + normalize |
 | Store | memory or Postgres (`DATABASE_URL`) | Sessions, grants, vault ciphertext |
 | Connect UI | `@inboxlink/connect-ui` | Hosted Connect + error pages (CSP + security headers) |
-| SDK | `@inboxlink/sdk` **0.2.0** | Host HTTP client (Gmail list/get/sync, tenant grant listing) |
+| SDK | `@inboxlink/sdk` **0.3.0** | Host HTTP client (Gmail list/get/sync, tenant grant listing) |
 | Deploy | `api/index.ts` + `vercel.json` | Vercel serverless entry wrapping the Hono app |
 
 **Standing rules:** no Production secrets in git; MIT/Apache-compatible only; no career-workspace imports, shared DB, or shared types.
@@ -151,6 +151,7 @@ Never commit real values. Set placeholders in `.env` locally and secrets only in
 | `GMAIL_PUBSUB_TOPIC` | Optional | Full Pub/Sub topic for Gmail `users.watch` (`projects/…/topics/…`) |
 | `GMAIL_PUSH_SECRET` | Optional | Shared secret for `/v1/internal/gmail/push` |
 | `CRON_SECRET` | Optional | Bearer for `/v1/internal/cron/*` (watch renew + job drain) |
+| `INBOXLINK_MESSAGE_TTL_DAYS` | Optional | Days the synced store keeps a message (default **30**). Rows past it are deleted at each grant sync and by `drain-sync-jobs`. |
 
 See [`.env.example`](.env.example) for placeholder shapes only.
 

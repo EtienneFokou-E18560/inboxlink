@@ -127,7 +127,7 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set, th
 | `grant.needs_reauth` | Google refused the token: refresh `invalid_grant`, Gmail 401, or a non-rate-limit 403 (reads, sync, push) |
 | `grant.revoked` | A Connect retired a grant (`reason: "replaced"`) or moved a reused grant to another host user (`"reassigned"`); `externalUserId` is the user who lost it |
 | `sync.completed` | Successful sync job (API drain, push apply, or cron) |
-| `message.created` | New message upserted via Gmail Pub/Sub push apply |
+| `message.created` | New inbox message upserted via Gmail Pub/Sub push apply (identifiers only, no subject) |
 
 Retries: 408 / 429 / 5xx (bounded). Hard 4xx → drop. Delivery failures are logged (`webhook_delivery_*`) and **never** fail Connect redirects or sync HTTP responses.
 
@@ -157,11 +157,26 @@ On Connect, InboxLink calls Gmail `users.watch` (best-effort). Watches expire wi
 |-------|------|------|
 | `POST /v1/internal/gmail/push` | `GMAIL_PUSH_SECRET` | Decode Pub/Sub → `history.list` from cursor → upsert/delete → webhooks |
 | `GET\|POST /v1/internal/cron/renew-gmail-watches` | `CRON_SECRET` Bearer | Renew watches for all active Gmail grants |
-| `GET\|POST /v1/internal/cron/drain-sync-jobs` | `CRON_SECRET` Bearer | Process queued `sync_jobs` |
+| `GET\|POST /v1/internal/cron/drain-sync-jobs` | `CRON_SECRET` Bearer | Delete stored messages past `INBOXLINK_MESSAGE_TTL_DAYS` (all grants; response `expiredMessages`, log `messages_expired`), then process queued `sync_jobs` |
 
 Vercel `vercel.json` schedules **daily** drain (`0 7 * * *`) and renew (`0 6 * * *`) — Hobby plans reject sub-daily cron expressions (deployment fails). Frequent drain uses [`.github/workflows/wave-d-cron.yml`](../.github/workflows/wave-d-cron.yml) (every 15 minutes; needs secrets `INBOXLINK_CRON_BASE_URL` + `CRON_SECRET`). A best-effort deferred drain also runs after `POST …/sync` enqueue.
 
-**Fallback:** If push is silent, history returns **404**, or watch expired → `syncGmailGrant` re-bootstraps without crashing. Hosts can always `POST …/sync` (poll).
+**Fallback:** If push is silent, history returns **404**, or watch expired → `syncGmailGrant` recovers without crashing: a grant that never had its first look bootstraps; one that had it moves its cursor to the mailbox's current `historyId` and reads new mail from there (no second look back, issue #86). Hosts can always `POST …/sync` (poll).
+
+## Message store rules (issue #86)
+
+| Rule | Where it is enforced |
+|------|----------------------|
+| Inbox only (`INBOX`, never `SENT`/`DRAFT`/`SPAM`/`TRASH`) | First look lists `labelIds=INBOX`; incremental skips history adds outside the inbox and removes a stored message that left it |
+| No bodies, no addresses | Sync reads `format=metadata`; the store writes `payload = NULL`, plain `subject`/`snippet` = `''` |
+| Subject and snippet encrypted | `messages.subject_ct` / `snippet_ct`: AES-256-GCM, key = HKDF-SHA256(`INBOXLINK_MASTER_KEY`, label `inboxlink/message-metadata/v1`), additional data = field + grant id + Gmail message id. Rotating the master key makes these unreadable (list shows them empty, log `message_metadata_unreadable` with a count only); the next first look cannot refill them, they age out within the time limit |
+| Time limit | `INBOXLINK_MESSAGE_TTL_DAYS` (unset or invalid = 30). Delete at the start of each grant sync and in `drain-sync-jobs` (daily Vercel cron and the 15-minute GitHub Action). Partial index `messages_minimised_received_idx` serves it |
+| Startup DDL locks | `PgDatabase.migrate` reads `information_schema.columns` and `pg_indexes` once and skips every `ALTER TABLE` / `CREATE INDEX` already in effect, so a normal cold start takes no ACCESS EXCLUSIVE or SHARE lock; only the first start after an upgrade does. Two cold starts racing on `CREATE INDEX IF NOT EXISTS` can fail on `pg_class_relname_nsp_index`; that error counts as "already exists". No `lock_timeout` is set (a session `SET` would leak through a transaction pooler) |
+| Label changes | A history event fetches a message only if it adds `INBOX` or the message is already stored; starring sent mail or reading archived mail fetches nothing |
+| One first look | `sync_cursors.first_look_at`, set by the bootstrap; `mode: "full"` is ignored once set. Cursors that existed when the column was added count as done |
+| Rows from before #86 | Owner decision 23 Oct: untouched. A row with a `payload` is never overwritten, never removed by the inbox or time-limit rules (only by a Gmail delete, a revoke or a replace, as before). No clean-up script |
+
+Read-only check, no content: `SELECT count(*) FILTER (WHERE payload IS NULL) AS minimised, count(*) FILTER (WHERE payload IS NOT NULL) AS before_86, min(received_at) FILTER (WHERE payload IS NULL) AS oldest_minimised FROM messages;` (also in `scripts/usage-report.sql`).
 
 ## Async sync jobs (Wave D2)
 
@@ -230,6 +245,7 @@ Session create then rejects non-matching origins with `redirectUri_not_allowed`.
 
 - Health `store: "memory"` or `database_unavailable` after deploy → restore `DATABASE_URL` / roll back deployment; skip Connect.
 - Widespread 5xx → roll Vercel Production to last known-good; keep env intact.
+- Rolling back past issue #86 is safe for the data: the added columns stay, older code skips metadata-only rows (`payload IS NULL`) on the store list and overwrites them with full rows on its next sync. Nothing needs undoing in the database.
 
 
 ## Who is using it
