@@ -270,8 +270,10 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS snippet_ct BYTEA;
 -- Issue #100: the same mailbox under two grants holds the same Gmail ids, so a
 -- message id is unique per grant only. The key moves from (id) to (grant_id, id).
 -- Ids and rows stay as they are. Build the new unique index first (SHARE lock:
--- reads go on), then swap the key in one statement (brief ACCESS EXCLUSIVE). Both
--- are skipped once the catalog shows messages_grant_pkey as the primary key.
+-- reads go on), then swap the key in one statement (brief ACCESS EXCLUSIVE, the
+-- runner gives it a short lock_timeout and, if the table is busy, leaves it to the
+-- next start, issue #103). Both are skipped once the catalog shows
+-- messages_grant_pkey as the primary key.
 CREATE UNIQUE INDEX IF NOT EXISTS messages_grant_pkey ON messages (grant_id, id);
 ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_pkey, ADD CONSTRAINT messages_grant_pkey PRIMARY KEY USING INDEX messages_grant_pkey;
 

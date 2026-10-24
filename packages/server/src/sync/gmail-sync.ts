@@ -90,25 +90,35 @@ export async function syncGmailGrantDetailed(
   const cutoff = messageCutoff(positiveTtlDays(input.messageTtlDays), nowMs);
 
   // Time limit first, whatever happens next (also for a grant that needs reauth).
-  const expired = await store.deleteExpiredMessages({ before: cutoff, grantId });
-
-  const access = await openAccessToken({ store, vault, gmail, grant });
-  if (access.status !== "ok") {
-    return withoutMessages({
-      grantId,
-      status: access.status,
-      mode: "bootstrap",
-      upserted: 0,
-      deleted: 0,
-      expired,
-      error: access.error,
-    });
+  // A store failure in any of these first steps is store_unavailable (issue #103).
+  let expired = 0;
+  let accessToken: string;
+  let cursor: Awaited<ReturnType<GrantStore["getSyncCursor"]>>;
+  try {
+    expired = await storeStep("delete_expired_messages", () =>
+      store.deleteExpiredMessages({ before: cutoff, grantId }),
+    );
+    const access = await openAccessToken({ store, vault: storeStepVault(vault), gmail, grant });
+    if (access.status !== "ok") {
+      return withoutMessages({
+        grantId,
+        status: access.status,
+        mode: "bootstrap",
+        upserted: 0,
+        deleted: 0,
+        expired,
+        error: access.error,
+      });
+    }
+    accessToken = access.accessToken;
+    cursor = await storeStep("get_sync_cursor", () => store.getSyncCursor(grantId));
+  } catch (err) {
+    if (err instanceof StoreWriteError) return storeUnavailable(grant, err, "bootstrap", expired);
+    throw err;
   }
-
-  const cursor = await store.getSyncCursor(grantId);
   const firstLookDone = Boolean(cursor?.firstLookAt);
   const force = !firstLookDone && (input.forceBootstrap === true || !cursor?.value);
-  const run = { store, gmail, grant, accessToken: access.accessToken, cutoff, nowMs, expired };
+  const run = { store, gmail, grant, accessToken, cutoff, nowMs, expired };
 
   try {
     if (!force && cursor?.value) {
@@ -124,23 +134,7 @@ export async function syncGmailGrantDetailed(
     return await runBootstrap(run);
   } catch (err) {
     if (err instanceof StoreWriteError) {
-      // Not Google's fault: say so, and keep the grant as it is. The next sync retries.
-      log.warn("sync_store_failed", {
-        grantId,
-        tenantId: grant.tenantId,
-        step: err.step,
-        code: err.code,
-        error: err.reason.slice(0, 200),
-      });
-      return withoutMessages({
-        grantId,
-        status: "store_unavailable",
-        mode: force ? "bootstrap" : "incremental",
-        upserted: 0,
-        deleted: 0,
-        expired,
-        error: "store_unavailable",
-      });
+      return storeUnavailable(grant, err, force ? "bootstrap" : "incremental", expired);
     }
     if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(grantId);
@@ -193,6 +187,41 @@ class StoreWriteError extends Error {
     const code = (cause as { code?: unknown } | null)?.code;
     this.code = typeof code === "string" ? code : undefined;
   }
+}
+
+/** Not Google's fault: say so, and keep the grant as it is. The next sync retries. */
+function storeUnavailable(
+  grant: Grant,
+  err: StoreWriteError,
+  mode: SyncResult["mode"],
+  expired: number,
+): DetailedSyncResult {
+  log.warn("sync_store_failed", {
+    grantId: grant.id,
+    tenantId: grant.tenantId,
+    step: err.step,
+    code: err.code,
+    error: err.reason.slice(0, 200),
+  });
+  return withoutMessages({
+    grantId: grant.id,
+    status: "store_unavailable",
+    mode,
+    upserted: 0,
+    deleted: 0,
+    expired,
+    error: "store_unavailable",
+  });
+}
+
+/** The vault with its ciphertext read (a store read) run as a store step. */
+function storeStepVault(vault: CiphertextVault): CiphertextVault {
+  return {
+    seal: (plaintext, context) => vault.seal(plaintext, context),
+    open: (ciphertext, context) => vault.open(ciphertext, context),
+    destroy: (grantId) => vault.destroy(grantId),
+    getCiphertext: (grantId) => storeStep("read_vault", async () => vault.getCiphertext(grantId)),
+  };
 }
 
 /** Run one store step of a sync; a failure becomes a `StoreWriteError`, never a Gmail error. */

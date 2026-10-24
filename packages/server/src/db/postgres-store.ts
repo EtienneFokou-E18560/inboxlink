@@ -69,14 +69,37 @@ export class PgDatabase {
     const catalog = await this.readCatalog();
     for (const statement of sqlStatements(SCHEMA_SQL + TENANT_SQL)) {
       if (catalog && alreadyApplied(statement, catalog)) continue;
+      const swap = primaryKeySwap(statement);
       try {
-        await this.sql.exec(statement);
+        // The swap's brief ACCESS EXCLUSIVE lock waits behind running queries on the
+        // table and blocks new ones behind it: give up after a short wait instead.
+        // SET LOCAL ends with this one-query (implicit) transaction.
+        await this.sql.exec(swap ? `SET LOCAL lock_timeout = '${KEY_SWAP_LOCK_TIMEOUT}'; ${statement}` : statement);
       } catch (err) {
         if (isAlreadyExistsError(err)) continue;
-        if (isPrimaryKeySwap(statement) && isPrimaryKeyInPlaceError(err)) continue;
+        if (swap && sqlState(err) === LOCK_NOT_AVAILABLE) {
+          // Busy table: keep the old key (writes still work through the new unique
+          // index); the next cold start tries again.
+          log.warn("schema_key_swap_deferred", { table: swap.table, reason: "lock_timeout" });
+          continue;
+        }
+        if (swap && isKeySwapRaceError(err) && (await this.primaryKeyName(swap.table)) === swap.constraint) continue;
         throw err;
       }
     }
+  }
+
+  /** The table's primary key constraint name, read now (not from the start's catalog). */
+  private async primaryKeyName(table: string): Promise<string | undefined> {
+    const rows = await this.sql.query<{ constraint_name: string }>(
+      `SELECT c.conname AS constraint_name
+       FROM pg_constraint c
+       JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+       WHERE c.contype = 'p' AND n.nspname = current_schema() AND t.relname = $1`,
+      [table],
+    );
+    return rows[0]?.constraint_name;
   }
 
   private async readCatalog(): Promise<Catalog | undefined> {
@@ -134,17 +157,31 @@ function stripComments(statement: string): string {
 }
 
 /** The issue #100 statement that moves a table's primary key onto a prepared index. */
-function isPrimaryKeySwap(statement: string): boolean {
-  return PRIMARY_KEY_SWAP.test(stripComments(statement));
+function primaryKeySwap(statement: string): { table: string; constraint: string } | undefined {
+  const m = PRIMARY_KEY_SWAP.exec(stripComments(statement));
+  return m ? { table: m[1]!, constraint: m[2]! } : undefined;
+}
+
+/** How long the key swap waits for its lock before the start defers it (issue #103). */
+const KEY_SWAP_LOCK_TIMEOUT = "3s";
+/** SQLSTATE lock_not_available: the wait passed `lock_timeout`. */
+const LOCK_NOT_AVAILABLE = "55P03";
+
+function sqlState(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
 }
 
 /**
- * Another cold start swapped the key between our catalog read and this statement:
- * the index is already the key, or the table already has one. Both mean done.
+ * The swap failed in a way another cold start's swap can cause: 55000 (the index
+ * is already associated with a constraint) or 42P16 (the table already has a
+ * primary key). Matched by SQLSTATE, not message text (the text follows
+ * `lc_messages`). Neither means done by itself: 42P16 also happens when the table
+ * has a primary key under another name, so the caller re-reads the key first.
  */
-function isPrimaryKeyInPlaceError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /is already associated with a constraint|multiple primary keys/i.test(message);
+function isKeySwapRaceError(err: unknown): boolean {
+  const code = sqlState(err);
+  return code === "55000" || code === "42P16";
 }
 
 /** True when the catalog already shows what this ALTER TABLE / CREATE INDEX would do. */

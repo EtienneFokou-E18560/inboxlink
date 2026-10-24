@@ -265,6 +265,54 @@ describe("issue #100: a store write failure is a store error", () => {
     assert.equal((await store.getSyncJob(job.id))?.error, "store_unavailable");
   });
 
+  /** Issue #103: the store calls a sync makes before it reads Gmail. */
+  async function assertStoreUnavailable(store: MemoryStore, vault: CiphertextVaultLike): Promise<void> {
+    inbox = ["shared-1"];
+    const grant = grantFor("grant_gamma", "tenant_north");
+    await store.putGrant(grant);
+    const result = await syncGmailGrant({ store, vault, gmail: gmail(), grant, now });
+    assert.equal(result.status, "store_unavailable");
+    assert.equal(result.error, "store_unavailable");
+    assert.equal((await store.getGrant(grant.id))?.status, "active");
+    const job = await store.enqueueSyncJob({ grantId: grant.id, tenantId: grant.tenantId, kind: "full" });
+    await drainSyncJobs({ store, vault, gmail: gmail(), now });
+    assert.equal((await store.getSyncJob(job.id))?.error, "store_unavailable");
+  }
+  type CiphertextVaultLike = Parameters<typeof syncGmailGrant>[0]["vault"];
+  const DRIVER_ERROR = "Connection terminated unexpectedly";
+
+  it("issue #103: deleteExpiredMessages failing is store_unavailable", async () => {
+    class Failing extends MemoryStore {
+      override async deleteExpiredMessages(): Promise<number> {
+        throw new Error(DRIVER_ERROR);
+      }
+    }
+    const store = new Failing();
+    const vault = new MemoryTokenVault(MASTER);
+    await vault.seal(REFRESH, { grantId: "grant_gamma", tenantId: "tenant_north" });
+    await assertStoreUnavailable(store, vault);
+  });
+
+  it("issue #103: the vault read failing is store_unavailable", async () => {
+    class FailingVault extends MemoryTokenVault {
+      override getCiphertext(): Uint8Array | undefined {
+        throw new Error(DRIVER_ERROR);
+      }
+    }
+    await assertStoreUnavailable(new MemoryStore(), new FailingVault(MASTER));
+  });
+
+  it("issue #103: getSyncCursor failing is store_unavailable", async () => {
+    class Failing extends MemoryStore {
+      override async getSyncCursor(): Promise<undefined> {
+        throw new Error(DRIVER_ERROR);
+      }
+    }
+    const vault = new MemoryTokenVault(MASTER);
+    await vault.seal(REFRESH, { grantId: "grant_gamma", tenantId: "tenant_north" });
+    await assertStoreUnavailable(new Failing(), vault);
+  });
+
   it("a Gmail failure is still gmail_unavailable", async () => {
     const store = new MemoryStore();
     const vault = new MemoryTokenVault(MASTER);
@@ -381,6 +429,125 @@ describe("issue #100: startup DDL on a database created before the change", () =
     await new PgDatabase(new NoCatalogExecutor(pglite)).ensure();
     assert.deepEqual(await primaryKey(pglite), { name: "messages_grant_pkey", columns: ["grant_id", "id"] });
     assert.deepEqual((await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows, before);
+  });
+
+  /**
+   * Issue #103: two cold starts at once on PGlite, made to interleave the way they
+   * can on Postgres. Both read the old catalog, then run in turn: the winner swaps
+   * the key, the loser (stale catalog) runs the swap again and must accept it.
+   */
+  async function raceTwoStarts(
+    pglite: PGlite,
+    loserError: (err: unknown) => unknown = (err) => err,
+  ): Promise<{ loserCodes: string[] }> {
+    let loserHasRead!: () => void;
+    const loserRead = new Promise<void>((resolve) => (loserHasRead = resolve));
+    let releaseLoser!: () => void;
+    const loserMayRun = new Promise<void>((resolve) => (releaseLoser = resolve));
+    const loserCodes: string[] = [];
+
+    class Winner extends PgliteExecutor {
+      override async exec(text: string): Promise<void> {
+        await loserRead;
+        return super.exec(text);
+      }
+    }
+    class Loser extends PgliteExecutor {
+      override async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
+        const rows = await super.query<T>(text, params);
+        // The primary key query is the last of the catalog reads.
+        if (/contype = 'p'/.test(text)) loserHasRead();
+        return rows;
+      }
+      override async exec(text: string): Promise<void> {
+        await loserMayRun;
+        try {
+          await super.exec(text);
+        } catch (err) {
+          loserCodes.push(String((err as { code?: unknown }).code));
+          throw loserError(err);
+        }
+      }
+    }
+
+    const winner = new PgDatabase(new Winner(pglite)).ensure();
+    const loser = new PgDatabase(new Loser(pglite)).ensure();
+    await winner;
+    releaseLoser();
+    await loser;
+    return { loserCodes };
+  }
+
+  it("issue #103: the losing cold start of two (both read the old catalog) accepts the swapped key", async () => {
+    const pglite = new PGlite();
+    await pglite.exec(OLD_SCHEMA);
+    const before = (await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows;
+    const { loserCodes } = await raceTwoStarts(pglite);
+    assert.deepEqual(loserCodes, ["55000"], "the loser hit the race (index already the key)");
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_grant_pkey", columns: ["grant_id", "id"] });
+    assert.deepEqual((await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows, before);
+  });
+
+  it("issue #103: the race is recognised by SQLSTATE 55000, whatever the server's message language", async () => {
+    const pglite = new PGlite();
+    await pglite.exec(OLD_SCHEMA);
+    // lc_messages = 'fr_FR': same SQLSTATE, other text.
+    const french = (err: unknown) =>
+      Object.assign(new Error("l'index « messages_grant_pkey » est déjà associé à une contrainte"), {
+        code: (err as { code?: unknown }).code,
+      });
+    const { loserCodes } = await raceTwoStarts(pglite, french);
+    assert.deepEqual(loserCodes, ["55000"]);
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_grant_pkey", columns: ["grant_id", "id"] });
+  });
+
+  it("issue #103: a primary key under another name (42P16) is not taken as done", async () => {
+    const pglite = new PGlite();
+    await pglite.exec(OLD_SCHEMA.replace("id TEXT PRIMARY KEY, grant_id", "id TEXT CONSTRAINT messages_legacy_key PRIMARY KEY, grant_id"));
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_legacy_key", columns: ["id"] });
+    await assert.rejects(pgSetup(pglite).db.ensure(), (err: unknown) => (err as { code?: unknown }).code === "42P16");
+    // Left as it was, and loudly: not reported as swapped.
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_legacy_key", columns: ["id"] });
+  });
+
+  it("issue #103: the key swap runs with a lock_timeout scoped to its own statement", async () => {
+    const execs: string[] = [];
+    class Recording extends PgliteExecutor {
+      override async exec(text: string): Promise<void> {
+        execs.push(text);
+        return super.exec(text);
+      }
+    }
+    const pglite = new PGlite();
+    await pglite.exec(OLD_SCHEMA);
+    await new PgDatabase(new Recording(pglite)).ensure();
+    const swap = execs.find((t) => /PRIMARY KEY USING INDEX/.test(t));
+    assert.ok(swap, "the swap ran");
+    assert.match(swap, /^SET LOCAL lock_timeout = '\d+(ms|s)';\s*ALTER TABLE messages DROP CONSTRAINT/);
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_grant_pkey", columns: ["grant_id", "id"] });
+    // SET LOCAL ends with the statement: the session keeps no timeout.
+    assert.deepEqual((await pglite.query(`SHOW lock_timeout`)).rows, [{ lock_timeout: "0" }]);
+    // Nothing else is given the timeout.
+    assert.equal(execs.filter((t) => /SET (LOCAL )?lock_timeout/i.test(t)).length, 1);
+  });
+
+  it("issue #103: a swap that times out on its lock leaves the old key, the start succeeds, the next start swaps", async () => {
+    class LockTimeout extends PgliteExecutor {
+      override async exec(text: string): Promise<void> {
+        if (/PRIMARY KEY USING INDEX/.test(text)) {
+          throw Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
+        }
+        return super.exec(text);
+      }
+    }
+    const pglite = new PGlite();
+    await pglite.exec(OLD_SCHEMA);
+    const before = (await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows;
+    await new PgDatabase(new LockTimeout(pglite)).ensure();
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_pkey", columns: ["id"] });
+    assert.deepEqual((await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows, before);
+    await pgSetup(pglite).db.ensure();
+    assert.deepEqual(await primaryKey(pglite), { name: "messages_grant_pkey", columns: ["grant_id", "id"] });
   });
 
   it("messages.get by InboxLink id still answers for the grant that asks", async () => {
