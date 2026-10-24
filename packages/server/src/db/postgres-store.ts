@@ -72,7 +72,9 @@ export class PgDatabase {
       try {
         await this.sql.exec(statement);
       } catch (err) {
-        if (!isAlreadyExistsError(err)) throw err;
+        if (isAlreadyExistsError(err)) continue;
+        if (isPrimaryKeySwap(statement) && isPrimaryKeyInPlaceError(err)) continue;
+        throw err;
       }
     }
   }
@@ -93,6 +95,14 @@ export class PgDatabase {
         `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`,
         [],
       );
+      const primaryKeys = await this.sql.query<{ table_name: string; constraint_name: string }>(
+        `SELECT t.relname AS table_name, c.conname AS constraint_name
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE c.contype = 'p' AND n.nspname = current_schema()`,
+        [],
+      );
       return {
         columns: new Map(
           columns.map((c) => [
@@ -101,6 +111,7 @@ export class PgDatabase {
           ]),
         ),
         indexes: new Set(indexes.map((i) => i.indexname)),
+        primaryKeys: new Map(primaryKeys.map((p) => [p.table_name, p.constraint_name])),
       };
     } catch {
       // Without the catalog every statement runs, as before.
@@ -112,12 +123,36 @@ export class PgDatabase {
 type Catalog = {
   columns: Map<string, { nullable: boolean; hasDefault: boolean }>;
   indexes: Set<string>;
+  /** Table name to the name of its primary key constraint. */
+  primaryKeys: Map<string, string>;
 };
+
+const PRIMARY_KEY_SWAP = /^ALTER TABLE (\w+) DROP CONSTRAINT IF EXISTS \w+, ADD CONSTRAINT (\w+) PRIMARY KEY USING INDEX \w+\s*$/i;
+
+function stripComments(statement: string): string {
+  return statement.replace(/^\s*(--[^\n]*\n\s*)*/, "");
+}
+
+/** The issue #100 statement that moves a table's primary key onto a prepared index. */
+function isPrimaryKeySwap(statement: string): boolean {
+  return PRIMARY_KEY_SWAP.test(stripComments(statement));
+}
+
+/**
+ * Another cold start swapped the key between our catalog read and this statement:
+ * the index is already the key, or the table already has one. Both mean done.
+ */
+function isPrimaryKeyInPlaceError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /is already associated with a constraint|multiple primary keys/i.test(message);
+}
 
 /** True when the catalog already shows what this ALTER TABLE / CREATE INDEX would do. */
 function alreadyApplied(statement: string, catalog: Catalog): boolean {
-  const sql = statement.replace(/^\s*(--[^\n]*\n\s*)*/, "");
-  let m = /^ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/i.exec(sql);
+  const sql = stripComments(statement);
+  let m = PRIMARY_KEY_SWAP.exec(sql);
+  if (m) return catalog.primaryKeys.get(m[1]!) === m[2];
+  m = /^ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/i.exec(sql);
   if (m) return catalog.columns.has(`${m[1]}.${m[2]}`);
   m = /^ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL\s*$/i.exec(sql);
   if (m) return catalog.columns.get(`${m[1]}.${m[2]}`)?.nullable === true;

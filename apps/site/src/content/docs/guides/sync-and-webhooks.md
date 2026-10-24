@@ -34,6 +34,11 @@ What the cache keeps (since 0.3.0):
 Jobs are drained by a scheduled job and right after you enqueue, so poll
 `getSyncJob` or wait for `sync.completed`.
 
+A `failed` job carries an `error` code. `gmail_unavailable` means Google, the
+network or a rate limit failed; `store_unavailable` means InboxLink's own store
+failed. Both leave the grant `active`, and the next sync retries.
+`needs_reauth` means the person has to connect again.
+
 With Gmail push configured on the server, new mail is applied to the cache as
 it arrives and you get `message.created`.
 

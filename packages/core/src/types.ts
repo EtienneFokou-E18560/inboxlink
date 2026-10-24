@@ -56,6 +56,10 @@ export type MessageHeaders = {
 };
 
 export type Message = {
+  /**
+   * InboxLink id, `msg_<providerMessageId>`. Unique within its grant only: the same
+   * mailbox connected by two grants gives the same ids under each (issue #100).
+   */
   id: string;
   grantId: string;
   providerMessageId: string;
