@@ -1,5 +1,16 @@
 # `@inboxlink/sdk` changelog
 
+## 0.3.0
+
+Minor release for data minimisation (issue #86, part of askel#618). **Server behaviour changes for every tenant, read before upgrading:** the synced store (`messages.list` without `source: "live"`) now holds less, and `message.created` no longer carries the subject. Live reads are unchanged. The rules apply to new connections and new mail; messages cached before the server update are left as they were.
+
+- **Inbox only (server).** The synced store keeps messages labelled `INBOX` and never `SENT`, `DRAFT`, `SPAM` or `TRASH`. Sent mail is never stored: read it with `messages.list(grantId, { source: "live", label: ["SENT"] })`. A stored message that leaves the inbox (archived, trashed) is removed at the next sync.
+- **Metadata only (server).** Store reads return `id`, `grantId`, `providerMessageId`, `threadId`, `receivedAt`, `labels`, `folderIds`, `subject` and `snippet`. `from` and `to` are empty arrays, `sentAt` repeats `receivedAt`, `hasAttachments` is `false`, and there is no `body`. Use `messages.get` (live, unchanged) for the full message. The server encrypts the stored subject and snippet and reads Gmail with `format=metadata` when it syncs.
+- **Time limit (server).** Stored messages received more than `INBOXLINK_MESSAGE_TTL_DAYS` days ago (30 on the hosted service) are deleted at each sync of the grant and by the daily `drain-sync-jobs` job. The first look skips mail older than that. Sync job results gain `expired` (`SyncResult.expired?: number`), the rows that sync deleted.
+- **One first look per grant (server).** A grant's first sync looks back once (up to 50 inbox messages inside the time limit). After that, `grants.sync(grantId, { mode: "full" })` runs as an incremental sync, and a Gmail history watermark that expired restarts from the mailbox's current state instead of looking back again. Job `kind` still echoes what you asked for; `result.mode` says what ran.
+- **`message.created` carries identifiers only (server).** `data` is `{ grantId, tenantId, externalUserId, provider, messageId, providerMessageId, threadId, receivedAt }`; `subject` is gone. New exported type `MessageCreatedEventData`. Call `messages.get` to read the message.
+- No change to method signatures; `SyncOptions.mode` and `ListMessagesOptions.source` are documented with the new behaviour.
+
 ## 0.2.0
 
 Minor release for the per-tenant Connect rule and grant clean-up (askel#604). Additive: a host on `0.1.3` keeps working, and a tenant keeps today's Connect rule unless its server sets `INBOXLINK_CONNECT_POLICY`. Two server changes reach every tenant: the new `grant.revoked` event (endpoints registered without an `events` list, and the `INBOXLINK_WEBHOOK_URL` fallback, start receiving it; ignore unknown event types to stay unaffected), and the narrower `needs_reauth` rule (last item).

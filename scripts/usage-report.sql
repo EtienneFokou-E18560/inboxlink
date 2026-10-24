@@ -32,3 +32,10 @@ FROM grants
 WHERE created_at > NOW() - INTERVAL '12 weeks'
 GROUP BY 1, 2
 ORDER BY 1 DESC;
+
+\echo '== Stored messages (issue #86): metadata-only rows vs rows from before, no content =='
+SELECT
+  COUNT(*) FILTER (WHERE payload IS NULL)              AS minimised_rows,
+  COUNT(*) FILTER (WHERE payload IS NOT NULL)          AS rows_before_86,
+  MIN(received_at) FILTER (WHERE payload IS NULL)::date AS oldest_minimised
+FROM messages;

@@ -10,9 +10,17 @@ Every call needs `Authorization: Bearer <API secret>` (SDK: `apiSecret`).
 | | `source=store` (default) | `source=live` |
 |---|---|---|
 | Reads from | InboxLink's synced cache | Gmail, at request time |
+| Which mail | Inbox only, received in the last 30 days (server setting) | Any label, any date |
+| Fields | Ids, `threadId`, `receivedAt`, `labels`, `folderIds`, `subject`, `snippet` | Full headers (`from`, `to`, `cc`, `sentAt`, bulk `headers`) |
 | Filters | Ignored | `q`, `from`, `to`, `subject`, `label`, `includeSpamTrash` |
 | Freshness | `syncedAt` and `historyId` of the last sync | Live |
 | Needs a sync first | Yes | No |
+
+Since 0.3.0 the cache keeps metadata only: on `source=store`, `from` and `to`
+are empty, `sentAt` repeats `receivedAt`, `hasAttachments` is `false` and there
+is no `body`. Sent mail is never cached; read it with `source: "live"`
+(for example `label: ["SENT"]`). Messages cached before 0.3.0 keep their full
+shape until they leave the cache.
 
 :::caution
 Filters only apply with `source: "live"`. On the default cache they are

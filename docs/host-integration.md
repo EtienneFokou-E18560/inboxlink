@@ -151,6 +151,8 @@ void live;
 
 Default list reads the **synced store**. Pass `source: "live"` for live Gmail + filters: `q`, `from` / `to` / `subject`, `label`, `includeSpamTrash`. Same params work on the HTTP API as query strings (`label` may be repeated). Call `messages.get` for body and attachment metadata.
 
+What the synced store keeps (since 0.3.0, issue #86): **inbox mail only** (never `SENT`, `DRAFT`, `SPAM`, `TRASH`), **metadata only** (ids, `threadId`, `receivedAt`, `labels`, `folderIds`, `subject`, `snippet`; `from`/`to` empty, `sentAt` = `receivedAt`, no `body`), subject and snippet encrypted at rest, for **`INBOXLINK_MESSAGE_TTL_DAYS`** days (30 on the hosted service). A message that leaves the inbox is removed at the next sync. A grant gets **one first look back** (its first sync, up to 50 inbox messages inside the time limit); afterwards every sync, including `{ mode: "full" }`, reads new mail only. Read sent mail and anything older live (`source: "live"`). Rows cached before 0.3.0 are left as they were.
+
 Or list grants for a user: `il.grants.list(externalUserId)`. Revoke: `il.grants.revoke(grantId)`.
 
 To list **every** grant of your tenant (for example to find grants whose user no longer exists on your side), use `il.grants.listAll({ limit, cursor })` or `for await (const g of il.grants.iterateAll())` (`GET /v1/grants?all=true`, oldest first, `limit` 1–200, default 50, `nextCursor` while there are more). Each entry has `id`, `externalUserId`, `provider`, `status`, `createdAt`, `updatedAt`, `lastSyncAt` (end of the last finished sync, when there was one) and `replaced` when it was retired. No address and no token are returned.
@@ -201,7 +203,7 @@ When **both** `INBOXLINK_WEBHOOK_URL` and `INBOXLINK_WEBHOOK_SECRET` are set on 
 | `grant.needs_reauth` | Google refuses the grant's token and it is marked `needs_reauth` |
 | `grant.revoked` | A Connect took a mailbox away from `externalUserId`: `reason: "replaced"` (the grant was retired) or `"reassigned"` (the same grant now belongs to another of your users). Ask that user to reconnect, as for 409 `grant_replaced`. |
 | `sync.completed` | Sync job completes successfully (API drain, cron, or Gmail push apply) |
-| `message.created` | New message upserted from Gmail Pub/Sub push apply |
+| `message.created` | New inbox message upserted from Gmail Pub/Sub push apply. Identifiers only (`grantId`, `tenantId`, `externalUserId`, `provider`, `messageId`, `providerMessageId`, `threadId`, `receivedAt`); `subject` is no longer sent since 0.3.0. Call `messages.get` for the content. |
 
 Delivery is at-least-once with bounded retries (retry on 408/429/5xx; drop on hard 4xx). Failures never break Connect redirects or sync HTTP responses.
 

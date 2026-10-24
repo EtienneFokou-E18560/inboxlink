@@ -88,8 +88,11 @@ export type ListMessagesOptions = {
   /** Opaque pagination cursor from a previous `nextCursor`. */
   cursor?: string;
   /**
-   * Read model source. Default (omit / `"store"`) lists the synced cache.
-   * Pass `"live"` to hit Gmail `users.messages.list` (filters apply only here).
+   * Read model source. Default (omit / `"store"`) lists the synced cache: inbox mail
+   * from the last 30 days (server setting), metadata only (ids, `threadId`,
+   * `receivedAt`, `labels`, `folderIds`, `subject`, `snippet`; `from`/`to` empty,
+   * no `body`; since 0.3.0). Pass `"live"` to hit Gmail `users.messages.list`
+   * (full headers, any label; filters apply only here).
    */
   source?: "store" | "live";
   /**
@@ -142,6 +145,8 @@ export type SyncResult = {
   historyId?: string;
   upserted?: number;
   deleted?: number;
+  /** Stored messages past the time limit removed by this sync (since 0.3.0). */
+  expired?: number;
   error?: string;
   result?: Record<string, unknown>;
   kind?: string;
@@ -152,6 +157,10 @@ export type SyncResult = {
 };
 
 export type SyncOptions = {
+  /**
+   * `"full"` / `"bootstrap"` asks for the first look back. A grant gets it once
+   * (its first sync); afterwards these run as an incremental sync (since 0.3.0).
+   */
   mode?: "full" | "bootstrap" | "incremental";
 } & GrantOwnerOptions;
 
@@ -534,6 +543,23 @@ export type GrantRevokedEventData = {
   externalUserId: string;
   provider: CoreGrant["provider"];
   reason: "replaced" | "reassigned";
+};
+
+/**
+ * `data` of a `message.created` event: identifiers only (since 0.3.0; earlier
+ * servers also sent `subject`). Read the message with `messages.get` for its content.
+ */
+export type MessageCreatedEventData = {
+  grantId: string;
+  tenantId: string;
+  externalUserId: string;
+  provider: CoreGrant["provider"];
+  /** InboxLink id (`msg_…`). */
+  messageId: string;
+  /** Gmail message id. */
+  providerMessageId: string;
+  threadId?: string;
+  receivedAt: string;
 };
 
 export type WebhookEndpointInfo = {

@@ -12,6 +12,9 @@ import { MemoryStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
 import { createWebhookBus } from "./webhooks/deliver.js";
 
+/** Two days ago: inside the synced store's 30-day time limit (issue #86). */
+const RECENT_MS = Date.now() - 2 * 86_400_000;
+
 const REFRESH = "1//vaulted-refresh-for-wave-d";
 const ACCESS = "ya29.wave-d-access";
 const MASTER = "test-master-key-at-least-16";
@@ -27,7 +30,7 @@ function messageResource(id: string, subject: string) {
     threadId: id,
     labelIds: ["INBOX"],
     snippet: subject,
-    internalDate: "1710000000000",
+    internalDate: String(RECENT_MS),
     payload: {
       mimeType: "text/plain",
       headers: [

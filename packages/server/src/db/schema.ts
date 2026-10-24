@@ -7,6 +7,7 @@ import {
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /** bytea for encrypted vault payloads */
 const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
@@ -95,6 +96,8 @@ export const syncCursors = pgTable("sync_cursors", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   /** Gmail users.watch expiration (Wave D). */
   watchExpiration: timestamp("watch_expiration", { withTimezone: true }),
+  /** When this grant had its one first look back (issue #86); later syncs read new mail only. */
+  firstLookAt: timestamp("first_look_at", { withTimezone: true }),
 });
 
 /** Durable sync job queue (Wave D2). MIT-only Postgres path — no Redis required. */
@@ -131,15 +134,24 @@ export const messages = pgTable(
       .references(() => grants.id, { onDelete: "cascade" }),
     providerMessageId: text("provider_message_id").notNull(),
     threadId: text("thread_id"),
+    /** Plain subject: only rows written before issue #86; new rows store "". */
     subject: text("subject").notNull(),
+    /** Plain snippet: only rows written before issue #86; new rows store "". */
     snippet: text("snippet").notNull(),
-    payload: jsonb("payload").notNull(),
+    /** Full message (rows written before issue #86 only). NULL marks a minimised row. */
+    payload: jsonb("payload"),
+    /** Gmail labelIds (minimised rows). */
+    labels: jsonb("labels").$type<string[]>(),
+    /** AES-256-GCM subject, key derived from INBOXLINK_MASTER_KEY, grant id as AAD. */
+    subjectCt: bytea("subject_ct"),
+    snippetCt: bytea("snippet_ct"),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("messages_grant_provider_idx").on(t.grantId, t.providerMessageId),
     index("messages_grant_received_idx").on(t.grantId, t.receivedAt.desc()),
+    index("messages_minimised_received_idx").on(t.receivedAt).where(sql`payload IS NULL`),
   ],
 );
 
@@ -227,6 +239,11 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   watch_expiration TIMESTAMPTZ
 );
 ALTER TABLE sync_cursors ADD COLUMN IF NOT EXISTS watch_expiration TIMESTAMPTZ;
+-- Issue #86. Cursors that exist when the column is added belong to connections that
+-- already had their first look, so they get the time of the upgrade. The default is
+-- dropped right after, and the app always writes the column explicitly.
+ALTER TABLE sync_cursors ADD COLUMN IF NOT EXISTS first_look_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE sync_cursors ALTER COLUMN first_look_at DROP DEFAULT;
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
@@ -240,6 +257,12 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (grant_id, provider_message_id)
 );
+-- Issue #86: new rows keep metadata only (payload NULL, subject and snippet encrypted).
+-- Rows written before stay exactly as they are: nothing here rewrites them.
+ALTER TABLE messages ALTER COLUMN payload DROP NOT NULL;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS labels JSONB;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS subject_ct BYTEA;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS snippet_ct BYTEA;
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id TEXT PRIMARY KEY,
@@ -258,4 +281,5 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 CREATE INDEX IF NOT EXISTS sync_jobs_status_created_idx ON sync_jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS sync_jobs_grant_idx ON sync_jobs (grant_id);
 CREATE INDEX IF NOT EXISTS messages_grant_received_idx ON messages (grant_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS messages_minimised_received_idx ON messages (received_at) WHERE payload IS NULL;
 `;

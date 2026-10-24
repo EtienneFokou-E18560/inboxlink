@@ -7,11 +7,15 @@ import type { Grant, Message } from "@inboxlink/core";
 import { resetAccessTokenCacheForTests } from "./access-token-cache.js";
 import { PgDatabase, PostgresStore, PostgresTokenVault } from "./db/postgres-store.js";
 import type { SqlExecutor } from "./db/sql.js";
+import { minimiseMessage } from "./message-rules.js";
 import { createApp } from "./routes/app.js";
 import { applyGmailPushNotification } from "./sync/gmail-push.js";
 import { MemoryStore, type GrantStore } from "./store.js";
 import { MemoryTokenVault } from "./vault/memory-vault.js";
 import { createWebhookBus } from "./webhooks/deliver.js";
+
+/** Five days ago, in whole seconds: inside the store's 30-day time limit (issue #86). */
+const RECENT_BASE = Math.floor((Date.now() - 5 * 86_400_000) / 1000) * 1000;
 
 /**
  * Guards against reading the whole message cache (full payloads) on hot paths:
@@ -52,7 +56,7 @@ function countFullReads(store: GrantStore): { count: () => number } {
 /** Statements that pull message payloads without a LIMIT (i.e. the whole cache). */
 function unboundedPayloadReads(executor: RecordingPgliteExecutor): string[] {
   return executor.statements.filter(
-    (sql) => /SELECT payload FROM messages/i.test(sql) && !/\bLIMIT\b/i.test(sql),
+    (sql) => /SELECT .*\bpayload\b.* FROM messages/i.test(sql) && !/\bLIMIT\b/i.test(sql),
   );
 }
 
@@ -79,7 +83,7 @@ async function postgresBackend(): Promise<Backend> {
   const db = new PgDatabase(executor);
   return {
     name: "postgres",
-    store: new PostgresStore(db),
+    store: new PostgresStore(db, { masterKey: "test-master-key-at-least-16" }),
     vault: new PostgresTokenVault(db, MASTER),
     executor,
     close: () => pg.close(),
@@ -177,7 +181,7 @@ before(async () => {
           threadId: `thread-${id}`,
           labelIds: ["INBOX"],
           snippet: `Snippet ${id}`,
-          internalDate: String(internalDates[id] ?? 1_710_000_000_000),
+          internalDate: String(internalDates[id] ?? RECENT_BASE),
           payload: {
             mimeType: "text/plain",
             headers: [
@@ -251,7 +255,8 @@ for (const makeBackend of BACKENDS) {
       await vault.seal(REFRESH, { grantId: grant.id, tenantId: grant.tenantId });
 
       // Out-of-order inserts, plus ties on receivedAt to exercise the id tie-break.
-      const base = 1_700_000_000_000;
+      // Inside the store's 30-day time limit.
+      const base = RECENT_BASE;
       const all = [
         cached(grant.id, "m-03", base + 3_000),
         cached(grant.id, "m-01", base + 1_000),
@@ -302,10 +307,10 @@ for (const makeBackend of BACKENDS) {
         assert.deepEqual(walked, referencePage(all, 0, all.length).ids);
       }
 
-      // Full payloads come back on each page (API response unchanged).
+      // Each page carries the metadata the store keeps (issue #86): no body, no addresses.
       const first = await app.request(`/v1/grants/${grant.id}/messages?limit=1`);
       const firstBody = (await first.json()) as { messages: Message[] };
-      assert.deepEqual(firstBody.messages[0], all.find((m) => m.providerMessageId === "m-09"));
+      assert.deepEqual(firstBody.messages[0], minimiseMessage(all.find((m) => m.providerMessageId === "m-09")!));
 
       // A cursor past the end answers an empty page without a next cursor.
       const past = await app.request(`/v1/grants/${grant.id}/messages?cursor=50`);
@@ -317,7 +322,7 @@ for (const makeBackend of BACKENDS) {
       if (backend.executor) {
         const listed = backend.executor.statements.slice(statementsBefore);
         assert.deepEqual(unboundedPayloadReads(backend.executor), []);
-        assert.ok(listed.some((sql) => /SELECT payload FROM messages .*LIMIT/i.test(sql)));
+        assert.ok(listed.some((sql) => /SELECT .*\bpayload\b.* FROM messages .*LIMIT/i.test(sql)));
       }
       await backend.close();
     });
@@ -340,7 +345,8 @@ for (const makeBackend of BACKENDS) {
         value: "4000",
         updatedAt: new Date().toISOString(),
       });
-      const base = 1_700_000_000_000;
+      // Inside the store's 30-day time limit.
+      const base = RECENT_BASE;
       await store.upsertMessages([
         cached(grant.id, "old-1", base + 1_000),
         cached(grant.id, "old-2", base + 2_000),
@@ -412,7 +418,6 @@ for (const makeBackend of BACKENDS) {
           messageId: row.id,
           providerMessageId: row.providerMessageId,
           threadId: row.threadId,
-          subject: row.subject,
           receivedAt: row.receivedAt,
         });
       }
@@ -420,7 +425,7 @@ for (const makeBackend of BACKENDS) {
       assert.equal(fullReads.count(), 0, "push must not load the whole cache");
       if (backend.executor) {
         assert.deepEqual(
-          pushSql.filter((sql) => /SELECT payload FROM messages/i.test(sql)),
+          pushSql.filter((sql) => /SELECT .*\bpayload\b.* FROM messages/i.test(sql)),
           [],
           "push reads no message payloads at all",
         );

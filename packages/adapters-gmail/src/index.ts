@@ -1,6 +1,7 @@
 import type { MailboxAdapter, Message } from "@inboxlink/core";
 import {
   collectAttachments,
+  gmailFolderIds,
   normalizeGmailMessage,
   type GmailMessageResource,
 } from "./normalize.js";
@@ -96,7 +97,7 @@ async function gmailApiError(res: Response): Promise<GmailApiError> {
   return new GmailApiError(res.status, reason);
 }
 
-export { collectAttachments, normalizeGmailMessage, type GmailMessageResource };
+export { collectAttachments, gmailFolderIds, normalizeGmailMessage, type GmailMessageResource };
 
 const DEFAULT_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const DEFAULT_TOKEN = "https://oauth2.googleapis.com/token";
@@ -320,6 +321,19 @@ export class GmailAdapter implements MailboxAdapter {
   }
 
   /**
+   * Fetch one message's metadata (`format=metadata`: labels, snippet, From/To/Cc/Subject/Date).
+   * The body is never requested. Used by sync, which stores metadata only.
+   */
+  async getMessageMetadata(input: {
+    accessToken: string;
+    grantId: string;
+    messageId: string;
+  }): Promise<Message | undefined> {
+    const base = gmailBase(this.config.gmailApiBaseUrl);
+    return this.fetchNormalizedMessage(base, input.accessToken, input.grantId, input.messageId, "metadata");
+  }
+
+  /**
    * Incremental mailbox changes after `startHistoryId` (Gmail `users.history.list`).
    * A 404 means the watermark is too old — callers should bootstrap with a full sync.
    */
@@ -418,7 +432,8 @@ export type GmailHistoryPage = {
 export type GmailHistoryRecord = {
   id?: string;
   messages?: { id?: string; threadId?: string }[];
-  messagesAdded?: { message?: { id?: string; threadId?: string } }[];
+  /** `message.labelIds` is the message's labels when it was added (Gmail sends them). */
+  messagesAdded?: { message?: { id?: string; threadId?: string; labelIds?: string[] } }[];
   messagesDeleted?: { message?: { id?: string; threadId?: string } }[];
   labelsAdded?: { message?: { id?: string }; labelIds?: string[] }[];
   labelsRemoved?: { message?: { id?: string }; labelIds?: string[] }[];

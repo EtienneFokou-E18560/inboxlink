@@ -5,6 +5,7 @@ import {
   parseTenantSecrets,
 } from "./auth.js";
 import { parseAllowedRedirectOrigins } from "./grants-public.js";
+import { DEFAULT_MESSAGE_TTL_DAYS } from "./message-rules.js";
 
 export type ServerConfig = {
   port: number;
@@ -64,6 +65,11 @@ export type ServerConfig = {
    * Vercel Cron / GitHub Actions send `Authorization: Bearer <CRON_SECRET>`.
    */
   cronSecret?: string;
+  /**
+   * Days the synced store keeps a message (`INBOXLINK_MESSAGE_TTL_DAYS`, server-wide).
+   * Unset or not a positive number: 30.
+   */
+  messageTtlDays: number;
   /**
    * Expected `aud` of the OIDC token Pub/Sub attaches to push requests
    * (`GMAIL_PUSH_OIDC_AUDIENCE`). Enables signed-JWT verification on the push route.
@@ -137,6 +143,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     gmailPubsubTopic: optionalTrimmed(env.GMAIL_PUBSUB_TOPIC),
     gmailPushSecret: optionalTrimmed(env.GMAIL_PUSH_SECRET),
     cronSecret: optionalTrimmed(env.CRON_SECRET),
+    messageTtlDays: positiveInt(env.INBOXLINK_MESSAGE_TTL_DAYS, DEFAULT_MESSAGE_TTL_DAYS),
     gmailPushOidcAudience: optionalTrimmed(env.GMAIL_PUSH_OIDC_AUDIENCE),
     gmailPushOidcEmail: optionalTrimmed(env.GMAIL_PUSH_OIDC_EMAIL),
   };

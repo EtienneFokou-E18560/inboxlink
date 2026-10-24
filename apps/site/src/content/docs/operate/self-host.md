@@ -32,6 +32,7 @@ in memory: fine for a demo, never for real mailboxes.
 | `INBOXLINK_API_SECRET`, `INBOXLINK_TENANT_SECRETS` | API secrets per tenant in `multi` mode |
 | `ALLOWED_REDIRECT_ORIGINS` | Which host origins may receive Connect redirects |
 | `INBOXLINK_CONNECT_POLICY` | Tenants that reuse a grant on reconnect (`tenantId=reuse`) |
+| `INBOXLINK_MESSAGE_TTL_DAYS` | Days the synced store keeps a message (default 30); older rows go at each sync and in the `drain-sync-jobs` cron |
 | `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUSH_SECRET`, `CRON_SECRET` | Gmail push and scheduled jobs |
 
 Never put values in git, issues or chat. See [`.env.example`](https://github.com/EtienneFokou-E18560/inboxlink/blob/main/.env.example).

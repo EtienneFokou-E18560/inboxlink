@@ -64,7 +64,7 @@ after(async () => {
 });
 
 function pair(db: PgDatabase) {
-  const store = new PostgresStore(db);
+  const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
   const vault = new PostgresTokenVault(db, "test-master-key-at-least-16");
   const gmail = new GmailAdapter({
     clientId: "test-client-id.apps.googleusercontent.com",
@@ -197,7 +197,7 @@ describe("shared Postgres store across instances", () => {
   it("consumes oauth_state once and GCs expired link_sessions", async () => {
     const pg = new PGlite();
     const db = new PgDatabase(new PgliteExecutor(pg));
-    const store = new PostgresStore(db);
+    const store = new PostgresStore(db, { masterKey: "test-master-key-at-least-16" });
     await store.ready();
 
     const live = await store.createSession({
