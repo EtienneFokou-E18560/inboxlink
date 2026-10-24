@@ -902,3 +902,118 @@ describe("issue #86 review: startup DDL on an upgraded database", () => {
     assert.ok(racing.statements.some((s) => /messages_minimised_received_idx/.test(s)));
   });
 });
+
+describe("issue #101: mail restored from the trash or spam comes back into the store", () => {
+  function fetchedIds(): string[] {
+    return messageGets().map((url) => decodeURIComponent(url.split("/messages/")[1]!.split("?")[0]!)).sort();
+  }
+
+  async function storedInbox(grantId: string, ids: string[]) {
+    const { store, vault } = await pgSetup();
+    resources = Object.fromEntries(ids.map((id) => [id, { labels: ["INBOX", "UNREAD"], ageDays: 1 }]));
+    listIds = [...ids];
+    profileHistoryId = "1400";
+    const grant = await connect(store, vault, grantId);
+    await sync(store, vault, grant);
+    assert.deepEqual((await store.listMessageIds(grant.id)).sort(), [...ids].sort());
+    return { store, vault, grant };
+  }
+
+  it("trash then restore stores the message again", async () => {
+    const { store, vault, grant } = await storedInbox("grant_trash_restore", ["note-from-bea"]);
+
+    // Trashed: Gmail keeps INBOX on it, so the row goes because of TRASH.
+    resources["note-from-bea"] = { labels: ["INBOX", "TRASH"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1500",
+        history: [{ id: "1401", labelsAdded: [{ message: { id: "note-from-bea" }, labelIds: ["TRASH"] }] }],
+      },
+    ];
+    assert.equal((await sync(store, vault, grant)).status, "ok");
+    assert.deepEqual(await store.listMessageIds(grant.id), []);
+
+    // Restored: the event only removes TRASH.
+    resources["note-from-bea"] = { labels: ["INBOX"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1600",
+        history: [{ id: "1501", labelsRemoved: [{ message: { id: "note-from-bea" }, labelIds: ["TRASH"] }] }],
+      },
+    ];
+    hits = [];
+    const result = await sync(store, vault, grant);
+    assert.equal(result.status, "ok");
+    assert.deepEqual(fetchedIds(), ["note-from-bea"]);
+    assert.deepEqual(await store.listMessageIds(grant.id), ["note-from-bea"]);
+    assert.equal(result.upserted, 1);
+  });
+
+  it("spam then not spam stores the message again", async () => {
+    const { store, vault, grant } = await storedInbox("grant_spam_restore", ["offer-from-cal"]);
+
+    resources["offer-from-cal"] = { labels: ["INBOX", "SPAM"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1500",
+        history: [{ id: "1401", labelsAdded: [{ message: { id: "offer-from-cal" }, labelIds: ["SPAM"] }] }],
+      },
+    ];
+    await sync(store, vault, grant);
+    assert.deepEqual(await store.listMessageIds(grant.id), []);
+
+    resources["offer-from-cal"] = { labels: ["INBOX"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1600",
+        history: [{ id: "1501", labelsRemoved: [{ message: { id: "offer-from-cal" }, labelIds: ["SPAM"] }] }],
+      },
+    ];
+    hits = [];
+    assert.equal((await sync(store, vault, grant)).status, "ok");
+    assert.deepEqual(fetchedIds(), ["offer-from-cal"]);
+    assert.deepEqual(await store.listMessageIds(grant.id), ["offer-from-cal"]);
+  });
+
+  it("mail that arrived in spam and is marked not spam in the same batch is stored", async () => {
+    const { store, vault, grant } = await storedInbox("grant_spam_arrival", []);
+
+    resources["hello-from-dot"] = { labels: ["INBOX"], ageDays: 0 };
+    historyPages = [
+      {
+        historyId: "1500",
+        history: [
+          { id: "1401", messagesAdded: [{ message: { id: "hello-from-dot", labelIds: ["INBOX", "SPAM"] } }] },
+          { id: "1402", labelsRemoved: [{ message: { id: "hello-from-dot" }, labelIds: ["SPAM"] }] },
+        ],
+      },
+    ];
+    hits = [];
+    await sync(store, vault, grant);
+    assert.deepEqual(fetchedIds(), ["hello-from-dot"]);
+    assert.deepEqual(await store.listMessageIds(grant.id), ["hello-from-dot"]);
+  });
+
+  it("restoring sent mail fetches it but stores nothing; starring sent or archived mail fetches nothing", async () => {
+    const { store, vault, grant } = await storedInbox("grant_restore_sent", []);
+
+    resources["reply-to-eli"] = { labels: ["SENT"], ageDays: 1 };
+    resources["starred-sent"] = { labels: ["SENT", "STARRED"], ageDays: 1 };
+    resources["starred-archived"] = { labels: ["CATEGORY_UPDATES", "STARRED"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1500",
+        history: [
+          { id: "1401", labelsRemoved: [{ message: { id: "reply-to-eli" }, labelIds: ["TRASH"] }] },
+          { id: "1402", labelsAdded: [{ message: { id: "starred-sent" }, labelIds: ["STARRED"] }] },
+          { id: "1403", labelsAdded: [{ message: { id: "starred-archived" }, labelIds: ["STARRED"] }] },
+          { id: "1404", labelsRemoved: [{ message: { id: "starred-archived" }, labelIds: ["UNREAD"] }] },
+        ],
+      },
+    ];
+    hits = [];
+    assert.equal((await sync(store, vault, grant)).status, "ok");
+    assert.deepEqual(fetchedIds(), ["reply-to-eli"], "only the restored message is looked at");
+    assert.deepEqual(await store.listMessageIds(grant.id), []);
+  });
+});

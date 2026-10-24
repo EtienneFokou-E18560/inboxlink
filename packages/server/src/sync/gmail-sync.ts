@@ -236,7 +236,7 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
   const added = new Set<string>();
   const deleted = new Set<string>();
   const touched = new Set<string>();
-  /** Touched by an event that adds INBOX: worth a look even when not stored yet. */
+  /** Touched by an event that adds INBOX or removes TRASH/SPAM: worth a look even when not stored yet. */
   const inboxAdded = new Set<string>();
   /** Added outside the inbox (sent mail, drafts...): not fetched, not stored. */
   const skipped = new Set<string>();
@@ -362,9 +362,15 @@ function applyHistoryRecord(
   }
   for (const entry of record.labelsRemoved ?? []) {
     const id = entry.message?.id;
-    if (id) touched.add(id);
+    if (!id) continue;
+    touched.add(id);
+    // Restored from trash or spam (issue #101): Gmail may keep INBOX on it, so this is the only sign.
+    if (entry.labelIds?.some((label) => RESTORE_LABELS.has(label))) inboxAdded.add(id);
   }
 }
+
+/** Removing one of these may put a message back in the inbox without an INBOX event. */
+const RESTORE_LABELS = new Set(["TRASH", "SPAM"]);
 
 /** Run async work over items with a fixed worker pool (order of completion free). */
 async function mapWithConcurrency<T>(
