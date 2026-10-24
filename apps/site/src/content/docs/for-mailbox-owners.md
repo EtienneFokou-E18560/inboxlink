@@ -5,9 +5,9 @@ sidebar:
   label: For mailbox owners
 ---
 
-An app you use asked you to connect your Gmail account, and the sign-in page
-said **InboxLink**. This page explains what that means for your mail, in plain
-words.
+An app you use asked you to connect your Gmail account, and sent you through a
+page titled **InboxLink** before Google's sign-in. This page explains what that
+means for your mail, in plain words.
 
 ## What InboxLink is
 
@@ -16,11 +16,13 @@ asked InboxLink to connect your mailbox so that the app itself never holds
 your Google password or the key that lets it read your mail. InboxLink keeps
 that key locked away and reads mail **for that app only**.
 
-## Why Google's screen says InboxLink
+## Why Google's screen shows a different name
 
-Google shows the name of whoever holds the access, and that is InboxLink, not
-the app. This is on purpose: the app gets mail through InboxLink and never
-holds the key itself.
+Google's permission screen shows the name registered for InboxLink's Google
+sign-in. Today that name is **Askel**, an app made by
+[CIELTD](https://cieltd.org), the company that runs InboxLink. Whatever name
+Google shows, the permission goes to InboxLink: it keeps the key and reads mail
+only for the app that sent you, which never holds the key itself.
 
 ## What the app can see
 
@@ -62,7 +64,8 @@ Any of these stops access:
    deletes the stored key and the copied messages for that connection.
 2. **In your Google account**: open
    [Google Account → Third-party connections](https://myaccount.google.com/connections),
-   find InboxLink and remove its access. Access stops at once; the app will
+   find **Askel** (the name InboxLink's Google sign-in uses today) and remove
+   its access. Access stops at once; the app will
    ask you to connect again if you keep using it.
 3. **Ask for deletion**: email
    [efokou@cieltd.org](mailto:efokou@cieltd.org) with the app you used and
