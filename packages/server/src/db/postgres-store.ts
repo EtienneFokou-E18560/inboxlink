@@ -11,7 +11,12 @@ import { newId, openSecret, randomToken, sealSecret } from "@inboxlink/core";
 import { gmailFolderIds } from "@inboxlink/adapters-gmail";
 import { log } from "../log.js";
 import { minimiseMessage } from "../message-rules.js";
-import { deriveMessageKey, openMessageField, sealMessageField } from "../message-seal.js";
+import {
+  deriveMessageKey,
+  openMessageField,
+  sealMessageField,
+  type MessageField,
+} from "../message-seal.js";
 import type {
   DeleteExpiredMessagesInput,
   EnqueueSyncJobInput,
@@ -57,15 +62,88 @@ export class PgDatabase {
   }
 
   private async migrate(): Promise<void> {
+    // One catalog read up front: statements whose effect is already in place are
+    // skipped, so a cold start on an up-to-date database takes no ACCESS EXCLUSIVE
+    // (ALTER TABLE) or SHARE (CREATE INDEX) lock. Decided on the state before this
+    // run; a statement for something missing from it always runs.
+    const catalog = await this.readCatalog();
     for (const statement of sqlStatements(SCHEMA_SQL + TENANT_SQL)) {
+      if (catalog && alreadyApplied(statement, catalog)) continue;
       try {
         await this.sql.exec(statement);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/already exists/i.test(message)) throw err;
+        if (!isAlreadyExistsError(err)) throw err;
       }
     }
   }
+
+  private async readCatalog(): Promise<Catalog | undefined> {
+    try {
+      const columns = await this.sql.query<{
+        table_name: string;
+        column_name: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `SELECT table_name, column_name, is_nullable, column_default
+         FROM information_schema.columns WHERE table_schema = current_schema()`,
+        [],
+      );
+      const indexes = await this.sql.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`,
+        [],
+      );
+      return {
+        columns: new Map(
+          columns.map((c) => [
+            `${c.table_name}.${c.column_name}`,
+            { nullable: c.is_nullable === "YES", hasDefault: c.column_default !== null },
+          ]),
+        ),
+        indexes: new Set(indexes.map((i) => i.indexname)),
+      };
+    } catch {
+      // Without the catalog every statement runs, as before.
+      return undefined;
+    }
+  }
+}
+
+type Catalog = {
+  columns: Map<string, { nullable: boolean; hasDefault: boolean }>;
+  indexes: Set<string>;
+};
+
+/** True when the catalog already shows what this ALTER TABLE / CREATE INDEX would do. */
+function alreadyApplied(statement: string, catalog: Catalog): boolean {
+  const sql = statement.replace(/^\s*(--[^\n]*\n\s*)*/, "");
+  let m = /^ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)/i.exec(sql);
+  if (m) return catalog.columns.has(`${m[1]}.${m[2]}`);
+  m = /^ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL\s*$/i.exec(sql);
+  if (m) return catalog.columns.get(`${m[1]}.${m[2]}`)?.nullable === true;
+  m = /^ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP DEFAULT\s*$/i.exec(sql);
+  if (m) {
+    const column = catalog.columns.get(`${m[1]}.${m[2]}`);
+    return column !== undefined && !column.hasDefault;
+  }
+  m = /^CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)/i.exec(sql);
+  if (m) return catalog.indexes.has(m[1]!);
+  return false;
+}
+
+/**
+ * `IF NOT EXISTS` is not atomic: two cold starts creating the same index or table
+ * at once can fail on the catalog's own unique index (`pg_class_relname_nsp_index`,
+ * `pg_type_typname_nsp_index`) instead of "already exists". Both mean done.
+ */
+export function isAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/already exists/i.test(message)) return true;
+  const code = (err as { code?: unknown } | null)?.code;
+  return (
+    (code === "23505" || /duplicate key value/i.test(message)) &&
+    /pg_(class|type)_\w*nsp_index/.test(message)
+  );
 }
 
 type SessionRow = {
@@ -504,8 +582,8 @@ export class PostgresStore implements GrantStore {
       providerIds.push(message.providerMessageId);
       threadIds.push(message.threadId ?? null);
       labels.push(JSON.stringify(message.labels ?? []));
-      subjectCts.push(this.seal(message.subject, message.grantId, "subject"));
-      snippetCts.push(this.seal(message.snippet, message.grantId, "snippet"));
+      subjectCts.push(this.seal(message.subject, message, "subject"));
+      snippetCts.push(this.seal(message.snippet, message, "snippet"));
       receivedAts.push(message.receivedAt);
     }
     await this.db.sql.query(
@@ -579,14 +657,23 @@ export class PostgresStore implements GrantStore {
     return Number(rows[0]?.n ?? 0);
   }
 
-  private seal(plaintext: string, grantId: string, field: "subject" | "snippet"): string {
-    return Buffer.from(sealMessageField(this.messageKey, plaintext, { grantId, field })).toString("base64");
+  private seal(
+    plaintext: string,
+    message: Pick<Message, "grantId" | "providerMessageId">,
+    field: MessageField,
+  ): string {
+    const context = { grantId: message.grantId, providerMessageId: message.providerMessageId, field };
+    return Buffer.from(sealMessageField(this.messageKey, plaintext, context)).toString("base64");
   }
 
-  private open(ciphertext: unknown, grantId: string, field: "subject" | "snippet"): string | undefined {
+  private open(ciphertext: unknown, row: MessageRow, field: MessageField): string | undefined {
     if (ciphertext === null || ciphertext === undefined) return "";
     try {
-      return openMessageField(this.messageKey, asBytes(ciphertext), { grantId, field });
+      return openMessageField(this.messageKey, asBytes(ciphertext), {
+        grantId: row.grant_id,
+        providerMessageId: row.provider_message_id,
+        field,
+      });
     } catch {
       return undefined;
     }
@@ -602,8 +689,8 @@ export class PostgresStore implements GrantStore {
         if (message) messages.push(message);
         continue;
       }
-      const subject = this.open(row.subject_ct, row.grant_id, "subject");
-      const snippet = this.open(row.snippet_ct, row.grant_id, "snippet");
+      const subject = this.open(row.subject_ct, row, "subject");
+      const snippet = this.open(row.snippet_ct, row, "snippet");
       if (subject === undefined || snippet === undefined) unreadable += 1;
       const labels = asStringArray(row.labels);
       const receivedAt = asIso(row.received_at);

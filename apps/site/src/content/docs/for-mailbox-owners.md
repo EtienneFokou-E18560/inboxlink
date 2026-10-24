@@ -44,7 +44,12 @@ only for the app that sent you, which never holds the key itself.
 |---|---|---|
 | Your email address | To know which mailbox the connection is for | You disconnect |
 | The access key Google issued, encrypted | To keep reading mail for the app without asking you to sign in every time | You disconnect, or Google stops it |
-| For messages in your inbox from the last 30 days: the subject and preview line (encrypted), labels and dates. No message text, no addresses, no sent mail | So the app can list your mail quickly | 30 days after the message arrived, when it leaves your inbox, or when you disconnect |
+| For messages in your inbox from the last 30 days: the subject and preview line (encrypted), labels and dates. No message text, no addresses, no sent mail (see the note below) | So the app can list your mail quickly | 30 days after the message arrived, when it leaves your inbox, or when you disconnect |
+
+These message rules apply to mail synced from version 0.3.0 (October 2026) on.
+If your connection existed before that, the copies made earlier keep the
+details they were stored with, which can include message text, addresses and
+sent mail, until you disconnect. Disconnecting deletes them.
 
 Your Google password never reaches InboxLink or the app: you type it on
 Google's own page.

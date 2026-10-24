@@ -56,7 +56,7 @@ export function renderPrivacyPage(opts: LegalPageOptions = {}): string {
       ],
       [
         "How it is protected",
-        `<p>Refresh credentials are encrypted at rest (AES-256-GCM) and are never returned by the API. The host app receives an opaque grant ID, not your credential. Logs redact tokens and secrets. Data is stored in a managed Postgres database. For messages it keeps in sync, InboxLink stores only inbox messages, without their text, addresses or attachment names; their subject and snippet are encrypted at rest (AES-256-GCM). Sent mail is never stored.</p>`,
+        `<p>Refresh credentials are encrypted at rest (AES-256-GCM) and are never returned by the API. The host app receives an opaque grant ID, not your credential. Logs redact tokens and secrets. Data is stored in a managed Postgres database. For messages synced since this rule took effect (version 0.3.0, October 2026), InboxLink stores only inbox messages, without their text, addresses or attachment names; their subject and snippet are encrypted at rest (AES-256-GCM), and sent mail is not stored. Copies made before then for a connection that already existed keep the details they were stored with (which can include message text, addresses and sent mail) until you disconnect, which deletes them.</p>`,
       ],
       [
         "Who receives it",
@@ -64,7 +64,7 @@ export function renderPrivacyPage(opts: LegalPageOptions = {}): string {
       ],
       [
         "Keeping and deleting",
-        `<p>Data is kept while the connection is active. Stored message details are deleted 30 days after the message arrived, or sooner when it leaves the inbox. Disconnecting (revoking the grant) deletes the stored credential and the stored messages for that connection. You can also revoke InboxLink's access from your Google account permissions page at any time, which stops all access immediately. To ask for deletion, use the contact below.</p>`,
+        `<p>Data is kept while the connection is active. Message details stored since version 0.3.0 are deleted 30 days after the message arrived, or sooner when it leaves the inbox; copies made before then stay until you disconnect. Disconnecting (revoking the grant) deletes the stored credential and the stored messages for that connection. You can also revoke InboxLink's access from your Google account permissions page at any time, which stops all access immediately. To ask for deletion, use the contact below.</p>`,
       ],
     ],
     opts,

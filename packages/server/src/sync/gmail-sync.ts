@@ -236,7 +236,9 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
   const added = new Set<string>();
   const deleted = new Set<string>();
   const touched = new Set<string>();
-  /** Added outside the inbox (sent mail, drafts...): never fetched, never stored. */
+  /** Touched by an event that adds INBOX: worth a look even when not stored yet. */
+  const inboxAdded = new Set<string>();
+  /** Added outside the inbox (sent mail, drafts...): not fetched, not stored. */
   const skipped = new Set<string>();
   let historyId = startHistoryId;
   let pageToken: string | undefined;
@@ -249,7 +251,7 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
     });
     historyId = page.historyId;
     for (const record of page.history) {
-      applyHistoryRecord(record, added, deleted, touched, skipped);
+      applyHistoryRecord(record, { added, deleted, touched, inboxAdded, skipped });
     }
     if (!page.nextPageToken) break;
     pageToken = page.nextPageToken;
@@ -260,9 +262,19 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
     touched.delete(id);
     skipped.delete(id);
   }
-  // A later label change (moved into the inbox) still gets a look.
-  for (const id of touched) skipped.delete(id);
-  for (const id of skipped) added.delete(id);
+  // A later move into the inbox still gets a look.
+  for (const id of inboxAdded) skipped.delete(id);
+  for (const id of skipped) {
+    added.delete(id);
+    touched.delete(id);
+  }
+  // Any other label change matters only for a message the store already holds
+  // (it may have left the inbox). Sent or archived mail is never fetched for it.
+  const unsure = [...touched].filter((id) => !inboxAdded.has(id) && !added.has(id));
+  if (unsure.length) {
+    const stored = new Set(await store.listMessageIds(grant.id));
+    for (const id of unsure) if (!stored.has(id)) touched.delete(id);
+  }
 
   const toFetch = [...new Set([...added, ...touched])];
   const fetched: Message[] = [];
@@ -321,11 +333,15 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
 
 function applyHistoryRecord(
   record: GmailHistoryRecord,
-  added: Set<string>,
-  deleted: Set<string>,
-  touched: Set<string>,
-  skipped: Set<string>,
+  sets: {
+    added: Set<string>;
+    deleted: Set<string>;
+    touched: Set<string>;
+    inboxAdded: Set<string>;
+    skipped: Set<string>;
+  },
 ): void {
+  const { added, deleted, touched, inboxAdded, skipped } = sets;
   for (const entry of record.messagesAdded ?? []) {
     const id = entry.message?.id;
     if (!id) continue;
@@ -340,7 +356,9 @@ function applyHistoryRecord(
   }
   for (const entry of record.labelsAdded ?? []) {
     const id = entry.message?.id;
-    if (id) touched.add(id);
+    if (!id) continue;
+    touched.add(id);
+    if (entry.labelIds?.includes("INBOX")) inboxAdded.add(id);
   }
   for (const entry of record.labelsRemoved ?? []) {
     const id = entry.message?.id;

@@ -332,11 +332,12 @@ describe("issue #86: no bodies, encrypted subject and snippet", () => {
 
   it("ciphertext opens only for its own grant and key", () => {
     const key = deriveMessageKey(MASTER);
-    const sealed = sealMessageField(key, "Interview on Tuesday", { grantId: "grant_a", field: "subject" });
-    assert.equal(openMessageField(key, sealed, { grantId: "grant_a", field: "subject" }), "Interview on Tuesday");
-    assert.throws(() => openMessageField(key, sealed, { grantId: "grant_b", field: "subject" }));
-    assert.throws(() => openMessageField(key, sealed, { grantId: "grant_a", field: "snippet" }));
-    assert.throws(() => openMessageField(deriveMessageKey("another-master-key-123"), sealed, { grantId: "grant_a", field: "subject" }));
+    const ctx = { grantId: "grant_a", providerMessageId: "m-1", field: "subject" as const };
+    const sealed = sealMessageField(key, "Interview on Tuesday", ctx);
+    assert.equal(openMessageField(key, sealed, ctx), "Interview on Tuesday");
+    assert.throws(() => openMessageField(key, sealed, { ...ctx, grantId: "grant_b" }));
+    assert.throws(() => openMessageField(key, sealed, { ...ctx, field: "snippet" }));
+    assert.throws(() => openMessageField(deriveMessageKey("another-master-key-123"), sealed, ctx));
     // Its own key: the vault's key (sha256 of the master key) does not open it.
     assert.notDeepEqual(key, Buffer.from(MASTER));
   });
@@ -795,5 +796,109 @@ describe("issue #86: live reads are unchanged", () => {
     assert.equal(oneBody.message.from[0]!.email, "ada@example.com");
 
     assert.deepEqual((await pglite.query(`SELECT * FROM messages ORDER BY id`)).rows, rowsBefore);
+  });
+});
+
+describe("issue #86 review: label changes on mail the store does not keep", () => {
+  it("fetches a touched message only when the event adds INBOX or the message is stored", async () => {
+    const { store, vault } = await pgSetup();
+    resources = { "in-1": { labels: ["INBOX", "UNREAD"], ageDays: 1 } };
+    listIds = ["in-1"];
+    profileHistoryId = "1200";
+    const grant = await connect(store, vault, "grant_touched_rule");
+    await sync(store, vault, grant);
+
+    resources["sent-9"] = { labels: ["SENT", "STARRED"], ageDays: 1 };
+    resources["archived-9"] = { labels: ["CATEGORY_UPDATES"], ageDays: 1 };
+    resources["moved-in"] = { labels: ["INBOX"], ageDays: 1 };
+    resources["in-1"] = { labels: ["INBOX"], ageDays: 1 };
+    historyPages = [
+      {
+        historyId: "1300",
+        history: [
+          { id: "1201", labelsAdded: [{ message: { id: "sent-9" }, labelIds: ["STARRED"] }] },
+          { id: "1202", labelsRemoved: [{ message: { id: "archived-9" }, labelIds: ["UNREAD"] }] },
+          { id: "1203", labelsAdded: [{ message: { id: "moved-in" }, labelIds: ["INBOX"] }] },
+          { id: "1204", labelsRemoved: [{ message: { id: "in-1" }, labelIds: ["UNREAD"] }] },
+        ],
+      },
+    ];
+    hits = [];
+    const result = await sync(store, vault, grant);
+    assert.equal(result.status, "ok");
+    const fetched = messageGets().map((url) => decodeURIComponent(url.split("/messages/")[1]!.split("?")[0]!)).sort();
+    assert.deepEqual(fetched, ["in-1", "moved-in"], "sent and archived mail is not fetched on a label change");
+    assert.deepEqual((await store.listMessageIds(grant.id)).sort(), ["in-1", "moved-in"]);
+  });
+});
+
+describe("issue #86 review: ciphertext is bound to its message", () => {
+  it("a subject sealed for one message does not open as another message of the same grant", () => {
+    const key = deriveMessageKey(MASTER);
+    const ctx = { grantId: "grant_a", providerMessageId: "m-acme", field: "subject" as const };
+    const sealed = sealMessageField(key, "Offer from Acme", ctx);
+    assert.equal(openMessageField(key, sealed, ctx), "Offer from Acme");
+    assert.throws(() => openMessageField(key, sealed, { ...ctx, providerMessageId: "m-globex" }));
+  });
+
+  it("a subject copied onto another row of the same grant reads empty", async () => {
+    const { pglite, store, vault } = await pgSetup();
+    resources = {
+      acme: { labels: ["INBOX"], ageDays: 1, subject: "Offer from Acme" },
+      globex: { labels: ["INBOX"], ageDays: 2, subject: "Hello from Globex" },
+    };
+    listIds = ["acme", "globex"];
+    const grant = await connect(store, vault, "grant_swap");
+    await sync(store, vault, grant);
+    await pglite.query(
+      `UPDATE messages SET subject_ct = (SELECT subject_ct FROM messages WHERE provider_message_id = 'acme')
+       WHERE provider_message_id = 'globex'`,
+    );
+    const page = await store.listMessagesPage(grant.id, { offset: 0, limit: 10 });
+    const globex = page.messages.find((m) => m.providerMessageId === "globex")!;
+    assert.equal(globex.subject, "");
+    assert.equal(page.messages.find((m) => m.providerMessageId === "acme")!.subject, "Offer from Acme");
+  });
+});
+
+describe("issue #86 review: startup DDL on an upgraded database", () => {
+  class RecordingExecutor extends PgliteExecutor {
+    readonly statements: string[] = [];
+    constructor(db: PGlite, private readonly failOn?: RegExp) {
+      super(db);
+    }
+    override async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
+      this.statements.push(text);
+      return super.query<T>(text, params);
+    }
+    override async exec(text: string): Promise<void> {
+      this.statements.push(text);
+      if (this.failOn?.test(text)) {
+        // What a concurrent cold start that created the same index first looks like.
+        const err = new Error(
+          'duplicate key value violates unique constraint "pg_class_relname_nsp_index"',
+        ) as Error & { code: string };
+        err.code = "23505";
+        throw err;
+      }
+      await super.exec(text);
+    }
+  }
+
+  it("a cold start on an up-to-date database runs no ALTER TABLE and no CREATE INDEX", async () => {
+    const pglite = new PGlite();
+    await new PgDatabase(new PgliteExecutor(pglite)).ensure();
+    const recorder = new RecordingExecutor(pglite);
+    await new PgDatabase(recorder).ensure();
+    const locking = recorder.statements.filter((s) => /\bALTER TABLE\b|\bCREATE (UNIQUE )?INDEX\b/i.test(s));
+    assert.deepEqual(locking, []);
+  });
+
+  it("an index another cold start created at the same moment counts as already there", async () => {
+    const pglite = new PGlite();
+    await pglite.exec(`DROP INDEX IF EXISTS messages_minimised_received_idx`);
+    const racing = new RecordingExecutor(pglite, /messages_minimised_received_idx/);
+    await new PgDatabase(racing).ensure();
+    assert.ok(racing.statements.some((s) => /messages_minimised_received_idx/.test(s)));
   });
 });

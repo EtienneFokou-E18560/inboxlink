@@ -20,7 +20,7 @@ description: How InboxLink protects mailbox access, and how to report a vulnerab
 |---|---|---|
 | Google refresh token | Encrypted in the vault (AES-256-GCM), never returned by the API | The grant is revoked or replaced |
 | Mailbox address, `externalUserId`, grant status | Postgres | The grant is revoked. A replaced grant keeps this record (no token, no messages) so your app can see `replaced: true` |
-| Synced inbox messages: ids, thread, received time, labels, and the subject and snippet encrypted (AES-256-GCM, a key derived from the master key with its own label, grant id as additional data). No bodies, addresses, attachment names or sent mail | Postgres | `INBOXLINK_MESSAGE_TTL_DAYS` (30) after the message arrived, when it leaves the inbox, or when the grant is revoked or replaced |
+| Synced inbox messages: ids, thread, received time, labels, and the subject and snippet encrypted (AES-256-GCM, a key derived from the master key with its own label, the grant and message ids as additional data). No bodies, addresses, attachment names or sent mail | Postgres | `INBOXLINK_MESSAGE_TTL_DAYS` (30) after the message arrived, when it leaves the inbox, or when the grant is revoked or replaced |
 | Access tokens | Server memory only, short-lived | They expire |
 
 **Never stored:** the person's Google password (typed on Google's page only),

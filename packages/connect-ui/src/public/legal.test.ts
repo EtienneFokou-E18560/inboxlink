@@ -20,3 +20,13 @@ describe("legal pages", () => {
     assert.match(html, /&quot;y&quot;&lt;z&gt;/);
   });
 });
+
+describe("privacy page: message rules from 0.3.0 (inboxlink #86)", () => {
+  it("says the new storage rules cover mail synced from 0.3.0 and older copies stay until disconnect", () => {
+    const html = renderPrivacyPage();
+    assert.match(html, /synced since this rule took effect \(version 0\.3\.0/);
+    assert.match(html, /Copies made before then[^<]*until you disconnect, which deletes them/);
+    assert.match(html, /stored since version 0\.3\.0 are deleted 30 days after/);
+    assert.doesNotMatch(html, /the subject line\)/);
+  });
+});
