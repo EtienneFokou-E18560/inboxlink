@@ -22,7 +22,8 @@ What the cache keeps (since 0.3.0):
 
 - **Inbox mail only.** Mail without the `INBOX` label, and anything labelled
   `SENT`, `DRAFT`, `SPAM` or `TRASH`, is not cached. A cached message that leaves
-  the inbox (archived, trashed) is removed at the next sync.
+  the inbox (archived, trashed) is removed at the next sync. One restored from
+  the trash or spam is cached again at the next sync.
 - **Metadata only.** Ids, thread, `receivedAt`, labels, subject and snippet. No
   bodies, addresses or attachment names. Subject and snippet are encrypted at
   rest. Sync reads messages with Gmail `format=metadata`, never in full.
