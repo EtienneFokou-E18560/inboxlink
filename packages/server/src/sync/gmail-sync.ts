@@ -19,6 +19,7 @@ import {
   minimiseMessage,
   positiveTtlDays,
 } from "../message-rules.js";
+import { log } from "../log.js";
 import type { GrantStore } from "../store.js";
 
 /** Cap the first look's list page size; upsert only — never wipe prior cache. */
@@ -30,7 +31,8 @@ export type { CiphertextVault };
 
 export type SyncResult = {
   grantId: string;
-  status: "ok" | "needs_reauth" | "gmail_unavailable";
+  /** `store_unavailable`: the InboxLink store failed (issue #100); Gmail was fine. */
+  status: "ok" | "needs_reauth" | "gmail_unavailable" | "store_unavailable";
   mode: "bootstrap" | "incremental";
   historyId?: string;
   upserted: number;
@@ -121,6 +123,25 @@ export async function syncGmailGrantDetailed(
     if (firstLookDone) return await restartFromNow(run);
     return await runBootstrap(run);
   } catch (err) {
+    if (err instanceof StoreWriteError) {
+      // Not Google's fault: say so, and keep the grant as it is. The next sync retries.
+      log.warn("sync_store_failed", {
+        grantId,
+        tenantId: grant.tenantId,
+        step: err.step,
+        code: err.code,
+        error: err.reason.slice(0, 200),
+      });
+      return withoutMessages({
+        grantId,
+        status: "store_unavailable",
+        mode: force ? "bootstrap" : "incremental",
+        upserted: 0,
+        deleted: 0,
+        expired,
+        error: "store_unavailable",
+      });
+    }
     if (gmailRequiresReconnect(err)) {
       getAccessTokenCache().invalidate(grantId);
       const stale = !(await markNeedsReauth(store, grant)) && (await reusedSince(store, grant));
@@ -158,6 +179,31 @@ export async function syncGmailGrantDetailed(
   }
 }
 
+/** A store call made during a sync failed; carries no message content. */
+class StoreWriteError extends Error {
+  readonly reason: string;
+  readonly code: string | undefined;
+  constructor(
+    readonly step: string,
+    cause: unknown,
+  ) {
+    super(`store_unavailable: ${step}`);
+    this.name = "StoreWriteError";
+    this.reason = cause instanceof Error ? cause.message : String(cause);
+    const code = (cause as { code?: unknown } | null)?.code;
+    this.code = typeof code === "string" ? code : undefined;
+  }
+}
+
+/** Run one store step of a sync; a failure becomes a `StoreWriteError`, never a Gmail error. */
+async function storeStep<T>(step: string, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (err) {
+    throw new StoreWriteError(step, err);
+  }
+}
+
 function withoutMessages(result: SyncResult): DetailedSyncResult {
   return { result, upsertedMessages: [] };
 }
@@ -191,10 +237,10 @@ async function runBootstrap(input: RunInput): Promise<DetailedSyncResult> {
   });
   const kept = storable(page.messages, input.cutoff);
   // Upsert only — do not deleteMessages. Prior cache rows outside this page stay.
-  if (kept.length) await store.upsertMessages(kept);
+  if (kept.length) await storeStep("upsert_messages", () => store.upsertMessages(kept));
   const profile = await gmail.getProfile(accessToken);
   await putHistoryCursor(store, grant.id, profile.historyId, input.nowMs);
-  await store.markFirstLook(grant.id, new Date(input.nowMs).toISOString());
+  await storeStep("mark_first_look", () => store.markFirstLook(grant.id, new Date(input.nowMs).toISOString()));
   return {
     result: {
       grantId: grant.id,
@@ -272,7 +318,7 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
   // (it may have left the inbox). Sent or archived mail is never fetched for it.
   const unsure = [...touched].filter((id) => !inboxAdded.has(id) && !added.has(id));
   if (unsure.length) {
-    const stored = new Set(await store.listMessageIds(grant.id));
+    const stored = new Set(await storeStep("list_message_ids", () => store.listMessageIds(grant.id)));
     for (const id of unsure) if (!stored.has(id)) touched.delete(id);
   }
 
@@ -309,11 +355,15 @@ async function runIncremental(input: RunInput & { startHistoryId: string }): Pro
     ...skipped,
   ];
 
-  if (upserts.length) await store.upsertMessages(upserts);
+  if (upserts.length) await storeStep("upsert_messages", () => store.upsertMessages(upserts));
   const deleteIds = [...deleted];
-  if (deleteIds.length) await store.deleteMessagesByProviderIds(grant.id, deleteIds);
+  if (deleteIds.length) {
+    await storeStep("delete_messages", () => store.deleteMessagesByProviderIds(grant.id, deleteIds));
+  }
   if (leftInbox.length) {
-    await store.deleteMessagesByProviderIds(grant.id, leftInbox, { minimisedOnly: true });
+    await storeStep("delete_messages", () =>
+      store.deleteMessagesByProviderIds(grant.id, leftInbox, { minimisedOnly: true }),
+    );
   }
   await putHistoryCursor(store, grant.id, historyId, input.nowMs);
 
@@ -414,5 +464,5 @@ async function putHistoryCursor(
     value: historyId,
     updatedAt: new Date(nowMs).toISOString(),
   };
-  await store.putSyncCursor(cursor);
+  await storeStep("put_sync_cursor", () => store.putSyncCursor(cursor));
 }

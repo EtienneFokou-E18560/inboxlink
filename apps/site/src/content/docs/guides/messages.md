@@ -71,6 +71,10 @@ Returns the full message, including the body and attachment metadata (id,
 filename, MIME type, size), not attachment bytes. The id can be InboxLink's
 `msg_…` id or the Gmail id.
 
+A message id is unique within its grant, not across grants: when the same
+mailbox is connected by two grants, each grant has its own copy of a message
+under the same `msg_…` id. Key what you store by `grantId` and `id` together.
+
 ## Errors
 
 | Status | `error` | What to do |

@@ -6,6 +6,7 @@ import {
   customType,
   uniqueIndex,
   index,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -128,7 +129,8 @@ export const syncJobs = pgTable(
 export const messages = pgTable(
   "messages",
   {
-    id: text("id").primaryKey(),
+    /** `msg_<gmailId>`: unique per grant only (issue #100), so the key is (grant_id, id). */
+    id: text("id").notNull(),
     grantId: text("grant_id")
       .notNull()
       .references(() => grants.id, { onDelete: "cascade" }),
@@ -149,6 +151,7 @@ export const messages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    primaryKey({ name: "messages_grant_pkey", columns: [t.grantId, t.id] }),
     uniqueIndex("messages_grant_provider_idx").on(t.grantId, t.providerMessageId),
     index("messages_grant_received_idx").on(t.grantId, t.receivedAt.desc()),
     index("messages_minimised_received_idx").on(t.receivedAt).where(sql`payload IS NULL`),
@@ -246,7 +249,7 @@ ALTER TABLE sync_cursors ADD COLUMN IF NOT EXISTS first_look_at TIMESTAMPTZ DEFA
 ALTER TABLE sync_cursors ALTER COLUMN first_look_at DROP DEFAULT;
 
 CREATE TABLE IF NOT EXISTS messages (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   grant_id TEXT NOT NULL REFERENCES grants(id) ON DELETE CASCADE,
   provider_message_id TEXT NOT NULL,
   thread_id TEXT,
@@ -255,6 +258,7 @@ CREATE TABLE IF NOT EXISTS messages (
   payload JSONB NOT NULL,
   received_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT messages_grant_pkey PRIMARY KEY (grant_id, id),
   UNIQUE (grant_id, provider_message_id)
 );
 -- Issue #86: new rows keep metadata only (payload NULL, subject and snippet encrypted).
@@ -263,6 +267,13 @@ ALTER TABLE messages ALTER COLUMN payload DROP NOT NULL;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS labels JSONB;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS subject_ct BYTEA;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS snippet_ct BYTEA;
+-- Issue #100: the same mailbox under two grants holds the same Gmail ids, so a
+-- message id is unique per grant only. The key moves from (id) to (grant_id, id).
+-- Ids and rows stay as they are. Build the new unique index first (SHARE lock:
+-- reads go on), then swap the key in one statement (brief ACCESS EXCLUSIVE). Both
+-- are skipped once the catalog shows messages_grant_pkey as the primary key.
+CREATE UNIQUE INDEX IF NOT EXISTS messages_grant_pkey ON messages (grant_id, id);
+ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_pkey, ADD CONSTRAINT messages_grant_pkey PRIMARY KEY USING INDEX messages_grant_pkey;
 
 CREATE TABLE IF NOT EXISTS sync_jobs (
   id TEXT PRIMARY KEY,
