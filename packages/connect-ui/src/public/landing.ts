@@ -15,9 +15,8 @@ const DEFAULT_NPM = "https://www.npmjs.com/package/@inboxlink/sdk";
 const DEFAULT_HEALTH = "/health";
 
 /**
- * `GET /home`: the API domain's home page. Google's OAuth consent screen names this
- * URL as the app's home page, so it stays here (same domain as /privacy and /terms);
- * the docs live on the website.
+ * `GET /home`: the API domain's home page for people who land here; the docs live on the website.
+ * (Google's consent screen is branded Askel and names getaskel.com as its home page, not this page.)
  */
 export function renderLandingPage(links: LandingPageLinks = {}): string {
   const githubUrl = escapeHtml(links.githubUrl ?? DEFAULT_GITHUB);

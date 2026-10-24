@@ -213,7 +213,7 @@ export function createApp(opts: CreateAppOptions) {
   app.get("/status", healthHtml);
   app.get("/status/", healthHtml);
 
-  /** Home page named on Google's OAuth consent screen: keep it on this domain. */
+  /** The API domain's own home page; it links to the website. */
   app.get("/home", (c) => c.html(renderLandingPage()));
   app.get("/home/", (c) => c.html(renderLandingPage()));
   // The docs moved to the website (apps/site); old links keep working.
