@@ -22,6 +22,8 @@ export default defineConfig({
           content:
             'if (location.hostname === "getinboxlink.vercel.app") location.replace("https://inboxlink.cieltd.org" + location.pathname + location.search + location.hash);',
         },
+        // Vercel Web Analytics (served by Vercel on the same origin once enabled for the project).
+        { tag: "script", attrs: { defer: true, src: "/_vercel/insights/script.js" } },
       ],
       social: [{ icon: "github", label: "GitHub", href: repo }],
       editLink: { baseUrl: `${repo}/edit/main/apps/site/` },
